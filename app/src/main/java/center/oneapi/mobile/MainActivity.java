@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
     private ImageButton activeSendButton;
     private LinearLayout attachmentPreviewHost;
     private LinearLayout extensionPreviewHost;
+    private LinearLayout logDetailHost;
     private String activeComposerMode = "";
     private String selectedCliModel = "";
     private String selectedReasoning = "关闭思考";
@@ -116,6 +117,7 @@ public class MainActivity extends Activity {
     private boolean requestRunning = false;
     private boolean cliRefreshRunning = false;
     private long lastCliRefreshAt = 0L;
+    private final Set<String> autoScrolledSections = new HashSet<>();
     private final List<Uri> selectedAttachmentUris = new ArrayList<>();
     private final List<JSONObject> selectedExtensionRefs = new ArrayList<>();
 
@@ -159,7 +161,9 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_PICK_IMAGE && resultCode == RESULT_OK && data != null) {
             appendSelectedImages(data);
             renderAttachmentPreview();
-            toast(selectedAttachmentUris.isEmpty() ? "未选择图片" : "已选择图片");
+            if (selectedAttachmentUris.isEmpty()) {
+                toast("未选择图片");
+            }
         }
     }
 
@@ -227,7 +231,6 @@ public class MainActivity extends Activity {
                     prefs.edit().putString("user_id", String.valueOf(data.optInt("id"))).apply();
                 }
                 ui(() -> {
-                    toast("登录成功");
                     showMain();
                 });
             });
@@ -316,7 +319,7 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1);
             lp.setMargins(dp(3), 0, dp(3), 0);
             topNav.addView(b, lp);
-            if (i == 1) {
+            if (i < navItems.length - 1) {
                 TextView separator = copy("·");
                 separator.setGravity(Gravity.CENTER);
                 separator.setTextColor(Color.rgb(112, 124, 146));
@@ -352,7 +355,7 @@ public class MainActivity extends Activity {
             });
             panel.addView(entry);
         }
-        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(dp(288), -2);
+        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(dp(236), -2);
         panelLp.gravity = Gravity.END | Gravity.TOP;
         panelLp.setMargins(0, dp(70), dp(14), 0);
         overlay.addView(panel, panelLp);
@@ -433,13 +436,14 @@ public class MainActivity extends Activity {
                 if (text.isEmpty()) {
                     continue;
                 }
+                long timestamp = item.optLong("timestamp", 0);
                 if ("image".equals(type)) {
-                    content.addView(imageResultBubble(text));
+                    content.addView(imageResultBubble(text, timestamp));
                 } else {
-                    content.addView(messageBubble(role, text));
+                    content.addView(messageBubble(role, text, timestamp));
                 }
             }
-            scrollToBottom();
+            scrollToBottomOnce("local:" + mode);
         }, 80);
     }
 
@@ -488,23 +492,14 @@ public class MainActivity extends Activity {
 
     private void renderMe() {
         content.addView(sectionTitle("系统设置"));
-        LinearLayout bind = cardPanel();
-        bind.addView(bold("设备绑定"));
-        bind.addView(copy("一个 Android 应用只能绑定一个当前账号下在线客户端，一个客户端也只允许被一个应用绑定。"));
-        Button refresh = primary("刷新设备");
-        refresh.setOnClickListener(v -> refreshDevices(true));
-        bind.addView(gap(10));
-        bind.addView(refresh, compactFullButtonLp());
-        content.addView(bind);
+        renderAnnouncementsModule();
+        renderVersionModule();
 
         LinearLayout list = vertical();
         list.setTag("device_list");
         content.addView(list);
         renderDeviceList(list, new JSONArray());
         refreshDevices(true);
-
-        renderAnnouncementsModule();
-        renderVersionModule();
 
         LinearLayout account = cardPanel();
         account.addView(bold("账户"));
@@ -641,7 +636,6 @@ public class MainActivity extends Activity {
                 } else {
                     action.setText("检查更新");
                     action.setTag("");
-                    toast("当前已经是最新版本");
                 }
             });
         });
@@ -748,7 +742,6 @@ public class MainActivity extends Activity {
         send.setOnClickListener(v -> {
             if (requestRunning) {
                 setSending(false);
-                toast("已停止当前发送");
                 return;
             }
             sendAction.run();
@@ -769,22 +762,20 @@ public class MainActivity extends Activity {
             addToolButton(left, R.drawable.tool_module, "AI 模型选择", () -> showModelChoice("AI 模型选择", chatModelOptions(), selectedChatModel, "chat", value -> {
                 selectedChatModel = value;
                 prefs.edit().putString("selected_chat_model", value).apply();
-                toast("已选择 " + value);
             }));
             addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", chatAssistantOptions(), selectedChatAssistant, value -> {
                 selectedChatAssistant = value;
                 prefs.edit().putString("selected_chat_assistant", value).apply();
-                toast("已选择 " + value);
+                createLocalConversation("chat");
+                renderSection();
             }));
             addToolButton(left, R.drawable.tool_think, "Thinking", () -> showChoice("Thinking", list("关闭思考", "低", "中", "高"), selectedReasoning, value -> {
                 selectedReasoning = value;
                 prefs.edit().putString("selected_reasoning", value).apply();
-                toast("已选择 " + value);
             }));
             addToolButton(left, R.drawable.tool_text, "上下文长度", () -> showChoice("上下文长度", list("自动", "短上下文", "长上下文"), selectedContextWindow, value -> {
                 selectedContextWindow = value;
                 prefs.edit().putString("selected_context_window", value).apply();
-                toast("已选择 " + value);
             }));
             return;
         }
@@ -794,21 +785,19 @@ public class MainActivity extends Activity {
             addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", imageAssistantOptions(), selectedImageAssistant, value -> {
                 selectedImageAssistant = value;
                 prefs.edit().putString("selected_image_assistant", value).apply();
-                toast("已选择 " + value);
+                createLocalConversation("image");
+                renderSection();
             }));
             addToolButton(left, R.drawable.tool_size, "尺寸", () -> showChoice("尺寸", list("1024x1024", "1024x1536", "1536x1024"), selectedImageSize, value -> {
                 selectedImageSize = value;
                 prefs.edit().putString("selected_image_size", value).apply();
-                toast("已选择 " + value);
             }));
             addToolButton(left, R.drawable.tool_ratio, "分辨率", () -> showChoice("分辨率", list("标准", "高清", "极致"), selectedImageQuality, value -> {
                 selectedImageQuality = value;
                 prefs.edit().putString("selected_image_quality", value).apply();
-                toast("已选择 " + value);
             }));
             addToolButton(left, R.drawable.tool_random, "随机", () -> {
                 imageRandomSeed = !imageRandomSeed;
-                toast(imageRandomSeed ? "已开启随机参数" : "已关闭随机参数");
             });
             return;
         }
@@ -817,7 +806,6 @@ public class MainActivity extends Activity {
             addToolButton(left, selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority, "权限模式", () -> showChoice("权限模式", list("受限模式", "全权限模式"), selectedPermission, value -> {
                 selectedPermission = value;
                 prefs.edit().putString("selected_permission", value).apply();
-                toast("已切换 " + value);
                 renderSection();
             }));
             addToolButton(left, R.drawable.tool_module, "AI 模型选择", () -> showModelChoice("AI 模型选择", "codex".equals(mode) ? codexModels : claudeModels, selectedCliModelFor(mode), mode, value -> {
@@ -828,12 +816,10 @@ public class MainActivity extends Activity {
                     selectedClaudeModel = value;
                     prefs.edit().putString("selected_claude_model", value).apply();
                 }
-                toast("已选择 " + value);
             }));
             addToolButton(left, R.drawable.tool_think, "Thinking", () -> showChoice("Thinking", list("关闭思考", "低", "中", "高"), selectedReasoning, value -> {
                 selectedReasoning = value;
                 prefs.edit().putString("selected_reasoning", value).apply();
-                toast("已选择 " + value);
             }));
             addToolButton(left, R.drawable.tool_skill, "Skill/Plugin", () -> showExtensionsChoice(mode));
         }
@@ -867,7 +853,7 @@ public class MainActivity extends Activity {
             Uri uri = selectedAttachmentUris.get(i);
             FrameLayout thumbBox = new FrameLayout(this);
             ImageView thumb = new ImageView(this);
-            thumb.setImageURI(uri);
+            setImageSource(thumb, uri.toString());
             thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
             thumb.setBackground(round(Color.WHITE, dp(12), LINE));
             thumb.setContentDescription("已选择图片预览");
@@ -912,7 +898,7 @@ public class MainActivity extends Activity {
         titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
         panel.addView(titleRow);
         ImageView preview = new ImageView(this);
-        preview.setImageURI(uri);
+        setImageSource(preview, uri.toString());
         preview.setAdjustViewBounds(true);
         preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
         LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(-1, dp(420));
@@ -1059,7 +1045,7 @@ public class MainActivity extends Activity {
             }
         }
         if (names.isEmpty()) {
-            names.addAll(list("通用绘图", "图片编辑", "风格生成", "商业海报", "产品摄影", "头像生成", "插画创作", "数字艺术创作助手"));
+            names.addAll(list("通用绘图", "图片编辑", "动画与漫画", "游戏", "复古与赛博朋克", "电影与动画", "角色设计", "字体设计和海报", "插图", "水彩画", "水墨与中国风", "像素艺术", "等距视角", "产品与食品", "品牌系统与标识", "摄影", "信息图表和实地指南", "数字艺术创作助手"));
         }
         return names;
     }
@@ -1102,17 +1088,56 @@ public class MainActivity extends Activity {
         if ("图片编辑".equals(name)) {
             return "图片编辑：" + prompt;
         }
+        if ("动画与漫画".equals(name)) {
+            return "动画漫画风格，干净赛璐璐线稿，表情鲜明，动态构图，原创角色，" + prompt;
+        }
+        if ("游戏".equals(name)) {
+            return "现代游戏截图或游戏主视觉风格，场景可读，光影精致，具备可玩空间逻辑，" + prompt;
+        }
+        if ("复古与赛博朋克".equals(name)) {
+            return "复古未来赛博朋克风格，霓虹、铬金属、CRT 光效和清晰网格构图，" + prompt;
+        }
+        if ("电影与动画".equals(name)) {
+            return "电影级动画定格画面，强镜头感、关键光、情绪明确、叙事清晰，" + prompt;
+        }
+        if ("角色设计".equals(name)) {
+            return "角色设计设定图，包含清晰轮廓、服装材质、表情和生产级设计板效果，" + prompt;
+        }
+        if ("字体设计和海报".equals(name)) {
+            return "海报版式与字体层级优先，文字清晰可读，负空间和画面节奏专业，" + prompt;
+        }
+        if ("水彩画".equals(name)) {
+            return "水彩插画风格，纸张肌理、晕染、透明叠色和柔和边缘，" + prompt;
+        }
+        if ("水墨与中国风".equals(name)) {
+            return "水墨中国风，笔触、墨色扩散、宣纸肌理、留白和雅致构图，" + prompt;
+        }
+        if ("像素艺术".equals(name)) {
+            return "像素艺术风格，清晰栅格、有限色盘、游戏素材感、边缘锐利，" + prompt;
+        }
+        if ("等距视角".equals(name)) {
+            return "等距视角场景，网格逻辑精准、层高关系清楚、模块化道具，" + prompt;
+        }
+        if ("品牌系统与标识".equals(name)) {
+            return "品牌系统展示板，原创标识、配色、字体层级、包装或社媒延展，" + prompt;
+        }
         if ("商业海报".equals(name)) {
             return "商业海报风格，高级排版，清晰主体，" + prompt;
         }
-        if ("产品摄影".equals(name)) {
+        if ("产品摄影".equals(name) || "产品与食品".equals(name)) {
             return "产品摄影风格，真实光影，干净背景，" + prompt;
         }
         if ("头像生成".equals(name)) {
             return "高质量头像，细节清晰，" + prompt;
         }
-        if ("插画创作".equals(name) || "数字艺术创作助手".equals(name)) {
+        if ("插画创作".equals(name) || "插图".equals(name) || "数字艺术创作助手".equals(name)) {
             return "数字插画艺术风格，构图完整，" + prompt;
+        }
+        if ("摄影".equals(name)) {
+            return "真实摄影风格，明确拍摄语境、可信镜头、自然瑕疵和场景光线，" + prompt;
+        }
+        if ("信息图表和实地指南".equals(name)) {
+            return "信息图表和实地指南风格，结构清晰、标签可读、图文层级明确，" + prompt;
         }
         return prompt;
     }
@@ -1180,8 +1205,7 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    private JSONObject ensureLocalSession(String mode, String firstPrompt) throws Exception {
-        JSONObject root = localConversationStore(mode);
+    private JSONObject ensureLocalSession(String mode, JSONObject root, String firstPrompt) throws Exception {
         String id = activeLocalSessionId(mode);
         JSONObject session = findLocalSession(root, id);
         if (session != null && !localConversationGroup(mode).equals(session.optString("group"))) {
@@ -1200,6 +1224,29 @@ public class MainActivity extends Activity {
             setActiveLocalSessionId(mode, id);
         }
         return session;
+    }
+
+    private void createLocalConversation(String mode) {
+        try {
+            JSONObject root = localConversationStore(mode);
+            JSONArray sessions = root.optJSONArray("sessions");
+            if (sessions == null) {
+                sessions = new JSONArray();
+                root.put("sessions", sessions);
+            }
+            String id = mode + "-" + System.currentTimeMillis();
+            JSONObject session = new JSONObject()
+                    .put("id", id)
+                    .put("group", localConversationGroup(mode))
+                    .put("title", "新会话")
+                    .put("updatedAt", System.currentTimeMillis())
+                    .put("messages", new JSONArray());
+            sessions.put(session);
+            setActiveLocalSessionId(mode, id);
+            trimLocalSessions(root);
+            saveLocalConversationStore(mode, root);
+        } catch (Exception ignored) {
+        }
     }
 
     private String cleanSessionTitle(String prompt) {
@@ -1227,7 +1274,7 @@ public class MainActivity extends Activity {
         }
         try {
             JSONObject root = localConversationStore(mode);
-            JSONObject session = ensureLocalSession(mode, clean);
+            JSONObject session = ensureLocalSession(mode, root, clean);
             JSONArray messages = session.optJSONArray("messages");
             if (messages == null) {
                 messages = new JSONArray();
@@ -1274,6 +1321,7 @@ public class MainActivity extends Activity {
             toast("请输入消息");
             return;
         }
+        JSONArray contextMessages = chatContextMessagesForRequest();
         hideKeyboard(activeInput);
         setSending(true);
         activeInput.setText("");
@@ -1282,10 +1330,10 @@ public class MainActivity extends Activity {
         renderAttachmentPreview();
         saveLocalRecent("chat", selectedChatAssistant, prompt);
         appendLocalConversation("chat", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt));
+        content.addView(messageBubble("user", prompt, System.currentTimeMillis()));
         scrollToBottom();
-        TextView live = addStreamingBubble("assistant");
-        live.setText("Thinking\n正在思考...");
+        TextView live = addStreamingBubble("assistant", System.currentTimeMillis());
+        live.setText("正在思考...");
         scrollToBottom();
         runNetwork(() -> {
             JSONObject body = new JSONObject();
@@ -1297,6 +1345,12 @@ public class MainActivity extends Activity {
             }
             JSONArray messages = new JSONArray();
             messages.put(new JSONObject().put("role", "system").put("content", assistantPrompt(selectedChatAssistant) + "\n上下文长度：" + selectedContextWindow));
+            for (int i = 0; i < contextMessages.length(); i++) {
+                JSONObject item = contextMessages.optJSONObject(i);
+                if (item != null) {
+                    messages.put(item);
+                }
+            }
             if (attachments.isEmpty()) {
                 messages.put(new JSONObject().put("role", "user").put("content", prompt));
             } else {
@@ -1324,6 +1378,50 @@ public class MainActivity extends Activity {
         });
     }
 
+    private JSONArray chatContextMessagesForRequest() {
+        JSONArray out = new JSONArray();
+        JSONArray history = localConversationMessages("chat");
+        int limit = contextMessageLimit();
+        int start = Math.max(0, history.length() - limit);
+        for (int i = start; i < history.length(); i++) {
+            JSONObject item = history.optJSONObject(i);
+            if (item == null || !"text".equals(item.optString("type", "text"))) {
+                continue;
+            }
+            String role = item.optString("role", "");
+            if (!"user".equals(role) && !"assistant".equals(role)) {
+                continue;
+            }
+            String text = cleanDisplayText(item.optString("text", ""));
+            if (text.isEmpty()) {
+                continue;
+            }
+            try {
+                out.put(new JSONObject().put("role", role).put("content", trimAssistantContext(text)));
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
+    }
+
+    private int contextMessageLimit() {
+        if (selectedContextWindow.contains("短")) {
+            return 6;
+        }
+        if (selectedContextWindow.contains("长")) {
+            return 20;
+        }
+        return 12;
+    }
+
+    private String trimAssistantContext(String text) {
+        String value = cleanDisplayText(text);
+        if (value.length() <= 4000) {
+            return value;
+        }
+        return value.substring(value.length() - 4000);
+    }
+
     private void sendImageMessage() {
         String prompt = trim(activeInput);
         if (prompt.isEmpty()) {
@@ -1338,7 +1436,7 @@ public class MainActivity extends Activity {
         renderAttachmentPreview();
         saveLocalRecent("image", selectedImageAssistant, prompt);
         appendLocalConversation("image", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt));
+        content.addView(messageBubble("user", prompt, System.currentTimeMillis()));
         scrollToBottom();
         LinearLayout progress = addImageProgressBubble();
         scrollToBottom();
@@ -1354,8 +1452,11 @@ public class MainActivity extends Activity {
                 body.put("seed", System.currentTimeMillis() % 1000000);
             }
             if (!attachments.isEmpty()) {
-                String dataUrl = uriToDataUrl(attachments.get(0));
-                body.put("reference_image", dataUrl.isEmpty() ? attachments.get(0).toString() : dataUrl);
+                String source = attachments.get(0).toString();
+                String dataUrl = source.startsWith("http://") || source.startsWith("https://") || source.startsWith("data:image/")
+                        ? source
+                        : uriToDataUrl(attachments.get(0));
+                body.put("reference_image", dataUrl.isEmpty() ? source : dataUrl);
             }
             JSONObject response = api("POST", "/pg/images/generations", body);
             String text = extractImageText(response);
@@ -1522,18 +1623,110 @@ public class MainActivity extends Activity {
 
     private String renderLiveChatText(String thinking, String answer) {
         StringBuilder out = new StringBuilder();
-        if (!thinking.trim().isEmpty()) {
-            out.append("Thinking\n").append(thinking.trim()).append("\n\n");
+        String[] normalized = normalizeThinkingAndAnswer(thinking, answer);
+        if (!normalized[0].trim().isEmpty()) {
+            out.append("思考过程\n").append(normalized[0].trim()).append("\n\n");
         }
-        out.append(answer);
+        out.append(normalized[1]);
         return out.toString();
+    }
+
+    private String[] normalizeThinkingAndAnswer(String thinking, String answer) {
+        String resolvedThinking = cleanDisplayText(thinking);
+        String resolvedAnswer = cleanDisplayText(answer);
+        String[] extracted = extractTaggedThinking(resolvedAnswer, "think");
+        if (extracted[0].isEmpty()) {
+            extracted = extractTaggedThinking(resolvedAnswer, "thinking");
+        }
+        if (!extracted[0].isEmpty()) {
+            resolvedThinking = joinNonEmpty(resolvedThinking, extracted[0]);
+            resolvedAnswer = extracted[1];
+        }
+        if (resolvedAnswer.startsWith("Thinking\n")) {
+            int split = resolvedAnswer.indexOf("\n\n");
+            if (split > 0) {
+                resolvedThinking = joinNonEmpty(resolvedThinking, resolvedAnswer.substring("Thinking\n".length(), split));
+                resolvedAnswer = resolvedAnswer.substring(split + 2).trim();
+            } else {
+                resolvedAnswer = resolvedAnswer.substring("Thinking\n".length()).trim();
+            }
+        }
+        return new String[]{resolvedThinking, resolvedAnswer};
+    }
+
+    private String[] extractTaggedThinking(String value, String tag) {
+        String text = value == null ? "" : value;
+        String lower = text.toLowerCase(Locale.ROOT);
+        String open = "<" + tag + ">";
+        String close = "</" + tag + ">";
+        StringBuilder thinking = new StringBuilder();
+        StringBuilder answer = new StringBuilder();
+        int cursor = 0;
+        while (true) {
+            int start = lower.indexOf(open, cursor);
+            if (start < 0) {
+                answer.append(text.substring(cursor));
+                break;
+            }
+            answer.append(text, cursor, start);
+            int contentStart = start + open.length();
+            int end = lower.indexOf(close, contentStart);
+            if (end < 0) {
+                thinking.append(text.substring(contentStart));
+                cursor = text.length();
+                break;
+            }
+            thinking.append(text, contentStart, end).append('\n');
+            cursor = end + close.length();
+        }
+        return new String[]{cleanDisplayText(thinking.toString()), cleanDisplayText(answer.toString())};
+    }
+
+    private String joinNonEmpty(String first, String second) {
+        String left = cleanDisplayText(first);
+        String right = cleanDisplayText(second);
+        if (left.isEmpty()) return right;
+        if (right.isEmpty()) return left;
+        return left + "\n" + right;
     }
 
     private String cleanJsonString(JSONObject object, String key) {
         if (object == null || key == null || !object.has(key) || object.isNull(key)) {
             return "";
         }
-        return cleanDisplayText(object.optString(key, ""));
+        return cleanDisplayText(jsonValueToText(object.opt(key)));
+    }
+
+    private String jsonValueToText(Object value) {
+        if (value == null || value == JSONObject.NULL) {
+            return "";
+        }
+        if (value instanceof String) {
+            return (String) value;
+        }
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < array.length(); i++) {
+                String part = jsonValueToText(array.opt(i));
+                if (!part.trim().isEmpty()) {
+                    if (out.length() > 0) out.append('\n');
+                    out.append(part);
+                }
+            }
+            return out.toString();
+        }
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            for (String key : new String[]{"text", "content", "summary", "value"}) {
+                String part = jsonValueToText(object.opt(key));
+                if (!part.trim().isEmpty()) {
+                    return part;
+                }
+            }
+            return "";
+        }
+        return String.valueOf(value);
     }
 
     private String cleanDisplayText(String text) {
@@ -1609,16 +1802,28 @@ public class MainActivity extends Activity {
             JSONObject profile = api("GET", "/api/user/self", null).optJSONObject("data");
             JSONObject billing = api("GET", "/api/user/topup/self?p=1&page_size=3", null).optJSONObject("data");
             JSONObject usage = api("GET", "/api/log/self?p=1&page_size=50", null).optJSONObject("data");
+            Object plansData = null;
+            JSONObject subscriptions = null;
+            try {
+                plansData = api("GET", "/api/subscription/plans", null).opt("data");
+            } catch (Exception ignored) {
+            }
+            try {
+                subscriptions = api("GET", "/api/subscription/self", null).optJSONObject("data");
+            } catch (Exception ignored) {
+            }
+            JSONArray plans = plansData instanceof JSONArray ? (JSONArray) plansData : new JSONArray();
+            JSONObject finalSubscriptions = subscriptions == null ? new JSONObject() : subscriptions;
             ui(() -> {
                 View maybe = content == null ? null : content.findViewWithTag("wallet_list");
                 if (maybe instanceof LinearLayout) {
-                    renderWalletList((LinearLayout) maybe, profile == null ? new JSONObject() : profile, billing == null ? new JSONObject() : billing, usage == null ? new JSONObject() : usage);
+                    renderWalletList((LinearLayout) maybe, profile == null ? new JSONObject() : profile, billing == null ? new JSONObject() : billing, usage == null ? new JSONObject() : usage, plans, finalSubscriptions);
                 }
             });
         });
     }
 
-    private void renderWalletList(LinearLayout list, JSONObject profile, JSONObject billing, JSONObject usage) {
+    private void renderWalletList(LinearLayout list, JSONObject profile, JSONObject billing, JSONObject usage, JSONArray plans, JSONObject subscriptions) {
         list.removeAllViews();
         LinearLayout overview = cardPanel();
         overview.addView(bold("钱包总览"));
@@ -1636,20 +1841,13 @@ public class MainActivity extends Activity {
         if (items == null || items.length() == 0) {
             bills.addView(copy("暂无最近账单。"));
         } else {
-            double maxAmount = 1;
-            for (int i = 0; i < Math.min(items.length(), 3); i++) {
-                JSONObject item = items.optJSONObject(i);
-                if (item != null) {
-                    maxAmount = Math.max(maxAmount, Math.abs(item.optDouble("amount", item.optDouble("money", 0))));
-                }
-            }
             for (int i = 0; i < Math.min(items.length(), 3); i++) {
                 JSONObject item = items.optJSONObject(i);
                 if (item == null) {
                     continue;
                 }
                 double amount = Math.abs(item.optDouble("amount", item.optDouble("money", 0)));
-                bills.addView(billingRow(formatBillingLabel(item) + " · " + formatPlainPrice(item.optDouble("money", amount)) + " 元", amount / maxAmount));
+                bills.addView(billingRow(formatBillingLabel(item) + " · " + formatPlainPrice(item.optDouble("money", amount)) + " 元", resolveBillingUsageRatio(item, plans, subscriptions)));
             }
         }
         list.addView(bills);
@@ -1790,9 +1988,6 @@ public class MainActivity extends Activity {
                 chatAssistants.addAll(chat);
                 imageAssistants.clear();
                 imageAssistants.addAll(image);
-                if (showToast) {
-                    toast("助手已同步");
-                }
             });
         });
     }
@@ -1834,9 +2029,6 @@ public class MainActivity extends Activity {
                 if (maybe instanceof LinearLayout) {
                     renderDeviceList((LinearLayout) maybe, finalDevices);
                 }
-                if (showToast) {
-                    toast("设备状态已刷新");
-                }
             });
         });
     }
@@ -1844,7 +2036,16 @@ public class MainActivity extends Activity {
     private void renderDeviceList(LinearLayout list, JSONArray devices) {
         list.removeAllViews();
         if (devices.length() == 0) {
-            list.addView(card("暂无客户端", "请打开 PC/Mac 客户端并登录同一账号，客户端在线后会自动出现在这里。"));
+            LinearLayout empty = cardPanel();
+            LinearLayout head = horizontal();
+            head.addView(bold("暂无客户端"), new LinearLayout.LayoutParams(0, -2, 1));
+            Button refresh = iconButton("↻");
+            refresh.setContentDescription("刷新设备");
+            refresh.setOnClickListener(v -> refreshDevices(true));
+            head.addView(refresh, new LinearLayout.LayoutParams(dp(32), dp(32)));
+            empty.addView(head);
+            empty.addView(copy("请打开 PC/Mac 客户端并登录同一账号，客户端在线后会自动出现在这里。"));
+            list.addView(empty);
             return;
         }
         for (int i = 0; i < devices.length(); i++) {
@@ -1858,7 +2059,15 @@ public class MainActivity extends Activity {
             if (!current) {
                 row.setBackground(round(Color.argb(154, 238, 241, 246), dp(18), Color.argb(92, 158, 169, 188)));
             }
-            row.addView(bold(d.optString("name", "桌面客户端")));
+            LinearLayout head = horizontal();
+            head.addView(bold(d.optString("name", "桌面客户端")), new LinearLayout.LayoutParams(0, -2, 1));
+            if (i == 0) {
+                Button refresh = iconButton("↻");
+                refresh.setContentDescription("刷新设备");
+                refresh.setOnClickListener(v -> refreshDevices(true));
+                head.addView(refresh, new LinearLayout.LayoutParams(dp(32), dp(32)));
+            }
+            row.addView(head);
             row.addView(copy(d.optString("platform", "desktop") + " · " + d.optString("status", "online") + " · " + shortId(deviceId)));
             LinearLayout actions = horizontal();
             actions.setPadding(0, dp(14), 0, dp(8));
@@ -1917,7 +2126,6 @@ public class MainActivity extends Activity {
             boundDeviceId = deviceId;
             prefs.edit().putString("bound_device_id", deviceId).apply();
             ui(() -> {
-                toast("设备已绑定");
                 refreshDevices(false);
                 renderSection();
             });
@@ -1942,7 +2150,6 @@ public class MainActivity extends Activity {
                 prefs.edit().remove("bound_device_id").apply();
             }
             ui(() -> {
-                toast("绑定已解除");
                 refreshDevices(false);
                 renderSection();
             });
@@ -1982,7 +2189,6 @@ public class MainActivity extends Activity {
             api("POST", "/api/mobile/desktop-jobs", body);
             ui(() -> {
                 setSending(false);
-                toast("任务已发送到绑定客户端");
                 pollSessionsOnce();
             });
         });
@@ -2054,6 +2260,7 @@ public class MainActivity extends Activity {
                 continue;
             }
             collectRows(rows, session.optJSONArray("messages"), "message");
+            collectPurposes(rows, session);
             collectRows(rows, session.optJSONArray("logs"), "log");
         }
         rows.sort(Comparator.comparingLong(o -> o.optLong("timestamp")));
@@ -2085,6 +2292,44 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void collectPurposes(List<JSONObject> rows, JSONObject session) throws Exception {
+        JSONArray purposes = session == null ? null : session.optJSONArray("purposes");
+        if (purposes == null || purposes.length() == 0) {
+            return;
+        }
+        StringBuilder body = new StringBuilder();
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < purposes.length(); i++) {
+            String item = cleanDisplayText(purposes.optString(i));
+            if (item.isEmpty() || !seen.add(item)) {
+                continue;
+            }
+            if (body.length() > 0) {
+                body.append('\n');
+            }
+            body.append(item);
+        }
+        if (body.length() == 0) {
+            return;
+        }
+        long timestamp = System.currentTimeMillis();
+        JSONArray messages = session.optJSONArray("messages");
+        if (messages != null && messages.length() > 0) {
+            JSONObject first = messages.optJSONObject(0);
+            if (first != null && first.optLong("timestamp", 0) > 0) {
+                timestamp = first.optLong("timestamp") + 1;
+            }
+        }
+        rows.add(new JSONObject()
+                .put("_kind", "log")
+                .put("id", session.optString("id") + ":purpose")
+                .put("type", "intent")
+                .put("phase", "intent")
+                .put("title", "执行目的")
+                .put("body", body.toString())
+                .put("timestamp", timestamp));
+    }
+
     private void renderTimeline(JSONArray events) {
         if (timeline == null) {
             return;
@@ -2110,7 +2355,7 @@ public class MainActivity extends Activity {
                 addLogRow(e);
             }
         }
-        scrollToBottom();
+        scrollToBottomOnce("timeline:" + section);
     }
 
     private void addLogRow(JSONObject e) {
@@ -2119,11 +2364,18 @@ public class MainActivity extends Activity {
         }
         String title = cleanDisplayText(e.optString("title", e.optString("type")));
         String body = cleanDisplayText(e.optString("body"));
-        String command = compactCommand(e.optString("command"));
+        String rawCommand = cleanDisplayText(e.optString("command"));
+        String command = compactCommand(rawCommand);
+        String preview = logPreview(e, body, rawCommand, command);
         if (title.trim().isEmpty() && body.trim().isEmpty() && command.trim().isEmpty()) {
             return;
         }
         if (title.equals(body) && command.trim().isEmpty()) {
+            body = "";
+        }
+        String phase = e.optString("phase", e.optString("type", ""));
+        if (phase.toLowerCase(Locale.ROOT).contains("intent") && !body.trim().isEmpty()) {
+            title = body;
             body = "";
         }
         if (!command.trim().isEmpty()) {
@@ -2135,13 +2387,16 @@ public class MainActivity extends Activity {
         rowLp.setMargins(0, dp(8), 0, dp(8));
         row.setLayoutParams(rowLp);
         int level = e.optInt("level", 0);
-        String phase = e.optString("phase", e.optString("type", ""));
         int accent = level >= 2 ? Color.rgb(216, 71, 86) : level == 1 ? Color.rgb(210, 132, 40) : phaseColor(phase);
         LinearLayout head = horizontal();
+        TextView toggle = copy("▸");
+        toggle.setTextColor(accent);
+        toggle.setTextSize(14);
+        head.addView(toggle, new LinearLayout.LayoutParams(dp(18), -2));
         TextView dot = copy("●");
         dot.setTextColor(accent);
         dot.setTextSize(13);
-        head.addView(dot, new LinearLayout.LayoutParams(dp(20), -2));
+        head.addView(dot, new LinearLayout.LayoutParams(dp(18), -2));
         TextView titleView = bold(title);
         head.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1));
         TextView phaseView = copy(phaseLabel(phase));
@@ -2149,15 +2404,40 @@ public class MainActivity extends Activity {
         phaseView.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         head.addView(phaseView, new LinearLayout.LayoutParams(dp(78), -2));
         row.addView(head);
-        if (!body.trim().isEmpty()) {
-            row.addView(copy(body));
+        LinearLayout detailBox = vertical();
+        detailBox.setVisibility(View.GONE);
+        if (!body.trim().isEmpty() && !"intent".equalsIgnoreCase(phase)) {
+            detailBox.addView(copy(body));
         }
         if (!command.trim().isEmpty()) {
             TextView cmd = copy(command);
             cmd.setTextColor(Color.rgb(45, 74, 124));
             cmd.setBackground(round(Color.argb(76, 54, 104, 240), dp(10), Color.TRANSPARENT));
             cmd.setPadding(dp(10), dp(8), dp(10), dp(8));
-            row.addView(cmd);
+            detailBox.addView(cmd);
+        }
+        if (!preview.trim().isEmpty()) {
+            TextView detail = copy(preview);
+            detail.setTextColor(Color.rgb(66, 82, 108));
+            detail.setBackground(round(Color.argb(116, 255, 255, 255), dp(10), LINE));
+            detail.setPadding(dp(10), dp(8), dp(10), dp(8));
+            LinearLayout.LayoutParams detailLp = new LinearLayout.LayoutParams(-1, -2);
+            detailLp.setMargins(0, dp(8), 0, 0);
+            detailBox.addView(detail, detailLp);
+        }
+        if (detailBox.getChildCount() > 0) {
+            LinearLayout.LayoutParams detailBoxLp = new LinearLayout.LayoutParams(-1, -2);
+            detailBoxLp.setMargins(0, dp(8), 0, 0);
+            row.addView(detailBox, detailBoxLp);
+            View.OnClickListener toggleAction = v -> {
+                boolean expanded = detailBox.getVisibility() == View.VISIBLE;
+                detailBox.setVisibility(expanded ? View.GONE : View.VISIBLE);
+                toggle.setText(expanded ? "▸" : "▾");
+            };
+            row.setOnClickListener(toggleAction);
+            head.setOnClickListener(toggleAction);
+        } else {
+            toggle.setVisibility(View.INVISIBLE);
         }
         int indent = Math.max(0, e.optInt("indentLevel", 0));
         if (indent > 0) {
@@ -2233,6 +2513,66 @@ public class MainActivity extends Activity {
         return command.trim();
     }
 
+    private String logPreview(JSONObject e, String body, String rawCommand, String compactCommand) {
+        for (String key : new String[]{"fileContent", "content", "detail", "output", "body"}) {
+            String candidate = cleanDisplayText(e.optString(key));
+            if (looksLikeFileContentPreview(candidate, rawCommand, compactCommand, body)) {
+                return trimPreview(candidate);
+            }
+        }
+        return "";
+    }
+
+    private boolean looksLikeFileContentPreview(String value, String rawCommand, String compactCommand, String body) {
+        String clean = cleanDisplayText(value);
+        if (clean.isEmpty() || clean.equals(cleanDisplayText(rawCommand)) || clean.equals(cleanDisplayText(compactCommand))) {
+            return false;
+        }
+        if (!clean.contains("\n")) {
+            return false;
+        }
+        String lower = clean.toLowerCase(Locale.ROOT).trim();
+        if (lower.startsWith("-command") || lower.startsWith("powershell") || lower.startsWith("cmd /")
+                || lower.startsWith("node ") || lower.startsWith("python ") || lower.startsWith("npm ")
+                || lower.startsWith("git ") || lower.endsWith(".exe") || lower.endsWith(".cmd") || lower.endsWith(".ps1")) {
+            return false;
+        }
+        if (clean.equals(cleanDisplayText(body)) && !hasCodeOrPatchMarker(clean)) {
+            return false;
+        }
+        return hasCodeOrPatchMarker(clean);
+    }
+
+    private boolean hasCodeOrPatchMarker(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
+        return lower.contains("diff --git")
+                || lower.contains("\n@@")
+                || lower.contains("\n+")
+                || lower.contains("\n-")
+                || lower.contains("public ")
+                || lower.contains("private ")
+                || lower.contains("protected ")
+                || lower.contains("class ")
+                || lower.contains("function ")
+                || lower.contains("const ")
+                || lower.contains("let ")
+                || lower.contains("import ")
+                || lower.contains("export ")
+                || lower.contains("package ")
+                || lower.contains("</")
+                || lower.contains("=>")
+                || lower.contains("{\n")
+                || lower.contains("}\n");
+    }
+
+    private String trimPreview(String value) {
+        String clean = cleanDisplayText(value).replaceAll("\\n{4,}", "\n\n\n");
+        if (clean.length() <= 900) {
+            return clean;
+        }
+        return clean.substring(0, 900) + "\n...";
+    }
+
     private int phaseColor(String phase) {
         String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
         if (p.contains("invoke")) return INDIGO;
@@ -2273,7 +2613,6 @@ public class MainActivity extends Activity {
             body.put("action", action);
             api("POST", "/api/mobile/desktop-jobs/" + enc(event.optString("jobId")) + "/interactions/" + enc(event.optString("interactionId")), body);
             ui(() -> {
-                toast("确认结果已发送");
                 pollSessionsOnce();
             });
         }));
@@ -2281,6 +2620,10 @@ public class MainActivity extends Activity {
     }
 
     private View messageBubble(String role, String text) {
+        return messageBubble(role, text, 0);
+    }
+
+    private View messageBubble(String role, String text, long timestamp) {
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         boolean user = "user".equals(role);
@@ -2288,17 +2631,23 @@ public class MainActivity extends Activity {
         TextView t = copy(cleanDisplayText(text));
         t.setTextColor(user ? Color.WHITE : INK);
         box.addView(t);
+        addTimestamp(box, timestamp, user);
         box.setLayoutParams(bubbleLayoutParams(user));
         return box;
     }
 
     private TextView addStreamingBubble(String role) {
+        return addStreamingBubble(role, 0);
+    }
+
+    private TextView addStreamingBubble(String role, long timestamp) {
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         box.setBackground(round(GLASS, dp(16), LINE));
         TextView t = copy("");
         t.setTextColor(INK);
         box.addView(t);
+        addTimestamp(box, timestamp, "user".equals(role));
         box.setLayoutParams(bubbleLayoutParams("user".equals(role)));
         content.addView(box);
         return t;
@@ -2336,15 +2685,23 @@ public class MainActivity extends Activity {
     }
 
     private View imageResultBubble(String source) {
+        return imageResultBubble(source, 0);
+    }
+
+    private View imageResultBubble(String source, long timestamp) {
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         box.setBackground(round(GLASS, dp(16), LINE));
         box.setLayoutParams(bubbleLayoutParams(false));
-        renderImageResult(box, source);
+        renderImageResult(box, source, timestamp);
         return box;
     }
 
     private void renderImageResult(LinearLayout box, String source) {
+        renderImageResult(box, source, System.currentTimeMillis());
+    }
+
+    private void renderImageResult(LinearLayout box, String source, long timestamp) {
         if (box == null) {
             content.addView(messageBubble("assistant", source));
             return;
@@ -2357,21 +2714,41 @@ public class MainActivity extends Activity {
             image.setBackground(round(Color.WHITE, dp(14), LINE));
             image.setOnClickListener(v -> showImagePreview(Uri.parse(source)));
             box.addView(image, new LinearLayout.LayoutParams(-1, dp(240)));
-            if (source.startsWith("data:image/")) {
-                String base64 = source.substring(source.indexOf(",") + 1);
-                try {
-                    byte[] bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);
-                    image.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.length));
-                } catch (Exception ignored) {
-                    box.addView(copy(source));
-                }
-            } else {
-                loadImageIntoView(source, image);
-            }
+            setImageSource(image, source);
+            Button edit = ghost("编辑这张图");
+            edit.setOnClickListener(v -> referenceImageForEdit(source));
+            LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(-1, dp(38));
+            editLp.setMargins(0, dp(10), 0, 0);
+            box.addView(edit, editLp);
         } else {
             box.addView(copy(cleanDisplayText(source)));
         }
-        scrollToBottom();
+        addTimestamp(box, timestamp, false);
+    }
+
+    private void addTimestamp(LinearLayout box, long timestamp, boolean user) {
+        if (timestamp <= 0) {
+            return;
+        }
+        TextView time = copy(formatDateTime(timestamp));
+        time.setTextSize(11);
+        time.setTextColor(user ? Color.argb(210, 255, 255, 255) : MUTED);
+        time.setGravity(user ? Gravity.END : Gravity.START);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(6), 0, 0);
+        box.addView(time, lp);
+    }
+
+    private void referenceImageForEdit(String source) {
+        if (source == null || source.trim().isEmpty()) {
+            return;
+        }
+        selectedAttachmentUris.clear();
+        selectedAttachmentUris.add(Uri.parse(source.trim()));
+        renderAttachmentPreview();
+        if (activeInput != null) {
+            activeInput.requestFocus();
+        }
     }
 
     private void loadImageIntoView(String url, ImageView target) {
@@ -2388,6 +2765,47 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
         });
+    }
+
+    private void setImageSource(ImageView target, String source) {
+        if (target == null || source == null || source.trim().isEmpty()) {
+            return;
+        }
+        String value = source.trim();
+        if (value.startsWith("http://") || value.startsWith("https://")) {
+            loadImageIntoView(value, target);
+            return;
+        }
+        if (value.startsWith("data:image/")) {
+            executor.execute(() -> {
+                try {
+                    String base64 = value.substring(value.indexOf(",") + 1);
+                    byte[] bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);
+                    Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                    if (bitmap != null) {
+                        ui(() -> target.setImageBitmap(bitmap));
+                    }
+                } catch (Exception ignored) {
+                }
+            });
+            return;
+        }
+        Uri uri = Uri.parse(value);
+        String scheme = uri.getScheme();
+        if ("content".equalsIgnoreCase(scheme) || "file".equalsIgnoreCase(scheme)) {
+            executor.execute(() -> {
+                try (InputStream input = getContentResolver().openInputStream(uri)) {
+                    Bitmap bitmap = BitmapFactory.decodeStream(input);
+                    if (bitmap != null) {
+                        ui(() -> target.setImageBitmap(bitmap));
+                    }
+                } catch (Exception ignored) {
+                    ui(() -> target.setImageURI(uri));
+                }
+            });
+            return;
+        }
+        target.setImageURI(uri);
     }
 
     private JSONObject api(String method, String path, JSONObject body) throws Exception {
@@ -2774,13 +3192,12 @@ public class MainActivity extends Activity {
                 tabs.add(title);
                 grouped.put(title, list("暂无最近会话"));
             }
-            ui(() -> showGroupedChoice(label(client) + " 最近会话", tabs, grouped, selectedCliSession, value -> {
+            ui(() -> showStackedGroupedChoice(label(client) + " 最近会话", tabs, grouped, selectedCliSession, value -> {
                 selectedCliSession = value.trim();
                 if (!"暂无最近会话".equals(selectedCliSession)) {
-                    toast("已选择 " + selectedCliSession);
                     pollSessionsOnce();
                 }
-            }));
+            }, null));
         });
     }
 
@@ -2820,7 +3237,7 @@ public class MainActivity extends Activity {
             grouped.put(fallback, list("暂无最近会话"));
             tabs.add(fallback);
         }
-        showGroupedChoice(label(mode) + " 最近会话", tabs, grouped, "", value -> {
+        showStackedGroupedChoice(label(mode) + " 最近会话", tabs, grouped, "", value -> {
             if (!"暂无最近会话".equals(value)) {
                 String selectedId = "";
                 for (String tab : tabs) {
@@ -2834,6 +3251,9 @@ public class MainActivity extends Activity {
                     renderSection();
                 }
             }
+        }, () -> {
+            createLocalConversation(mode);
+            renderSection();
         });
     }
 
@@ -2896,7 +3316,6 @@ public class MainActivity extends Activity {
             ui(() -> showGroupedChoice("Skill / Plugin / Command", tabs, grouped, selectedSkillPlugin, value -> {
                 selectedSkillPlugin = value;
                 addExtensionRef(kindByName.getOrDefault(value, value.startsWith("/") ? "command" : "skill"), value);
-                toast("已引用 " + value);
             }));
         });
     }
@@ -2943,7 +3362,186 @@ public class MainActivity extends Activity {
         return c;
     }
 
+    private void showStackedGroupedChoice(String title, List<String> groups, Map<String, List<String>> grouped, String current, ChoiceHandler handler, Runnable newAction) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
+        LinearLayout panel = vertical();
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        LinearLayout titleRow = horizontal();
+        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
+        if (newAction != null) {
+            Button add = iconButton("+");
+            add.setContentDescription("新建会话");
+            add.setOnClickListener(v -> {
+                newAction.run();
+                dialog.dismiss();
+            });
+            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+            addLp.setMargins(0, 0, dp(8), 0);
+            titleRow.addView(add, addLp);
+        }
+        Button close = iconButton("×");
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        panel.addView(titleRow);
+        panel.addView(gap(8));
+
+        ScrollView scroller = new ScrollView(this);
+        scroller.setVerticalScrollBarEnabled(false);
+        LinearLayout list = vertical();
+        for (String group : groups == null ? new ArrayList<String>() : groups) {
+            TextView header = bold(group);
+            header.setTextColor(MUTED);
+            LinearLayout.LayoutParams headerLp = new LinearLayout.LayoutParams(-1, -2);
+            headerLp.setMargins(0, dp(10), 0, dp(2));
+            list.addView(header, headerLp);
+            List<String> values = grouped == null ? null : grouped.get(group);
+            if (values == null || values.isEmpty()) {
+                list.addView(copy("暂无最近会话"));
+                continue;
+            }
+            for (String option : values) {
+                Button entry = drawerButton(option.equals(current) ? option + "  ✓" : option);
+                if (option.equals(current)) {
+                    entry.setTextColor(BLUE);
+                    entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
+                }
+                entry.setOnClickListener(v -> {
+                    handler.onChoice(option);
+                    dialog.dismiss();
+                });
+                list.addView(entry);
+            }
+        }
+        if (list.getChildCount() == 0) {
+            list.addView(copy("暂无最近会话"));
+        }
+        scroller.addView(list);
+        panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(360)));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
+        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        lp.setMargins(dp(18), 0, dp(18), dp(28));
+        overlay.addView(panel, lp);
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        dialog.setContentView(overlay);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+        }
+    }
+
     private void showGroupedChoice(String title, List<String> tabs, Map<String, List<String>> grouped, String current, ChoiceHandler handler) {
+        showGroupedChoice(title, tabs, grouped, current, handler, null);
+    }
+
+    private boolean favoriteChoiceEnabled(String title) {
+        String t = title == null ? "" : title;
+        return t.contains("助手") || t.contains("AI 模型") || t.contains("Skill") || t.contains("Plugin");
+    }
+
+    private String favoriteChoiceKey(String title) {
+        String normalized = (title == null ? "choice" : title).replaceAll("[^A-Za-z0-9\\u4e00-\\u9fa5]+", "_");
+        return "favorite_choice_" + normalized;
+    }
+
+    private Set<String> favoriteChoices(String title) {
+        Set<String> out = new HashSet<>();
+        String raw = prefs.getString(favoriteChoiceKey(title), "");
+        for (String item : raw.split("\\n")) {
+            String clean = item.trim();
+            if (!clean.isEmpty()) {
+                out.add(clean);
+            }
+        }
+        return out;
+    }
+
+    private void saveFavoriteChoices(String title, Set<String> values) {
+        StringBuilder raw = new StringBuilder();
+        for (String item : values) {
+            if (raw.length() > 0) {
+                raw.append('\n');
+            }
+            raw.append(item);
+        }
+        prefs.edit().putString(favoriteChoiceKey(title), raw.toString()).apply();
+    }
+
+    private List<String> sortFavoriteOptions(String title, List<String> options) {
+        List<String> out = new ArrayList<>();
+        if (options != null) {
+            out.addAll(options);
+        }
+        if (!favoriteChoiceEnabled(title)) {
+            return out;
+        }
+        Set<String> favorites = favoriteChoices(title);
+        out.sort((left, right) -> {
+            boolean lf = favorites.contains(left);
+            boolean rf = favorites.contains(right);
+            if (lf != rf) {
+                return lf ? -1 : 1;
+            }
+            return 0;
+        });
+        return out;
+    }
+
+    private View choiceOptionView(String title, String option, String current, Runnable onFavoriteChanged, Runnable onChoose) {
+        boolean selected = option.equals(current);
+        boolean header = option.startsWith("【") && option.endsWith("】");
+        if (!favoriteChoiceEnabled(title) || header) {
+            Button entry = drawerButton(selected ? option + "  ✓" : option);
+            if (header) {
+                entry.setEnabled(false);
+                entry.setTextColor(BLUE);
+                entry.setBackground(new ColorDrawable(Color.TRANSPARENT));
+            }
+            if (selected) {
+                entry.setTextColor(BLUE);
+                entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
+            }
+            entry.setOnClickListener(v -> onChoose.run());
+            return entry;
+        }
+
+        Set<String> favorites = favoriteChoices(title);
+        LinearLayout row = horizontal();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(round(selected ? Color.argb(72, 54, 104, 240) : Color.argb(120, 255, 255, 255), dp(16), selected ? Color.argb(110, 54, 104, 240) : LINE));
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, dp(42));
+        rowLp.setMargins(0, dp(8), 0, 0);
+        row.setLayoutParams(rowLp);
+        Button pick = ghost(selected ? option + "  ✓" : option);
+        pick.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        pick.setTextColor(selected ? BLUE : INK);
+        pick.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        pick.setOnClickListener(v -> onChoose.run());
+        row.addView(pick, new LinearLayout.LayoutParams(0, -1, 1));
+        Button star = iconButton(favorites.contains(option) ? "★" : "☆");
+        star.setTextColor(favorites.contains(option) ? Color.rgb(224, 157, 42) : MUTED);
+        star.setContentDescription(favorites.contains(option) ? "取消收藏" : "收藏");
+        star.setOnClickListener(v -> {
+            Set<String> next = favoriteChoices(title);
+            if (next.contains(option)) {
+                next.remove(option);
+            } else {
+                next.add(option);
+            }
+            saveFavoriteChoices(title, next);
+            onFavoriteChanged.run();
+        });
+        row.addView(star, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        return row;
+    }
+
+    private void showGroupedChoice(String title, List<String> tabs, Map<String, List<String>> grouped, String current, ChoiceHandler handler, Runnable newAction) {
         if (tabs == null || tabs.isEmpty()) {
             showChoice(title, list("暂无可选项"), current, value -> { });
             return;
@@ -2957,6 +3555,17 @@ public class MainActivity extends Activity {
         panel.setPadding(dp(16), dp(14), dp(16), dp(14));
         LinearLayout titleRow = horizontal();
         titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
+        if (newAction != null) {
+            Button add = iconButton("+");
+            add.setContentDescription("新建会话");
+            add.setOnClickListener(v -> {
+                newAction.run();
+                dialog.dismiss();
+            });
+            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+            addLp.setMargins(0, 0, dp(8), 0);
+            titleRow.addView(add, addLp);
+        }
         Button close = iconButton("×");
         close.setOnClickListener(v -> dialog.dismiss());
         titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
@@ -2986,13 +3595,21 @@ public class MainActivity extends Activity {
                 button.setTextColor(active ? Color.WHITE : INK);
                 button.setBackground(round(active ? BLUE : Color.argb(120, 255, 255, 255), dp(16), active ? BLUE : LINE));
             }
-            List<String> values = grouped.get(activeTab[0]);
+            List<String> values = sortFavoriteOptions(title, grouped.get(activeTab[0]));
             if (values == null || values.isEmpty()) {
                 optionsBox.addView(copy("暂无可选项"));
                 return;
             }
             for (String option : values) {
-                Button entry = drawerButton(option.equals(current) ? option + "  ✓" : option);
+                View entryView = choiceOptionView(title, option, current, () -> renderOptions[0].run(), () -> {
+                    handler.onChoice(option);
+                    dialog.dismiss();
+                });
+                if (!(entryView instanceof Button)) {
+                    optionsBox.addView(entryView);
+                    continue;
+                }
+                Button entry = (Button) entryView;
                 if (option.equals(current)) {
                     entry.setTextColor(BLUE);
                     entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
@@ -3060,14 +3677,12 @@ public class MainActivity extends Activity {
         ScrollView scroller = new ScrollView(this);
         scroller.setVerticalScrollBarEnabled(false);
         LinearLayout optionsBox = vertical();
-        for (String option : options) {
-            Button entry = drawerButton(option.equals(current) ? option + "  ✓" : option);
-            if (option.startsWith("【") && option.endsWith("】")) {
-                entry.setEnabled(false);
-                entry.setTextColor(BLUE);
-                entry.setBackground(new ColorDrawable(Color.TRANSPARENT));
-            }
-            entry.setOnClickListener(v -> {
+        List<String> orderedOptions = sortFavoriteOptions(title, options);
+        for (String option : orderedOptions) {
+            View entry = choiceOptionView(title, option, current, () -> {
+                dialog.dismiss();
+                showChoice(title, options, current, handler);
+            }, () -> {
                 handler.onChoice(option);
                 if (!option.startsWith("【")) {
                     dialog.dismiss();
@@ -3278,32 +3893,32 @@ public class MainActivity extends Activity {
 
     private View drawerEntry(String item) {
         LinearLayout row = horizontal();
-        row.setPadding(dp(12), 0, dp(12), 0);
+        row.setPadding(dp(12), 0, dp(3), 0);
         row.setBackground(round(Color.argb(120, 255, 255, 255), dp(16), LINE));
-        TextView icon = copy(drawerIcon(item));
-        icon.setTextSize(16);
-        icon.setTextColor(BLUE);
-        icon.setGravity(Gravity.CENTER);
-        row.addView(icon, new LinearLayout.LayoutParams(dp(34), -1));
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(drawerIconRes(item));
+        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        icon.setPadding(dp(5), dp(5), dp(5), dp(5));
+        row.addView(icon, new LinearLayout.LayoutParams(dp(30), -1));
         TextView text = bold(label(item));
         text.setTextSize(16);
         text.setGravity(Gravity.CENTER);
         row.addView(text, new LinearLayout.LayoutParams(0, -1, 1));
         View spacer = new View(this);
-        row.addView(spacer, new LinearLayout.LayoutParams(dp(34), -1));
+        row.addView(spacer, new LinearLayout.LayoutParams(dp(14), -1));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(46));
         lp.setMargins(0, dp(10), 0, 0);
         row.setLayoutParams(lp);
         return row;
     }
 
-    private String drawerIcon(String item) {
-        if ("assistants".equals(item)) return "✦";
-        if ("subscriptions".equals(item)) return "◆";
-        if ("service".equals(item)) return "●";
-        if ("wallet".equals(item)) return "□";
-        if ("settings".equals(item)) return "⚙";
-        return "•";
+    private int drawerIconRes(String item) {
+        if ("assistants".equals(item)) return R.drawable.drawer_aichat;
+        if ("subscriptions".equals(item)) return R.drawable.drawer_shop;
+        if ("service".equals(item)) return R.drawable.drawer_cloud;
+        if ("wallet".equals(item)) return R.drawable.drawer_wallet;
+        if ("settings".equals(item)) return R.drawable.drawer_setting;
+        return R.drawable.nav_chat;
     }
 
     private GradientDrawable round(int fill, int radius, int stroke) {
@@ -3401,6 +4016,54 @@ public class MainActivity extends Activity {
         }
         String payment = item.optString("payment_method", "").replaceAll("(?i)^wallet$", "").trim();
         return payment.isEmpty() ? "购买记录" : payment;
+    }
+
+    private double resolveBillingUsageRatio(JSONObject bill, JSONArray plans, JSONObject subscriptions) {
+        String title = bill == null ? "" : bill.optString("plan_title", "").trim();
+        if (title.isEmpty() || plans == null || subscriptions == null) {
+            return 0;
+        }
+        Map<Integer, String> titleByPlanId = new HashMap<>();
+        for (int i = 0; i < plans.length(); i++) {
+            JSONObject record = plans.optJSONObject(i);
+            JSONObject plan = record == null ? null : record.optJSONObject("plan");
+            if (plan == null) {
+                continue;
+            }
+            String planTitle = plan.optString("title", "").trim();
+            if (!planTitle.isEmpty()) {
+                titleByPlanId.put(plan.optInt("id", 0), planTitle);
+            }
+        }
+        JSONArray rows = subscriptions.optJSONArray("all_subscriptions");
+        if (rows == null) {
+            rows = subscriptions.optJSONArray("subscriptions");
+        }
+        if (rows == null) {
+            return 0;
+        }
+        long bestUpdatedAt = -1;
+        double ratio = 0;
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject row = rows.optJSONObject(i);
+            JSONObject sub = row == null ? null : row.optJSONObject("subscription");
+            if (sub == null) {
+                continue;
+            }
+            String planTitle = titleByPlanId.get(sub.optInt("plan_id", 0));
+            if (!title.equals(planTitle)) {
+                continue;
+            }
+            long updatedAt = Math.max(sub.optLong("end_time", 0), Math.max(sub.optLong("start_time", 0), sub.optLong("id", 0)));
+            if (updatedAt < bestUpdatedAt) {
+                continue;
+            }
+            bestUpdatedAt = updatedAt;
+            double total = sub.optDouble("amount_total", 0);
+            double used = sub.optDouble("amount_used", 0);
+            ratio = total > 0 ? Math.max(0, Math.min(1, used / total)) : 0;
+        }
+        return ratio;
     }
 
     private String billingStatus(String value) {
@@ -3586,6 +4249,13 @@ public class MainActivity extends Activity {
             return;
         }
         contentScroll.post(() -> contentScroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private void scrollToBottomOnce(String key) {
+        if (key == null || !autoScrolledSections.add(key)) {
+            return;
+        }
+        scrollToBottom();
     }
 
     private void toast(String message) {
