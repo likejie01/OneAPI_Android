@@ -2,9 +2,12 @@ package center.oneapi.mobile;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -39,6 +42,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -50,9 +54,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -80,6 +86,7 @@ public class MainActivity extends Activity {
     private LinearLayout topNav;
     private LinearLayout timeline;
     private LinearLayout interactionBar;
+    private ScrollView contentScroll;
     private TextView statusText;
     private EditText activeInput;
     private Spinner modelSpinner;
@@ -87,6 +94,8 @@ public class MainActivity extends Activity {
     private Spinner permissionSpinner;
     private ImageButton activeSendButton;
     private LinearLayout attachmentPreviewHost;
+    private LinearLayout extensionPreviewHost;
+    private String activeComposerMode = "";
     private String selectedCliModel = "";
     private String selectedReasoning = "关闭思考";
     private String selectedPermission = "受限模式";
@@ -98,11 +107,17 @@ public class MainActivity extends Activity {
     private String selectedContextWindow = "自动";
     private String selectedCliSession = "最近会话";
     private String selectedSkillPlugin = "默认";
+    private String selectedRecentJobId = "";
+    private String activeChatSessionId = "";
+    private String activeImageSessionId = "";
     private String selectedCodexModel = "";
     private String selectedClaudeModel = "";
     private boolean imageRandomSeed = false;
     private boolean requestRunning = false;
-    private Uri selectedAttachmentUri;
+    private boolean cliRefreshRunning = false;
+    private long lastCliRefreshAt = 0L;
+    private final List<Uri> selectedAttachmentUris = new ArrayList<>();
+    private final List<JSONObject> selectedExtensionRefs = new ArrayList<>();
 
     private String section = "chat";
     private String boundDeviceId = "";
@@ -142,9 +157,9 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_PICK_IMAGE && resultCode == RESULT_OK && data != null) {
-            selectedAttachmentUri = data.getData();
+            appendSelectedImages(data);
             renderAttachmentPreview();
-            toast(selectedAttachmentUri == null ? "未选择图片" : "已选择图片");
+            toast(selectedAttachmentUris.isEmpty() ? "未选择图片" : "已选择图片");
         }
     }
 
@@ -237,13 +252,20 @@ public class MainActivity extends Activity {
         root.setPadding(0, dp(34), 0, 0);
         root.addView(header());
         ScrollView scroll = new ScrollView(this);
+        contentScroll = scroll;
         scroll.setClipToPadding(false);
+        scroll.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+            if (isCliSection() && scrollY >= contentBottomScrollY(scroll) - dp(2)) {
+                refreshCliAtEdge();
+            }
+        });
         content = vertical();
         content.setPadding(dp(18), dp(12), dp(18), dp(18));
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         composerHost = vertical();
         composerHost.setPadding(dp(18), 0, dp(18), dp(14));
+        composerHost.setBackground(round(Color.argb(224, 255, 255, 255), dp(18), Color.TRANSPARENT));
         root.addView(composerHost);
         shell.addView(root, new FrameLayout.LayoutParams(-1, -1));
         setContentView(shell);
@@ -281,7 +303,9 @@ public class MainActivity extends Activity {
         if (!mainSection) {
             return;
         }
-        for (String item : new String[]{"chat", "image", "codex", "claude"}) {
+        String[] navItems = new String[]{"chat", "image", "codex", "claude"};
+        for (int i = 0; i < navItems.length; i++) {
+            String item = navItems[i];
             View b = navImageButton(navDrawable(item), item.equals(section) || ("assistants".equals(section) && "chat".equals(item)));
             b.setContentDescription(label(item));
             b.setOnClickListener(v -> {
@@ -292,6 +316,13 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1);
             lp.setMargins(dp(3), 0, dp(3), 0);
             topNav.addView(b, lp);
+            if (i == 1) {
+                TextView separator = copy("·");
+                separator.setGravity(Gravity.CENTER);
+                separator.setTextColor(Color.rgb(112, 124, 146));
+                separator.setTextSize(18);
+                topNav.addView(separator, new LinearLayout.LayoutParams(dp(12), dp(38)));
+            }
         }
     }
 
@@ -312,7 +343,7 @@ public class MainActivity extends Activity {
         panel.addView(titleRow);
         panel.addView(gap(8));
         for (String item : new String[]{"assistants", "subscriptions", "service", "wallet", "settings"}) {
-            Button entry = drawerButton(label(item));
+            View entry = drawerEntry(item);
             entry.setOnClickListener(v -> {
                 section = item;
                 refreshBottomNav();
@@ -321,7 +352,7 @@ public class MainActivity extends Activity {
             });
             panel.addView(entry);
         }
-        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(dp(192), -2);
+        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(dp(288), -2);
         panelLp.gravity = Gravity.END | Gravity.TOP;
         panelLp.setMargins(0, dp(70), dp(14), 0);
         overlay.addView(panel, panelLp);
@@ -368,15 +399,60 @@ public class MainActivity extends Activity {
     }
 
     private void renderChat() {
+        renderLocalConversation("chat");
         composerHost.addView(composer("输入消息", "chat", this::sendChatMessage));
     }
 
     private void renderImage() {
+        renderLocalConversation("image");
         composerHost.addView(composer("描述要生成或编辑的图片", "image", this::sendImageMessage));
     }
 
     private void renderAiChat() {
+        renderLocalConversation("chat");
         composerHost.addView(composer("输入 AIChat 消息", "chat", this::sendChatMessage));
+    }
+
+    private void renderLocalConversation(String mode) {
+        String expectedSection = section;
+        content.addView(loadingRow("正在加载历史聊天记录..."));
+        handler.postDelayed(() -> {
+            if (!expectedSection.equals(section) || content == null) {
+                return;
+            }
+            content.removeAllViews();
+            JSONArray messages = localConversationMessages(mode);
+            for (int i = 0; i < messages.length(); i++) {
+                JSONObject item = messages.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                String type = item.optString("type", "text");
+                String role = item.optString("role", "assistant");
+                String text = cleanDisplayText(item.optString("text", ""));
+                if (text.isEmpty()) {
+                    continue;
+                }
+                if ("image".equals(type)) {
+                    content.addView(imageResultBubble(text));
+                } else {
+                    content.addView(messageBubble(role, text));
+                }
+            }
+            scrollToBottom();
+        }, 80);
+    }
+
+    private View loadingRow(String text) {
+        LinearLayout row = cardPanel();
+        row.addView(new DrawingProgressView(this), new LinearLayout.LayoutParams(dp(52), dp(52)));
+        TextView label = copy(text);
+        label.setGravity(Gravity.CENTER_HORIZONTAL);
+        row.addView(label);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(8), 0, dp(8));
+        row.setLayoutParams(lp);
+        return row;
     }
 
     private void renderPlaceholder(String name) {
@@ -632,10 +708,22 @@ public class MainActivity extends Activity {
 
     private View composer(String hint, String mode, Runnable sendAction) {
         LinearLayout box = vertical();
+        activeComposerMode = mode;
+        if (!"chat".equals(mode) && selectedAttachmentUris.size() > 1) {
+            while (selectedAttachmentUris.size() > 1) {
+                selectedAttachmentUris.remove(selectedAttachmentUris.size() - 1);
+            }
+        }
+        box.setBackground(round(Color.argb(235, 255, 255, 255), dp(18), LINE));
+        box.setPadding(dp(8), dp(8), dp(8), dp(8));
         attachmentPreviewHost = horizontal();
         attachmentPreviewHost.setPadding(0, 0, 0, dp(8));
         box.addView(attachmentPreviewHost);
+        extensionPreviewHost = horizontal();
+        extensionPreviewHost.setPadding(0, 0, 0, dp(8));
+        box.addView(extensionPreviewHost);
         renderAttachmentPreview();
+        renderExtensionPreview();
         activeInput = input(hint);
         activeInput.setMinLines(2);
         activeInput.setMaxLines(5);
@@ -665,7 +753,7 @@ public class MainActivity extends Activity {
             }
             sendAction.run();
         });
-        right.addView(send, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        right.addView(send, new LinearLayout.LayoutParams(dp(40), dp(40)));
         row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(-2, -2);
         rightLp.setMargins(dp(8), 0, 0, 0);
@@ -730,6 +818,7 @@ public class MainActivity extends Activity {
                 selectedPermission = value;
                 prefs.edit().putString("selected_permission", value).apply();
                 toast("已切换 " + value);
+                renderSection();
             }));
             addToolButton(left, R.drawable.tool_module, "AI 模型选择", () -> showModelChoice("AI 模型选择", "codex".equals(mode) ? codexModels : claudeModels, selectedCliModelFor(mode), mode, value -> {
                 if ("codex".equals(mode)) {
@@ -769,39 +858,39 @@ public class MainActivity extends Activity {
             return;
         }
         attachmentPreviewHost.removeAllViews();
-        if (selectedAttachmentUri == null) {
+        if (selectedAttachmentUris.isEmpty()) {
             attachmentPreviewHost.setVisibility(View.GONE);
             return;
         }
         attachmentPreviewHost.setVisibility(View.VISIBLE);
-        LinearLayout chip = horizontal();
-        chip.setGravity(Gravity.CENTER_VERTICAL);
-        chip.setPadding(dp(8), dp(8), dp(8), dp(8));
-        chip.setBackground(round(Color.argb(210, 255, 255, 255), dp(16), LINE));
-
-        ImageView thumb = new ImageView(this);
-        thumb.setImageURI(selectedAttachmentUri);
-        thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        thumb.setBackground(round(Color.WHITE, dp(12), LINE));
-        thumb.setClipToOutline(false);
-        thumb.setContentDescription("已选择图片预览");
-        thumb.setOnClickListener(v -> showImagePreview(selectedAttachmentUri));
-        chip.addView(thumb, new LinearLayout.LayoutParams(dp(68), dp(68)));
-
-        LinearLayout meta = vertical();
-        meta.setPadding(dp(10), 0, dp(6), 0);
-        meta.addView(bold("已选择图片"));
-        meta.addView(copy("点击缩略图预览"));
-        chip.addView(meta, new LinearLayout.LayoutParams(0, -2, 1));
-
-        Button remove = iconButton("×");
-        remove.setContentDescription("移除图片");
-        remove.setOnClickListener(v -> {
-            selectedAttachmentUri = null;
-            renderAttachmentPreview();
-        });
-        chip.addView(remove, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        attachmentPreviewHost.addView(chip, new LinearLayout.LayoutParams(-1, -2));
+        for (int i = 0; i < selectedAttachmentUris.size(); i++) {
+            Uri uri = selectedAttachmentUris.get(i);
+            FrameLayout thumbBox = new FrameLayout(this);
+            ImageView thumb = new ImageView(this);
+            thumb.setImageURI(uri);
+            thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumb.setBackground(round(Color.WHITE, dp(12), LINE));
+            thumb.setContentDescription("已选择图片预览");
+            thumb.setOnClickListener(v -> showImagePreview(uri));
+            thumbBox.addView(thumb, new FrameLayout.LayoutParams(dp(58), dp(58), Gravity.CENTER));
+            Button remove = iconButton("×");
+            remove.setTextSize(13);
+            remove.setTextColor(Color.WHITE);
+            remove.setBackground(round(Color.argb(180, 23, 31, 48), dp(10), Color.TRANSPARENT));
+            remove.setContentDescription("移除图片");
+            final int index = i;
+            remove.setOnClickListener(v -> {
+                if (index >= 0 && index < selectedAttachmentUris.size()) {
+                    selectedAttachmentUris.remove(index);
+                    renderAttachmentPreview();
+                }
+            });
+            FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP | Gravity.END);
+            thumbBox.addView(remove, closeLp);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(62), dp(62));
+            lp.setMargins(0, 0, dp(8), 0);
+            attachmentPreviewHost.addView(thumbBox, lp);
+        }
     }
 
     private void showImagePreview(Uri uri) {
@@ -844,13 +933,94 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void openImagePicker() {
-        Intent intent = new Intent(Intent.ACTION_PICK);
-        intent.setType("image/*");
+    private void renderExtensionPreview() {
+        if (extensionPreviewHost == null) {
+            return;
+        }
+        extensionPreviewHost.removeAllViews();
+        if (selectedExtensionRefs.isEmpty()) {
+            extensionPreviewHost.setVisibility(View.GONE);
+            return;
+        }
+        extensionPreviewHost.setVisibility(View.VISIBLE);
+        for (int i = 0; i < selectedExtensionRefs.size(); i++) {
+            JSONObject ref = selectedExtensionRefs.get(i);
+            LinearLayout tag = horizontal();
+            tag.setGravity(Gravity.CENTER_VERTICAL);
+            tag.setPadding(dp(9), 0, dp(5), 0);
+            tag.setBackground(round(Color.argb(76, 54, 104, 240), dp(14), Color.argb(110, 54, 104, 240)));
+            TextView name = copy(ref.optString("name", ""));
+            name.setTextColor(BLUE);
+            name.setTextSize(12);
+            tag.addView(name);
+            Button remove = iconButton("×");
+            remove.setTextSize(13);
+            final int index = i;
+            remove.setOnClickListener(v -> {
+                if (index >= 0 && index < selectedExtensionRefs.size()) {
+                    selectedExtensionRefs.remove(index);
+                    renderExtensionPreview();
+                }
+            });
+            tag.addView(remove, new LinearLayout.LayoutParams(dp(24), dp(24)));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(32));
+            lp.setMargins(0, 0, dp(8), 0);
+            extensionPreviewHost.addView(tag, lp);
+        }
+    }
+
+    private void addExtensionRef(String kind, String name) {
+        String normalized = name == null ? "" : name.trim();
+        if (normalized.isEmpty() || "默认".equals(normalized)) {
+            return;
+        }
+        for (JSONObject ref : selectedExtensionRefs) {
+            if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
+                renderExtensionPreview();
+                return;
+            }
+        }
         try {
-            startActivityForResult(intent, REQ_PICK_IMAGE);
+            selectedExtensionRefs.add(new JSONObject().put("kind", kind).put("id", normalized).put("name", normalized));
+            renderExtensionPreview();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void appendSelectedImages(Intent data) {
+        int limit = "chat".equals(activeComposerMode) ? 5 : 1;
+        if (!"chat".equals(activeComposerMode)) {
+            selectedAttachmentUris.clear();
+        }
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int i = 0; i < clipData.getItemCount() && selectedAttachmentUris.size() < limit; i++) {
+                Uri uri = clipData.getItemAt(i).getUri();
+                if (uri != null && !selectedAttachmentUris.contains(uri)) {
+                    selectedAttachmentUris.add(uri);
+                }
+            }
+        } else if (data.getData() != null && selectedAttachmentUris.size() < limit) {
+            Uri uri = data.getData();
+            if (!selectedAttachmentUris.contains(uri)) {
+                selectedAttachmentUris.add(uri);
+            }
+        }
+        if (selectedAttachmentUris.size() > limit) {
+            while (selectedAttachmentUris.size() > limit) {
+                selectedAttachmentUris.remove(selectedAttachmentUris.size() - 1);
+            }
+        }
+    }
+
+    private void openImagePicker() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("image/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, "chat".equals(activeComposerMode));
+        try {
+            startActivityForResult(Intent.createChooser(intent, "选择图片"), REQ_PICK_IMAGE);
         } catch (Exception error) {
-            Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
+            Intent fallback = new Intent(Intent.ACTION_PICK);
             fallback.setType("image/*");
             startActivityForResult(Intent.createChooser(fallback, "选择图片"), REQ_PICK_IMAGE);
         }
@@ -947,6 +1117,157 @@ public class MainActivity extends Activity {
         return prompt;
     }
 
+    private String localConversationGroup(String mode) {
+        if ("image".equals(mode)) {
+            return selectedImageAssistant == null || selectedImageAssistant.trim().isEmpty() ? "通用绘图" : selectedImageAssistant.trim();
+        }
+        return selectedChatAssistant == null || selectedChatAssistant.trim().isEmpty() ? "默认助手" : selectedChatAssistant.trim();
+    }
+
+    private String activeLocalSessionId(String mode) {
+        String value = "image".equals(mode) ? activeImageSessionId : activeChatSessionId;
+        if (value == null || value.trim().isEmpty()) {
+            value = prefs.getString(mode + "_active_session_id", "");
+            if ("image".equals(mode)) {
+                activeImageSessionId = value;
+            } else {
+                activeChatSessionId = value;
+            }
+        }
+        return value == null ? "" : value;
+    }
+
+    private void setActiveLocalSessionId(String mode, String id) {
+        if ("image".equals(mode)) {
+            activeImageSessionId = id;
+        } else {
+            activeChatSessionId = id;
+        }
+        prefs.edit().putString(mode + "_active_session_id", id == null ? "" : id).apply();
+    }
+
+    private JSONObject localConversationStore(String mode) {
+        try {
+            JSONObject root = new JSONObject(prefs.getString(mode + "_conversation_store", "{}"));
+            if (root.optJSONArray("sessions") == null) {
+                root.put("sessions", new JSONArray());
+            }
+            return root;
+        } catch (Exception ignored) {
+            try {
+                return new JSONObject().put("sessions", new JSONArray());
+            } catch (Exception impossible) {
+                return new JSONObject();
+            }
+        }
+    }
+
+    private void saveLocalConversationStore(String mode, JSONObject root) {
+        prefs.edit().putString(mode + "_conversation_store", root.toString()).apply();
+    }
+
+    private JSONObject findLocalSession(JSONObject root, String id) {
+        JSONArray sessions = root.optJSONArray("sessions");
+        if (sessions == null || id == null || id.trim().isEmpty()) {
+            return null;
+        }
+        for (int i = 0; i < sessions.length(); i++) {
+            JSONObject session = sessions.optJSONObject(i);
+            if (session != null && id.equals(session.optString("id"))) {
+                return session;
+            }
+        }
+        return null;
+    }
+
+    private JSONObject ensureLocalSession(String mode, String firstPrompt) throws Exception {
+        JSONObject root = localConversationStore(mode);
+        String id = activeLocalSessionId(mode);
+        JSONObject session = findLocalSession(root, id);
+        if (session != null && !localConversationGroup(mode).equals(session.optString("group"))) {
+            session = null;
+        }
+        if (session == null) {
+            JSONArray sessions = root.optJSONArray("sessions");
+            id = mode + "-" + System.currentTimeMillis();
+            session = new JSONObject()
+                    .put("id", id)
+                    .put("group", localConversationGroup(mode))
+                    .put("title", cleanSessionTitle(firstPrompt))
+                    .put("updatedAt", System.currentTimeMillis())
+                    .put("messages", new JSONArray());
+            sessions.put(session);
+            setActiveLocalSessionId(mode, id);
+        }
+        return session;
+    }
+
+    private String cleanSessionTitle(String prompt) {
+        String title = cleanDisplayText(prompt);
+        if (title.isEmpty()) {
+            return "新会话";
+        }
+        return title.substring(0, Math.min(28, title.length()));
+    }
+
+    private JSONArray localConversationMessages(String mode) {
+        JSONObject root = localConversationStore(mode);
+        JSONObject session = findLocalSession(root, activeLocalSessionId(mode));
+        if (session != null && !localConversationGroup(mode).equals(session.optString("group"))) {
+            session = null;
+        }
+        JSONArray messages = session == null ? null : session.optJSONArray("messages");
+        return messages == null ? new JSONArray() : messages;
+    }
+
+    private void appendLocalConversation(String mode, String role, String type, String text) {
+        String clean = cleanDisplayText(text);
+        if (clean.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject root = localConversationStore(mode);
+            JSONObject session = ensureLocalSession(mode, clean);
+            JSONArray messages = session.optJSONArray("messages");
+            if (messages == null) {
+                messages = new JSONArray();
+                session.put("messages", messages);
+            }
+            messages.put(new JSONObject()
+                    .put("role", role)
+                    .put("type", type)
+                    .put("text", clean)
+                    .put("timestamp", System.currentTimeMillis()));
+            session.put("updatedAt", System.currentTimeMillis());
+            if ("user".equals(role)) {
+                session.put("title", cleanSessionTitle(clean));
+            }
+            trimLocalSessions(root);
+            saveLocalConversationStore(mode, root);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void trimLocalSessions(JSONObject root) throws Exception {
+        JSONArray sessions = root.optJSONArray("sessions");
+        if (sessions == null || sessions.length() <= 20) {
+            return;
+        }
+        List<JSONObject> rows = new ArrayList<>();
+        for (int i = 0; i < sessions.length(); i++) {
+            JSONObject item = sessions.optJSONObject(i);
+            if (item != null) {
+                rows.add(item);
+            }
+        }
+        rows.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
+        JSONArray next = new JSONArray();
+        for (int i = 0; i < Math.min(20, rows.size()); i++) {
+            next.put(rows.get(i));
+        }
+        root.put("sessions", next);
+    }
+
     private void sendChatMessage() {
         String prompt = trim(activeInput);
         if (prompt.isEmpty()) {
@@ -955,8 +1276,17 @@ public class MainActivity extends Activity {
         }
         hideKeyboard(activeInput);
         setSending(true);
+        activeInput.setText("");
+        List<Uri> attachments = new ArrayList<>(selectedAttachmentUris);
+        selectedAttachmentUris.clear();
+        renderAttachmentPreview();
+        saveLocalRecent("chat", selectedChatAssistant, prompt);
+        appendLocalConversation("chat", "user", "text", prompt);
         content.addView(messageBubble("user", prompt));
+        scrollToBottom();
         TextView live = addStreamingBubble("assistant");
+        live.setText("Thinking\n正在思考...");
+        scrollToBottom();
         runNetwork(() -> {
             JSONObject body = new JSONObject();
             body.put("model", resolveChatModel());
@@ -967,17 +1297,29 @@ public class MainActivity extends Activity {
             }
             JSONArray messages = new JSONArray();
             messages.put(new JSONObject().put("role", "system").put("content", assistantPrompt(selectedChatAssistant) + "\n上下文长度：" + selectedContextWindow));
-            messages.put(new JSONObject().put("role", "user").put("content", prompt));
+            if (attachments.isEmpty()) {
+                messages.put(new JSONObject().put("role", "user").put("content", prompt));
+            } else {
+                JSONArray contentParts = new JSONArray();
+                contentParts.put(new JSONObject().put("type", "text").put("text", prompt));
+                for (Uri uri : attachments) {
+                    String dataUrl = uriToDataUrl(uri);
+                    contentParts.put(new JSONObject().put("type", "image_url").put("image_url", new JSONObject().put("url", dataUrl.isEmpty() ? uri.toString() : dataUrl)));
+                }
+                messages.put(new JSONObject().put("role", "user").put("content", contentParts));
+            }
             body.put("messages", messages);
             String text = streamChatResponse(body, live);
             ui(() -> {
                 setSending(false);
-                activeInput.setText("");
-                selectedAttachmentUri = null;
-                renderAttachmentPreview();
                 if (text.trim().isEmpty()) {
                     live.setText("本次没有返回可显示内容。");
+                    appendLocalConversation("chat", "assistant", "text", "本次没有返回可显示内容。");
+                } else {
+                    live.setText(text);
+                    appendLocalConversation("chat", "assistant", "text", text);
                 }
+                scrollToBottom();
             });
         });
     }
@@ -990,7 +1332,16 @@ public class MainActivity extends Activity {
         }
         hideKeyboard(activeInput);
         setSending(true);
+        activeInput.setText("");
+        List<Uri> attachments = new ArrayList<>(selectedAttachmentUris);
+        selectedAttachmentUris.clear();
+        renderAttachmentPreview();
+        saveLocalRecent("image", selectedImageAssistant, prompt);
+        appendLocalConversation("image", "user", "text", prompt);
         content.addView(messageBubble("user", prompt));
+        scrollToBottom();
+        LinearLayout progress = addImageProgressBubble();
+        scrollToBottom();
         runNetwork(() -> {
             JSONObject body = new JSONObject();
             body.put("model", "gpt-image-1");
@@ -1002,17 +1353,18 @@ public class MainActivity extends Activity {
             if (imageRandomSeed) {
                 body.put("seed", System.currentTimeMillis() % 1000000);
             }
-            if (selectedAttachmentUri != null) {
-                body.put("reference_image", selectedAttachmentUri.toString());
+            if (!attachments.isEmpty()) {
+                String dataUrl = uriToDataUrl(attachments.get(0));
+                body.put("reference_image", dataUrl.isEmpty() ? attachments.get(0).toString() : dataUrl);
             }
             JSONObject response = api("POST", "/pg/images/generations", body);
             String text = extractImageText(response);
             ui(() -> {
                 setSending(false);
-                activeInput.setText("");
-                selectedAttachmentUri = null;
-                renderAttachmentPreview();
-                content.addView(messageBubble("assistant", text.isEmpty() ? "图片任务已提交。" : text));
+                String result = text.isEmpty() ? "图片任务已提交。" : text;
+                renderImageResult(progress, result);
+                appendLocalConversation("image", "assistant", result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/") ? "image" : "text", result);
+                scrollToBottom();
             });
         });
     }
@@ -1030,6 +1382,27 @@ public class MainActivity extends Activity {
         return "standard";
     }
 
+    private String uriToDataUrl(Uri uri) {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) {
+                return "";
+            }
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            String mime = getContentResolver().getType(uri);
+            if (mime == null || mime.trim().isEmpty()) {
+                mime = "image/png";
+            }
+            return "data:" + mime + ";base64," + android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private String extractChatText(JSONObject response) {
         JSONArray choices = response.optJSONArray("choices");
         if (choices == null || choices.length() == 0) {
@@ -1038,7 +1411,7 @@ public class MainActivity extends Activity {
         }
         JSONObject choice = choices.optJSONObject(0);
         JSONObject message = choice == null ? null : choice.optJSONObject("message");
-        return message == null ? "" : message.optString("content", "");
+        return message == null ? "" : cleanJsonString(message, "content");
     }
 
     private String extractImageText(JSONObject response) {
@@ -1048,14 +1421,21 @@ public class MainActivity extends Activity {
             if (nested != null) {
                 return extractImageText(nested);
             }
-            return response.optString("message", "");
+            return cleanJsonString(response, "message");
         }
         JSONObject first = data.optJSONObject(0);
         if (first == null) {
             return "";
         }
-        String url = first.optString("url", "");
-        return url.isEmpty() ? "图片已生成，服务器返回了图片数据。" : url;
+        String url = cleanJsonString(first, "url");
+        if (!url.isEmpty()) {
+            return url;
+        }
+        String b64 = cleanJsonString(first, "b64_json");
+        if (b64.isEmpty()) {
+            b64 = cleanJsonString(first, "b64Json");
+        }
+        return b64.isEmpty() ? "图片已生成，服务器返回了图片数据。" : "data:image/png;base64," + b64;
     }
 
     private String streamChatResponse(JSONObject body, TextView live) throws Exception {
@@ -1115,8 +1495,11 @@ public class MainActivity extends Activity {
                     if (delta == null) {
                         continue;
                     }
-                    String reasoning = delta.optString("reasoning_content", delta.optString("reasoning", ""));
-                    String content = delta.optString("content", "");
+                    String reasoning = cleanJsonString(delta, "reasoning_content");
+                    if (reasoning.isEmpty()) {
+                        reasoning = cleanJsonString(delta, "reasoning");
+                    }
+                    String content = cleanJsonString(delta, "content");
                     if (!reasoning.isEmpty()) {
                         thinking.append(reasoning);
                     }
@@ -1124,14 +1507,17 @@ public class MainActivity extends Activity {
                         answer.append(content);
                     }
                     String rendered = renderLiveChatText(thinking.toString(), answer.toString());
-                    ui(() -> live.setText(rendered));
+                    ui(() -> {
+                        live.setText(rendered);
+                        scrollToBottom();
+                    });
                 } catch (Exception ignored) {
                 }
             }
         } finally {
             conn.disconnect();
         }
-        return answer.toString();
+        return renderLiveChatText(thinking.toString(), answer.toString());
     }
 
     private String renderLiveChatText(String thinking, String answer) {
@@ -1141,6 +1527,28 @@ public class MainActivity extends Activity {
         }
         out.append(answer);
         return out.toString();
+    }
+
+    private String cleanJsonString(JSONObject object, String key) {
+        if (object == null || key == null || !object.has(key) || object.isNull(key)) {
+            return "";
+        }
+        return cleanDisplayText(object.optString(key, ""));
+    }
+
+    private String cleanDisplayText(String text) {
+        if (text == null) {
+            return "";
+        }
+        String value = text.replace("\u0000", "").trim();
+        while (value.endsWith("null")) {
+            String next = value.substring(0, value.length() - 4).trim();
+            if (next.equals(value)) {
+                break;
+            }
+            value = next;
+        }
+        return "null".equalsIgnoreCase(value) ? "" : value;
     }
 
     private void refreshSubscriptions() {
@@ -1553,6 +1961,7 @@ public class MainActivity extends Activity {
         }
         hideKeyboard(activeInput);
         setSending(true);
+        activeInput.setText("");
         runNetwork(() -> {
             JSONObject body = new JSONObject();
             body.put("client", client);
@@ -1563,18 +1972,16 @@ public class MainActivity extends Activity {
             body.put("reasoningEffort", reasoningValue(selectedReasoning));
             body.put("permissionMode", selectedPermission.contains("全权限") ? "full" : "restricted");
             JSONArray extensionRefs = new JSONArray();
-            if (selectedSkillPlugin != null && !selectedSkillPlugin.trim().isEmpty() && !"默认".equals(selectedSkillPlugin)) {
-                String display = selectedSkillPlugin.trim();
-                String value = display.contains(" · ") ? display.substring(display.indexOf(" · ") + 3).trim() : display;
-                String prefix = display.contains(" · ") ? display.substring(0, display.indexOf(" · ")).trim().toLowerCase(Locale.ROOT) : "";
-                String kind = value.startsWith("/") ? "command" : prefix.contains("plugin") ? "plugin" : "skill";
-                extensionRefs.put(new JSONObject().put("id", value).put("kind", kind).put("name", value));
+            for (JSONObject ref : selectedExtensionRefs) {
+                extensionRefs.put(new JSONObject()
+                        .put("id", ref.optString("id", ref.optString("name")))
+                        .put("kind", ref.optString("kind", "skill"))
+                        .put("name", ref.optString("name")));
             }
             body.put("extensionRefs", extensionRefs);
             api("POST", "/api/mobile/desktop-jobs", body);
             ui(() -> {
                 setSending(false);
-                activeInput.setText("");
                 toast("任务已发送到绑定客户端");
                 pollSessionsOnce();
             });
@@ -1595,15 +2002,48 @@ public class MainActivity extends Activity {
     }
 
     private void pollSessionsOnce() {
+        pollSessionsOnce(false);
+    }
+
+    private void pollSessionsOnce(boolean force) {
         if (!"codex".equals(section) && !"claude".equals(section)) {
             return;
         }
+        if (cliRefreshRunning && !force) {
+            return;
+        }
+        cliRefreshRunning = true;
         runNetworkQuiet(() -> {
-            JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
-            JSONArray sessions = envelope.optJSONArray("data");
-            JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, section);
-            ui(() -> renderTimeline(events));
+            try {
+                JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
+                JSONArray sessions = envelope.optJSONArray("data");
+                JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, section);
+                ui(() -> renderTimeline(events));
+            } finally {
+                cliRefreshRunning = false;
+            }
         });
+    }
+
+    private boolean isCliSection() {
+        return "codex".equals(section) || "claude".equals(section);
+    }
+
+    private int contentBottomScrollY(ScrollView scroll) {
+        if (scroll == null || scroll.getChildCount() == 0) {
+            return 0;
+        }
+        View child = scroll.getChildAt(0);
+        return Math.max(0, child.getMeasuredHeight() - scroll.getHeight());
+    }
+
+    private void refreshCliAtEdge() {
+        long now = System.currentTimeMillis();
+        if (now - lastCliRefreshAt < 9000L) {
+            return;
+        }
+        lastCliRefreshAt = now;
+        pollSessionsOnce(true);
     }
 
     private JSONArray mergedEventsForClient(JSONArray sessions, String client) throws Exception {
@@ -1618,7 +2058,15 @@ public class MainActivity extends Activity {
         }
         rows.sort(Comparator.comparingLong(o -> o.optLong("timestamp")));
         JSONArray out = new JSONArray();
+        Set<String> seen = new HashSet<>();
         for (JSONObject row : rows) {
+            if (shouldHideLog(row)) {
+                continue;
+            }
+            String key = logDedupeKey(row);
+            if (!key.isEmpty() && !seen.add(key)) {
+                continue;
+            }
             out.put(row);
         }
         return out;
@@ -1654,38 +2102,155 @@ public class MainActivity extends Activity {
                 continue;
             }
             if ("message".equals(e.optString("_kind"))) {
-                timeline.addView(messageBubble(e.optString("role"), e.optString("text")));
+                String text = cleanDisplayText(e.optString("text"));
+                if (!text.isEmpty()) {
+                    timeline.addView(messageBubble(e.optString("role"), text));
+                }
             } else {
                 addLogRow(e);
             }
         }
+        scrollToBottom();
     }
 
     private void addLogRow(JSONObject e) {
-        String title = e.optString("title", e.optString("type"));
-        String body = e.optString("body");
-        String command = e.optString("command");
+        if (shouldHideLog(e)) {
+            return;
+        }
+        String title = cleanDisplayText(e.optString("title", e.optString("type")));
+        String body = cleanDisplayText(e.optString("body"));
+        String command = compactCommand(e.optString("command"));
         if (title.trim().isEmpty() && body.trim().isEmpty() && command.trim().isEmpty()) {
             return;
         }
         if (title.equals(body) && command.trim().isEmpty()) {
             body = "";
         }
+        if (!command.trim().isEmpty()) {
+            body = "";
+            title = commandTitle(title, e.optString("phase", e.optString("type", "")));
+        }
         LinearLayout row = cardPanel();
-        row.addView(bold(title));
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+        rowLp.setMargins(0, dp(8), 0, dp(8));
+        row.setLayoutParams(rowLp);
+        int level = e.optInt("level", 0);
+        String phase = e.optString("phase", e.optString("type", ""));
+        int accent = level >= 2 ? Color.rgb(216, 71, 86) : level == 1 ? Color.rgb(210, 132, 40) : phaseColor(phase);
+        LinearLayout head = horizontal();
+        TextView dot = copy("●");
+        dot.setTextColor(accent);
+        dot.setTextSize(13);
+        head.addView(dot, new LinearLayout.LayoutParams(dp(20), -2));
+        TextView titleView = bold(title);
+        head.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView phaseView = copy(phaseLabel(phase));
+        phaseView.setTextColor(accent);
+        phaseView.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        head.addView(phaseView, new LinearLayout.LayoutParams(dp(78), -2));
+        row.addView(head);
         if (!body.trim().isEmpty()) {
             row.addView(copy(body));
         }
         if (!command.trim().isEmpty()) {
             TextView cmd = copy(command);
             cmd.setTextColor(Color.rgb(45, 74, 124));
+            cmd.setBackground(round(Color.argb(76, 54, 104, 240), dp(10), Color.TRANSPARENT));
+            cmd.setPadding(dp(10), dp(8), dp(10), dp(8));
             row.addView(cmd);
+        }
+        int indent = Math.max(0, e.optInt("indentLevel", 0));
+        if (indent > 0) {
+            row.setPadding(dp(16 + indent * 12), dp(15), dp(16), dp(15));
         }
         String interactionId = e.optString("interactionId");
         if (!interactionId.isEmpty() && "pending".equals(e.optString("interactionStatus", "pending"))) {
             renderInteraction(e);
         }
         timeline.addView(row);
+    }
+
+    private boolean shouldHideLog(JSONObject e) {
+        if (e == null || "message".equals(e.optString("_kind"))) {
+            return false;
+        }
+        String all = (e.optString("title") + " " + e.optString("body") + " " + e.optString("command") + " " + e.optString("type") + " " + e.optString("phase"))
+                .replaceAll("\\s+", "")
+                .toLowerCase(Locale.ROOT);
+        return all.contains("扩展上下文准备")
+                || all.contains("扩展与上下文准备")
+                || all.contains("输出已结束正在整理会话记录")
+                || all.contains("codex输出已结束")
+                || all.contains("claude输出已结束")
+                || all.contains("codex已完成本次回复")
+                || all.contains("claude已完成本次回复");
+    }
+
+    private String logDedupeKey(JSONObject e) {
+        if (e == null || "message".equals(e.optString("_kind"))) {
+            return "";
+        }
+        String command = compactCommand(e.optString("command"));
+        String title = cleanDisplayText(e.optString("title", e.optString("type")));
+        String body = cleanDisplayText(e.optString("body"));
+        String phase = e.optString("phase", e.optString("type", ""));
+        String base = command.isEmpty() ? title + "|" + body : command;
+        if (base.trim().isEmpty()) {
+            return "";
+        }
+        return phase + "|" + base.replaceAll("\\s+", " ").trim();
+    }
+
+    private String commandTitle(String title, String phase) {
+        String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
+        if (p.contains("result")) {
+            return "执行结果";
+        }
+        if (p.contains("error")) {
+            return "执行异常";
+        }
+        if (p.contains("invoke") || p.contains("command") || p.contains("tool")) {
+            return "执行命令";
+        }
+        return title == null || title.trim().isEmpty() ? "执行命令" : title;
+    }
+
+    private String compactCommand(String raw) {
+        String command = cleanDisplayText(raw);
+        if (command.isEmpty()) {
+            return "";
+        }
+        int commandIndex = command.indexOf("-Command");
+        if (commandIndex >= 0) {
+            return command.substring(commandIndex).trim();
+        }
+        commandIndex = command.indexOf("-command");
+        if (commandIndex >= 0) {
+            return command.substring(commandIndex).trim();
+        }
+        command = command.replaceAll("(?i)[A-Z]:\\\\(?:[^\\\\\\s\"']+\\\\)+([^\\\\\\s\"']+)", "$1");
+        command = command.replaceAll("(?i)/(?:[^/\\s\"']+/)+([^/\\s\"']+)", "$1");
+        return command.trim();
+    }
+
+    private int phaseColor(String phase) {
+        String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
+        if (p.contains("invoke")) return INDIGO;
+        if (p.contains("result") || p.contains("complete")) return MINT;
+        if (p.contains("error")) return Color.rgb(216, 71, 86);
+        if (p.contains("intent")) return BLUE;
+        return MUTED;
+    }
+
+    private String phaseLabel(String phase) {
+        String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
+        if (p.contains("intent")) return "计划";
+        if (p.contains("invoke")) return "执行";
+        if (p.contains("result")) return "结果";
+        if (p.contains("complete")) return "完成";
+        if (p.contains("error")) return "异常";
+        if (p.contains("assistant")) return "回复";
+        return "日志";
     }
 
     private void renderInteraction(JSONObject e) {
@@ -1720,12 +2285,10 @@ public class MainActivity extends Activity {
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         boolean user = "user".equals(role);
         box.setBackground(round(user ? BLUE : GLASS, dp(16), user ? BLUE : LINE));
-        TextView t = copy(text);
+        TextView t = copy(cleanDisplayText(text));
         t.setTextColor(user ? Color.WHITE : INK);
         box.addView(t);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(user ? dp(42) : 0, dp(10), user ? 0 : dp(42), dp(2));
-        box.setLayoutParams(lp);
+        box.setLayoutParams(bubbleLayoutParams(user));
         return box;
     }
 
@@ -1736,11 +2299,95 @@ public class MainActivity extends Activity {
         TextView t = copy("");
         t.setTextColor(INK);
         box.addView(t);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins("user".equals(role) ? dp(42) : 0, dp(10), "user".equals(role) ? 0 : dp(42), dp(2));
-        box.setLayoutParams(lp);
+        box.setLayoutParams(bubbleLayoutParams("user".equals(role)));
         content.addView(box);
         return t;
+    }
+
+    private LinearLayout addImageProgressBubble() {
+        LinearLayout box = vertical();
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+        box.setBackground(round(GLASS, dp(16), LINE));
+        DrawingProgressView progress = new DrawingProgressView(this);
+        box.addView(progress, new LinearLayout.LayoutParams(dp(168), dp(168)));
+        TextView status = copy("绘制草稿...");
+        status.setTag("image_status");
+        status.setTextColor(INK);
+        box.addView(status);
+        box.setLayoutParams(bubbleLayoutParams(false));
+        content.addView(box);
+        handler.postDelayed(() -> {
+            if (requestRunning && status.getParent() != null) {
+                status.setText("细化画面...");
+            }
+        }, 1200);
+        handler.postDelayed(() -> {
+            if (requestRunning && status.getParent() != null) {
+                status.setText("后处理...");
+            }
+        }, 2400);
+        return box;
+    }
+
+    private LinearLayout.LayoutParams bubbleLayoutParams(boolean user) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(user ? dp(42) : 0, dp(8), user ? 0 : dp(42), dp(8));
+        return lp;
+    }
+
+    private View imageResultBubble(String source) {
+        LinearLayout box = vertical();
+        box.setPadding(dp(14), dp(12), dp(14), dp(12));
+        box.setBackground(round(GLASS, dp(16), LINE));
+        box.setLayoutParams(bubbleLayoutParams(false));
+        renderImageResult(box, source);
+        return box;
+    }
+
+    private void renderImageResult(LinearLayout box, String source) {
+        if (box == null) {
+            content.addView(messageBubble("assistant", source));
+            return;
+        }
+        box.removeAllViews();
+        if (source.startsWith("http://") || source.startsWith("https://") || source.startsWith("data:image/")) {
+            ImageView image = new ImageView(this);
+            image.setAdjustViewBounds(true);
+            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            image.setBackground(round(Color.WHITE, dp(14), LINE));
+            image.setOnClickListener(v -> showImagePreview(Uri.parse(source)));
+            box.addView(image, new LinearLayout.LayoutParams(-1, dp(240)));
+            if (source.startsWith("data:image/")) {
+                String base64 = source.substring(source.indexOf(",") + 1);
+                try {
+                    byte[] bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);
+                    image.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.length));
+                } catch (Exception ignored) {
+                    box.addView(copy(source));
+                }
+            } else {
+                loadImageIntoView(source, image);
+            }
+        } else {
+            box.addView(copy(cleanDisplayText(source)));
+        }
+        scrollToBottom();
+    }
+
+    private void loadImageIntoView(String url, ImageView target) {
+        executor.execute(() -> {
+            try {
+                HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(60000);
+                Bitmap bitmap = BitmapFactory.decodeStream(conn.getInputStream());
+                conn.disconnect();
+                if (bitmap != null) {
+                    ui(() -> target.setImageBitmap(bitmap));
+                }
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private JSONObject api(String method, String path, JSONObject body) throws Exception {
@@ -1925,6 +2572,37 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static class DrawingProgressView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final long startedAt = System.currentTimeMillis();
+
+        DrawingProgressView(Context context) {
+            super(context);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float size = Math.min(getWidth(), getHeight());
+            float left = (getWidth() - size) / 2f;
+            float top = (getHeight() - size) / 2f;
+            paint.setColor(Color.rgb(244, 248, 255));
+            canvas.drawRoundRect(left, top, left + size, top + size, 28, 28, paint);
+            float t = ((System.currentTimeMillis() - startedAt) % 1400) / 1400f;
+            for (int i = 0; i < 5; i++) {
+                float p = (t + i * 0.18f) % 1f;
+                paint.setColor(Color.argb((int) (70 + 120 * (1f - p)), 54, 104, 240));
+                canvas.drawCircle(left + size * (0.18f + p * 0.64f), top + size * (0.25f + i * 0.12f), size * (0.035f + p * 0.02f), paint);
+            }
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(4f);
+            paint.setColor(Color.argb(140, 73, 190, 143));
+            canvas.drawRoundRect(left + size * 0.18f, top + size * 0.18f, left + size * 0.82f, top + size * 0.82f, 22, 22, paint);
+            paint.setStyle(Paint.Style.FILL);
+            postInvalidateDelayed(33);
+        }
+    }
+
     private LinearLayout vertical() {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
@@ -2015,7 +2693,7 @@ public class MainActivity extends Activity {
             grouped.get(vendor).add(model);
         }
         List<String> ordered = new ArrayList<>();
-        for (String vendor : list("OpenAI", "Claude", "DeepSeek", "MiMo", "其他")) {
+        for (String vendor : list("OpenAI", "Claude", "Gemini", "DeepSeek", "MiMo", "其他")) {
             if (grouped.containsKey(vendor)) {
                 ordered.add(vendor);
             }
@@ -2045,6 +2723,7 @@ public class MainActivity extends Activity {
     private String modelVendor(String model) {
         String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
         if (n.startsWith("claude")) return "Claude";
+        if (n.startsWith("gemini") || n.contains("google")) return "Gemini";
         if (n.startsWith("deepseek")) return "DeepSeek";
         if (n.startsWith("mimo")) return "MiMo";
         if (n.startsWith("gpt") || n.contains("codex")) return "OpenAI";
@@ -2052,10 +2731,15 @@ public class MainActivity extends Activity {
     }
 
     private void showRecentSessions(String client) {
+        if ("chat".equals(client) || "image".equals(client)) {
+            showLocalRecentSessions(client);
+            return;
+        }
         runNetwork(() -> {
             JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
             JSONArray sessions = envelope.optJSONArray("data");
-            List<String> options = new ArrayList<>();
+            Map<String, List<String>> grouped = new HashMap<>();
+            List<String> tabs = new ArrayList<>();
             if (sessions != null) {
                 int projects = 0;
                 for (int i = 0; i < sessions.length() && projects < 3; i++) {
@@ -2064,7 +2748,7 @@ public class MainActivity extends Activity {
                         continue;
                     }
                     String title = session.optString("title", label(client) + " 会话");
-                    options.add(title);
+                    List<String> options = new ArrayList<>();
                     JSONArray messages = session.optJSONArray("messages");
                     int added = 0;
                     if (messages != null) {
@@ -2072,22 +2756,108 @@ public class MainActivity extends Activity {
                             JSONObject msg = messages.optJSONObject(j);
                             String preview = msg == null ? "" : msg.optString("text", "");
                             if (!preview.trim().isEmpty()) {
-                                options.add("  " + preview.substring(0, Math.min(26, preview.length())));
+                                options.add(preview.substring(0, Math.min(36, preview.length())));
                                 added++;
                             }
                         }
                     }
+                    if (options.isEmpty()) {
+                        options.add("暂无最近会话");
+                    }
+                    grouped.put(title, options);
+                    tabs.add(title);
                     projects++;
                 }
             }
-            if (options.isEmpty()) {
-                options.addAll(list("最近会话", "当前项目", "新建会话"));
+            if (tabs.isEmpty()) {
+                String title = label(client);
+                tabs.add(title);
+                grouped.put(title, list("暂无最近会话"));
             }
-            ui(() -> showChoice("最近会话", options, selectedCliSession, value -> {
+            ui(() -> showGroupedChoice(label(client) + " 最近会话", tabs, grouped, selectedCliSession, value -> {
                 selectedCliSession = value.trim();
-                toast("已选择 " + selectedCliSession);
+                if (!"暂无最近会话".equals(selectedCliSession)) {
+                    toast("已选择 " + selectedCliSession);
+                    pollSessionsOnce();
+                }
             }));
         });
+    }
+
+    private void showLocalRecentSessions(String mode) {
+        Map<String, List<String>> grouped = new HashMap<>();
+        List<String> tabs = new ArrayList<>();
+        Map<String, String> sessionIdByTitle = new HashMap<>();
+        try {
+            JSONObject root = localConversationStore(mode);
+            JSONArray sessions = root.optJSONArray("sessions");
+            List<JSONObject> rows = new ArrayList<>();
+            if (sessions != null) {
+                for (int i = 0; i < sessions.length(); i++) {
+                    JSONObject session = sessions.optJSONObject(i);
+                    if (session != null) {
+                        rows.add(session);
+                    }
+                }
+            }
+            rows.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
+            for (JSONObject session : rows) {
+                String group = session.optString("group", "默认助手");
+                List<String> values = grouped.get(group);
+                if (values == null) {
+                    values = new ArrayList<>();
+                    grouped.put(group, values);
+                    tabs.add(group);
+                }
+                String title = session.optString("title", "未命名会话");
+                values.add(title);
+                sessionIdByTitle.put(group + "\n" + title, session.optString("id"));
+            }
+        } catch (Exception ignored) {
+        }
+        if (tabs.isEmpty()) {
+            String fallback = "chat".equals(mode) ? selectedChatAssistant : selectedImageAssistant;
+            grouped.put(fallback, list("暂无最近会话"));
+            tabs.add(fallback);
+        }
+        showGroupedChoice(label(mode) + " 最近会话", tabs, grouped, "", value -> {
+            if (!"暂无最近会话".equals(value)) {
+                String selectedId = "";
+                for (String tab : tabs) {
+                    selectedId = sessionIdByTitle.get(tab + "\n" + value);
+                    if (selectedId != null && !selectedId.isEmpty()) {
+                        break;
+                    }
+                }
+                if (selectedId != null && !selectedId.isEmpty()) {
+                    setActiveLocalSessionId(mode, selectedId);
+                    renderSection();
+                }
+            }
+        });
+    }
+
+    private void saveLocalRecent(String mode, String group, String prompt) {
+        String key = mode + "_recent_sessions";
+        String safeGroup = group == null || group.trim().isEmpty() ? "默认助手" : group.trim();
+        try {
+            JSONObject root = new JSONObject(prefs.getString(key, "{}"));
+            JSONArray rows = root.optJSONArray(safeGroup);
+            if (rows == null) {
+                rows = new JSONArray();
+            }
+            JSONArray next = new JSONArray();
+            next.put(prompt);
+            for (int i = 0; i < rows.length() && next.length() < 8; i++) {
+                String item = rows.optString(i);
+                if (!item.equals(prompt)) {
+                    next.put(item);
+                }
+            }
+            root.put(safeGroup, next);
+            prefs.edit().putString(key, root.toString()).apply();
+        } catch (Exception ignored) {
+        }
     }
 
     private void showExtensionsChoice(String client) {
@@ -2099,16 +2869,22 @@ public class MainActivity extends Activity {
             grouped.put("Skill", new ArrayList<>());
             grouped.put("Plugin", new ArrayList<>());
             grouped.put("Command", new ArrayList<>());
+            Map<String, String> kindByName = new HashMap<>();
             int skillCount = appendExtensions(grouped.get("Skill"), data, "skill", client);
             int pluginCount = appendExtensions(grouped.get("Plugin"), data, "plugin", client);
             int commandCount = appendExtensions(grouped.get("Command"), data, "command", client);
+            for (String name : grouped.get("Skill")) kindByName.put(name, "skill");
+            for (String name : grouped.get("Plugin")) kindByName.put(name, "plugin");
+            for (String name : grouped.get("Command")) kindByName.put(name, "command");
             if (commandCount == 0) {
-                grouped.get("Command").add("Command · /resume");
-                grouped.get("Command").add("Command · /compact");
-                grouped.get("Command").add("Command · /plan");
+                for (String command : list("/resume", "/compact", "/plan")) {
+                    grouped.get("Command").add(command);
+                    kindByName.put(command, "command");
+                }
             }
             if (skillCount == 0 && pluginCount == 0 && commandCount == 0) {
                 grouped.get("Command").add("默认");
+                kindByName.put("默认", "command");
             }
             List<String> tabs = new ArrayList<>();
             for (String tab : list("Skill", "Plugin", "Command")) {
@@ -2119,7 +2895,8 @@ public class MainActivity extends Activity {
             }
             ui(() -> showGroupedChoice("Skill / Plugin / Command", tabs, grouped, selectedSkillPlugin, value -> {
                 selectedSkillPlugin = value;
-                toast("已选择 " + value);
+                addExtensionRef(kindByName.getOrDefault(value, value.startsWith("/") ? "command" : "skill"), value);
+                toast("已引用 " + value);
             }));
         });
     }
@@ -2139,7 +2916,7 @@ public class MainActivity extends Activity {
                 continue;
             }
             String name = item.optString("name", "");
-            String label = extensionKindLabel(kind) + " · " + name;
+            String label = name;
             if (!name.isEmpty() && !out.contains(label)) {
                 out.add(label);
                 count++;
@@ -2185,16 +2962,30 @@ public class MainActivity extends Activity {
         titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
         panel.addView(titleRow);
 
-        LinearLayout tabRow = horizontal();
-        tabRow.setPadding(0, dp(8), 0, dp(8));
+        LinearLayout tabPanel = vertical();
+        tabPanel.setPadding(0, dp(8), 0, dp(8));
         LinearLayout optionsBox = vertical();
         ScrollView scroller = new ScrollView(this);
         scroller.setVerticalScrollBarEnabled(false);
         scroller.addView(optionsBox);
-        final String[] activeTab = {tabs.get(0)};
+        String initialTab = tabs.get(0);
+        for (String tab : tabs) {
+            List<String> values = grouped.get(tab);
+            if (values != null && values.contains(current)) {
+                initialTab = tab;
+                break;
+            }
+        }
+        final String[] activeTab = {initialTab};
+        final List<Button> tabButtons = new ArrayList<>();
         final Runnable[] renderOptions = new Runnable[1];
         renderOptions[0] = () -> {
             optionsBox.removeAllViews();
+            for (Button button : tabButtons) {
+                boolean active = activeTab[0].equals(String.valueOf(button.getTag()));
+                button.setTextColor(active ? Color.WHITE : INK);
+                button.setBackground(round(active ? BLUE : Color.argb(120, 255, 255, 255), dp(16), active ? BLUE : LINE));
+            }
             List<String> values = grouped.get(activeTab[0]);
             if (values == null || values.isEmpty()) {
                 optionsBox.addView(copy("暂无可选项"));
@@ -2202,6 +2993,10 @@ public class MainActivity extends Activity {
             }
             for (String option : values) {
                 Button entry = drawerButton(option.equals(current) ? option + "  ✓" : option);
+                if (option.equals(current)) {
+                    entry.setTextColor(BLUE);
+                    entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
+                }
                 entry.setOnClickListener(v -> {
                     handler.onChoice(option);
                     dialog.dismiss();
@@ -2209,18 +3004,27 @@ public class MainActivity extends Activity {
                 optionsBox.addView(entry);
             }
         };
-        for (String tab : tabs) {
+        LinearLayout tabRow = null;
+        for (int i = 0; i < tabs.size(); i++) {
+            if (i % 3 == 0) {
+                tabRow = horizontal();
+                tabPanel.addView(tabRow, new LinearLayout.LayoutParams(-1, dp(36)));
+            }
+            String tab = tabs.get(i);
             Button button = ghost(tab);
+            button.setSingleLine(true);
+            button.setTag(tab);
             button.setTextSize(12);
             button.setOnClickListener(v -> {
                 activeTab[0] = tab;
                 renderOptions[0].run();
             });
+            tabButtons.add(button);
             LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(0, dp(34), 1);
             tabLp.setMargins(0, 0, dp(6), 0);
             tabRow.addView(button, tabLp);
         }
-        panel.addView(tabRow);
+        panel.addView(tabPanel);
         renderOptions[0].run();
         panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(310)));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
@@ -2470,6 +3274,36 @@ public class MainActivity extends Activity {
         lp.setMargins(0, dp(8), 0, 0);
         b.setLayoutParams(lp);
         return b;
+    }
+
+    private View drawerEntry(String item) {
+        LinearLayout row = horizontal();
+        row.setPadding(dp(12), 0, dp(12), 0);
+        row.setBackground(round(Color.argb(120, 255, 255, 255), dp(16), LINE));
+        TextView icon = copy(drawerIcon(item));
+        icon.setTextSize(16);
+        icon.setTextColor(BLUE);
+        icon.setGravity(Gravity.CENTER);
+        row.addView(icon, new LinearLayout.LayoutParams(dp(34), -1));
+        TextView text = bold(label(item));
+        text.setTextSize(16);
+        text.setGravity(Gravity.CENTER);
+        row.addView(text, new LinearLayout.LayoutParams(0, -1, 1));
+        View spacer = new View(this);
+        row.addView(spacer, new LinearLayout.LayoutParams(dp(34), -1));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(46));
+        lp.setMargins(0, dp(10), 0, 0);
+        row.setLayoutParams(lp);
+        return row;
+    }
+
+    private String drawerIcon(String item) {
+        if ("assistants".equals(item)) return "✦";
+        if ("subscriptions".equals(item)) return "◆";
+        if ("service".equals(item)) return "●";
+        if ("wallet".equals(item)) return "□";
+        if ("settings".equals(item)) return "⚙";
+        return "•";
     }
 
     private GradientDrawable round(int fill, int radius, int stroke) {
@@ -2745,6 +3579,13 @@ public class MainActivity extends Activity {
 
     private void ui(Runnable runnable) {
         handler.post(runnable);
+    }
+
+    private void scrollToBottom() {
+        if (contentScroll == null) {
+            return;
+        }
+        contentScroll.post(() -> contentScroll.fullScroll(View.FOCUS_DOWN));
     }
 
     private void toast(String message) {
