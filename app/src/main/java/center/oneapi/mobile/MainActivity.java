@@ -3,6 +3,8 @@ package center.oneapi.mobile;
 import android.app.Activity;
 import android.app.Dialog;
 import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -21,12 +23,18 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -84,6 +92,7 @@ public class MainActivity extends Activity {
     private LinearLayout content;
     private LinearLayout composerHost;
     private LinearLayout topNav;
+    private TextView navMenuSeparator;
     private LinearLayout timeline;
     private LinearLayout interactionBar;
     private ScrollView contentScroll;
@@ -106,7 +115,7 @@ public class MainActivity extends Activity {
     private String selectedImageSize = "1024x1024";
     private String selectedImageQuality = "标准";
     private String selectedContextWindow = "自动";
-    private String selectedCliSession = "最近会话";
+    private String selectedCliSession = "会话记录";
     private String selectedSkillPlugin = "默认";
     private String selectedRecentJobId = "";
     private String activeChatSessionId = "";
@@ -117,9 +126,16 @@ public class MainActivity extends Activity {
     private boolean requestRunning = false;
     private boolean cliRefreshRunning = false;
     private long lastCliRefreshAt = 0L;
+    private float swipeStartX = 0f;
+    private float swipeStartY = 0f;
+    private long lastExitSwipeAt = 0L;
+    private int lastExitSwipeDirection = 0;
+    private long suppressSwipeUntil = 0L;
     private final Set<String> autoScrolledSections = new HashSet<>();
+    private final Set<String> expandedLogIds = new HashSet<>();
     private final List<Uri> selectedAttachmentUris = new ArrayList<>();
     private final List<JSONObject> selectedExtensionRefs = new ArrayList<>();
+    private View activeBubbleActions;
 
     private String section = "chat";
     private String boundDeviceId = "";
@@ -184,6 +200,10 @@ public class MainActivity extends Activity {
         selectedImageAssistant = prefs.getString("selected_image_assistant", selectedImageAssistant);
         selectedImageSize = prefs.getString("selected_image_size", selectedImageSize);
         selectedImageQuality = prefs.getString("selected_image_quality", selectedImageQuality);
+        if (!"标准".equals(selectedImageQuality) && !"高清".equals(selectedImageQuality)) {
+            selectedImageQuality = "高清".equals(selectedImageQuality) || "极致".equals(selectedImageQuality) ? "高清" : "标准";
+            prefs.edit().putString("selected_image_quality", selectedImageQuality).apply();
+        }
         selectedContextWindow = prefs.getString("selected_context_window", selectedContextWindow);
         selectedReasoning = prefs.getString("selected_reasoning", selectedReasoning);
         selectedPermission = prefs.getString("selected_permission", selectedPermission);
@@ -267,7 +287,7 @@ public class MainActivity extends Activity {
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         composerHost = vertical();
-        composerHost.setPadding(dp(18), 0, dp(18), dp(14));
+        composerHost.setPadding(0, 0, 0, dp(12));
         composerHost.setBackground(round(Color.argb(224, 255, 255, 255), dp(18), Color.TRANSPARENT));
         root.addView(composerHost);
         shell.addView(root, new FrameLayout.LayoutParams(-1, -1));
@@ -279,6 +299,7 @@ public class MainActivity extends Activity {
         refreshDevices(false);
         startPolling();
         installKeyboardLift();
+        installSwipeNavigation();
     }
 
     private View header() {
@@ -286,11 +307,16 @@ public class MainActivity extends Activity {
         bar.setPadding(dp(18), dp(10), dp(18), dp(6));
         topNav = horizontal();
         bar.addView(topNav, new LinearLayout.LayoutParams(0, dp(42), 1));
+        navMenuSeparator = copy("·");
+        navMenuSeparator.setTextColor(Color.rgb(112, 124, 146));
+        navMenuSeparator.setTextSize(18);
+        navMenuSeparator.setGravity(Gravity.CENTER);
+        bar.addView(navMenuSeparator, new LinearLayout.LayoutParams(dp(12), dp(42)));
         Button menu = iconButton("☰");
         menu.setContentDescription("打开菜单");
         menu.setOnClickListener(v -> openDrawer());
         LinearLayout.LayoutParams menuLp = new LinearLayout.LayoutParams(dp(42), dp(42));
-        menuLp.setMargins(dp(12), 0, 0, 0);
+        menuLp.setMargins(dp(8), 0, 0, 0);
         bar.addView(menu, menuLp);
         statusText = copy(boundDeviceId.isEmpty() ? "未绑定设备" : "绑定设备 " + shortId(boundDeviceId));
         return bar;
@@ -303,6 +329,9 @@ public class MainActivity extends Activity {
         topNav.removeAllViews();
         boolean mainSection = "chat".equals(section) || "image".equals(section) || "codex".equals(section) || "claude".equals(section) || "assistants".equals(section);
         topNav.setVisibility(mainSection ? View.VISIBLE : View.INVISIBLE);
+        if (navMenuSeparator != null) {
+            navMenuSeparator.setVisibility(mainSection ? View.VISIBLE : View.INVISIBLE);
+        }
         if (!mainSection) {
             return;
         }
@@ -336,7 +365,7 @@ public class MainActivity extends Activity {
         overlay.setBackgroundColor(Color.argb(72, 15, 23, 42));
         LinearLayout panel = vertical();
         panel.setBackground(round(Color.rgb(247, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(10), dp(12), dp(10), dp(12));
+        panel.setPadding(dp(20), dp(12), dp(20), dp(12));
         LinearLayout titleRow = horizontal();
         titleRow.addView(bold("菜单"), new LinearLayout.LayoutParams(0, -2, 1));
         Button close = iconButton("×");
@@ -378,6 +407,7 @@ public class MainActivity extends Activity {
         if (content == null || composerHost == null) {
             return;
         }
+        activeBubbleActions = null;
         content.removeAllViews();
         composerHost.removeAllViews();
         if ("codex".equals(section) || "claude".equals(section)) {
@@ -438,9 +468,9 @@ public class MainActivity extends Activity {
                 }
                 long timestamp = item.optLong("timestamp", 0);
                 if ("image".equals(type)) {
-                    content.addView(imageResultBubble(text, timestamp));
+                    content.addView(imageResultBubble(text, timestamp, mode, i));
                 } else {
-                    content.addView(messageBubble(role, text, timestamp));
+                    content.addView(messageBubble(role, text, timestamp, mode, i));
                 }
             }
             scrollToBottomOnce("local:" + mode);
@@ -448,13 +478,11 @@ public class MainActivity extends Activity {
     }
 
     private View loadingRow(String text) {
-        LinearLayout row = cardPanel();
+        LinearLayout row = vertical();
+        row.setGravity(Gravity.CENTER);
         row.addView(new DrawingProgressView(this), new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView label = copy(text);
-        label.setGravity(Gravity.CENTER_HORIZONTAL);
-        row.addView(label);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(8), 0, dp(8));
+        lp.setMargins(0, dp(18), 0, dp(18));
         row.setLayoutParams(lp);
         return row;
     }
@@ -708,8 +736,8 @@ public class MainActivity extends Activity {
                 selectedAttachmentUris.remove(selectedAttachmentUris.size() - 1);
             }
         }
-        box.setBackground(round(Color.argb(235, 255, 255, 255), dp(18), LINE));
-        box.setPadding(dp(8), dp(8), dp(8), dp(8));
+        box.setBackground(round(Color.argb(20, 255, 255, 255), dp(18), LINE));
+        box.setPadding(dp(12), dp(8), dp(12), dp(8));
         attachmentPreviewHost = horizontal();
         attachmentPreviewHost.setPadding(0, 0, 0, dp(8));
         box.addView(attachmentPreviewHost);
@@ -719,16 +747,25 @@ public class MainActivity extends Activity {
         renderAttachmentPreview();
         renderExtensionPreview();
         activeInput = input(hint);
+        if ("assistants".equals(section)) {
+            activeInput.setBackground(round(Color.argb(18, 255, 255, 255), dp(14), LINE));
+        }
         activeInput.setMinLines(2);
         activeInput.setMaxLines(5);
         activeInput.setVerticalScrollBarEnabled(false);
         activeInput.setOverScrollMode(View.OVER_SCROLL_NEVER);
         activeInput.setGravity(Gravity.TOP | Gravity.START);
         activeInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        activeInput.setOnClickListener(v -> focusComposerInput());
+        activeInput.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                handler.postDelayed(() -> showKeyboard(activeInput), 80);
+            }
+        });
         box.addView(activeInput);
 
         LinearLayout row = horizontal();
-        row.setPadding(dp(10), dp(8), dp(10), 0);
+        row.setPadding(dp(4), dp(8), dp(4), 0);
         LinearLayout left = horizontal();
         addComposerTools(left, mode);
         LinearLayout right = horizontal();
@@ -758,8 +795,8 @@ public class MainActivity extends Activity {
     private void addComposerTools(LinearLayout left, String mode) {
         if ("chat".equals(mode)) {
             addToolButton(left, R.drawable.tool_add, "上传附件", this::openImagePicker);
-            addToolButton(left, R.drawable.tool_history, "最近会话", () -> showRecentSessions(mode));
-            addToolButton(left, R.drawable.tool_module, "AI 模型选择", () -> showModelChoice("AI 模型选择", chatModelOptions(), selectedChatModel, "chat", value -> {
+            addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
+            addToolButton(left, R.drawable.tool_module, "模型选择", () -> showModelChoice("模型选择", chatModelOptions(), selectedChatModel, "chat", value -> {
                 selectedChatModel = value;
                 prefs.edit().putString("selected_chat_model", value).apply();
             }));
@@ -773,7 +810,7 @@ public class MainActivity extends Activity {
                 selectedReasoning = value;
                 prefs.edit().putString("selected_reasoning", value).apply();
             }));
-            addToolButton(left, R.drawable.tool_text, "上下文长度", () -> showChoice("上下文长度", list("自动", "短上下文", "长上下文"), selectedContextWindow, value -> {
+            addToolButton(left, R.drawable.tool_text, "上下文", () -> showChoice("上下文", list("自动", "短上下文", "长上下文"), selectedContextWindow, value -> {
                 selectedContextWindow = value;
                 prefs.edit().putString("selected_context_window", value).apply();
             }));
@@ -781,7 +818,7 @@ public class MainActivity extends Activity {
         }
         if ("image".equals(mode)) {
             addToolButton(left, R.drawable.tool_add, "上传附件", this::openImagePicker);
-            addToolButton(left, R.drawable.tool_history, "最近会话", () -> showRecentSessions(mode));
+            addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
             addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", imageAssistantOptions(), selectedImageAssistant, value -> {
                 selectedImageAssistant = value;
                 prefs.edit().putString("selected_image_assistant", value).apply();
@@ -792,23 +829,20 @@ public class MainActivity extends Activity {
                 selectedImageSize = value;
                 prefs.edit().putString("selected_image_size", value).apply();
             }));
-            addToolButton(left, R.drawable.tool_ratio, "分辨率", () -> showChoice("分辨率", list("标准", "高清", "极致"), selectedImageQuality, value -> {
+            addToolButton(left, R.drawable.tool_ratio, "质量", () -> showChoice("质量", list("标准", "高清"), selectedImageQuality, value -> {
                 selectedImageQuality = value;
                 prefs.edit().putString("selected_image_quality", value).apply();
             }));
-            addToolButton(left, R.drawable.tool_random, "随机", () -> {
-                imageRandomSeed = !imageRandomSeed;
-            });
             return;
         }
         if ("codex".equals(mode) || "claude".equals(mode)) {
-            addToolButton(left, R.drawable.tool_history, "最近会话", () -> showRecentSessions(mode));
-            addToolButton(left, selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority, "权限模式", () -> showChoice("权限模式", list("受限模式", "全权限模式"), selectedPermission, value -> {
-                selectedPermission = value;
-                prefs.edit().putString("selected_permission", value).apply();
+            addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
+            addToolButton(left, selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority, "权限模式", () -> {
+                selectedPermission = selectedPermission.contains("全权限") ? "受限模式" : "全权限模式";
+                prefs.edit().putString("selected_permission", selectedPermission).apply();
                 renderSection();
-            }));
-            addToolButton(left, R.drawable.tool_module, "AI 模型选择", () -> showModelChoice("AI 模型选择", "codex".equals(mode) ? codexModels : claudeModels, selectedCliModelFor(mode), mode, value -> {
+            });
+            addToolButton(left, R.drawable.tool_module, "模型选择", () -> showModelChoice("模型选择", "codex".equals(mode) ? codexModels : claudeModels, selectedCliModelFor(mode), mode, value -> {
                 if ("codex".equals(mode)) {
                     selectedCodexModel = value;
                     prefs.edit().putString("selected_codex_model", value).apply();
@@ -897,10 +931,9 @@ public class MainActivity extends Activity {
         close.setOnClickListener(v -> dialog.dismiss());
         titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
         panel.addView(titleRow);
-        ImageView preview = new ImageView(this);
-        setImageSource(preview, uri.toString());
-        preview.setAdjustViewBounds(true);
-        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        WebView preview = new WebView(this);
+        configureContentWebView(preview);
+        preview.loadDataWithBaseURL("https://ai.oneapi.center/", imagePreviewHtml(imageSourceForPreview(uri)), "text/html", "utf-8", null);
         LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(-1, dp(420));
         previewLp.setMargins(0, dp(10), 0, 0);
         panel.addView(preview, previewLp);
@@ -917,6 +950,27 @@ public class MainActivity extends Activity {
             shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
         }
+    }
+
+    private String imageSourceForPreview(Uri uri) {
+        String source = uri == null ? "" : uri.toString();
+        if (source.startsWith("content:") || source.startsWith("file:")) {
+            String dataUrl = uriToDataUrl(uri);
+            return dataUrl.isEmpty() ? source : dataUrl;
+        }
+        return source;
+    }
+
+    private String imagePreviewHtml(String source) {
+        String jsSource = JSONObject.quote(source == null ? "" : source);
+        return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<style>html,body,#frame{height:100%;margin:0;background:#0f172a;overflow:hidden}#frame{display:flex;align-items:center;justify-content:center}img{max-width:100%;max-height:100%;object-fit:contain;touch-action:none;user-select:none;transform-origin:center center;will-change:transform}</style>"
+                + "</head><body><div id='frame'><img id='img'></div><script>const img=document.getElementById('img');img.src=" + jsSource + ";let scale=1,x=0,y=0,drag=false,lx=0,ly=0;"
+                + "function apply(){img.style.transform='translate('+x+'px,'+y+'px) scale('+scale+')'}"
+                + "img.ondblclick=(e)=>{e.preventDefault();scale=scale>1?1:2.4;x=0;y=0;apply()};"
+                + "img.onpointerdown=(e)=>{if(scale<=1)return;drag=true;lx=e.clientX;ly=e.clientY;img.setPointerCapture&&img.setPointerCapture(e.pointerId)};"
+                + "img.onpointermove=(e)=>{if(!drag)return;x+=e.clientX-lx;y+=e.clientY-ly;lx=e.clientX;ly=e.clientY;apply();e.preventDefault()};"
+                + "img.onpointerup=img.onpointercancel=()=>{drag=false};</script></body></html>";
     }
 
     private void renderExtensionPreview() {
@@ -1030,6 +1084,7 @@ public class MainActivity extends Activity {
                 names.add(name);
             }
         }
+        appendCustomAssistantNames("chat", names);
         if (names.isEmpty()) {
             names.addAll(list("默认助手", "流程图专家（Mermaid）", "产品经理", "项目管理", "前端工程师", "开发工程师", "网页生成", "运维工程师", "网络安全专家", "UX/UI开发者", "法务", "律师", "市场营销"));
         }
@@ -1044,13 +1099,29 @@ public class MainActivity extends Activity {
                 names.add(name);
             }
         }
+        appendCustomAssistantNames("image", names);
         if (names.isEmpty()) {
             names.addAll(list("通用绘图", "图片编辑", "动画与漫画", "游戏", "复古与赛博朋克", "电影与动画", "角色设计", "字体设计和海报", "插图", "水彩画", "水墨与中国风", "像素艺术", "等距视角", "产品与食品", "品牌系统与标识", "摄影", "信息图表和实地指南", "数字艺术创作助手"));
         }
         return names;
     }
 
+    private void appendCustomAssistantNames(String scope, List<String> names) {
+        JSONArray rows = customAssistants(scope);
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            String name = item == null ? "" : item.optString("name", "");
+            if (!name.isEmpty() && !names.contains(name)) {
+                names.add(name);
+            }
+        }
+    }
+
     private String assistantPrompt(String name) {
+        String custom = customAssistantPrompt("chat", name);
+        if (!custom.trim().isEmpty()) {
+            return custom;
+        }
         for (JSONObject assistant : chatAssistants) {
             if (name.equals(assistant.optString("name"))) {
                 String prompt = assistant.optString("prompt", "");
@@ -1077,6 +1148,10 @@ public class MainActivity extends Activity {
     }
 
     private String imageAssistantPrompt(String name, String prompt) {
+        String custom = customAssistantPrompt("image", name);
+        if (!custom.trim().isEmpty()) {
+            return custom + "\n\n用户图片需求：" + prompt;
+        }
         for (JSONObject assistant : imageAssistants) {
             if (name.equals(assistant.optString("name"))) {
                 String assistantPrompt = assistant.optString("prompt", "");
@@ -1140,6 +1215,101 @@ public class MainActivity extends Activity {
             return "信息图表和实地指南风格，结构清晰、标签可读、图文层级明确，" + prompt;
         }
         return prompt;
+    }
+
+    private JSONArray customAssistants(String scope) {
+        try {
+            return new JSONArray(prefs.getString(scope + "_custom_assistants", "[]"));
+        } catch (Exception ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private void saveCustomAssistants(String scope, JSONArray rows) {
+        prefs.edit().putString(scope + "_custom_assistants", rows.toString()).apply();
+    }
+
+    private JSONObject findCustomAssistant(String scope, String name) {
+        JSONArray rows = customAssistants(scope);
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            if (item != null && name.equals(item.optString("name"))) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    private String customAssistantPrompt(String scope, String name) {
+        JSONObject item = findCustomAssistant(scope, name);
+        return item == null ? "" : item.optString("prompt", "");
+    }
+
+    private String assistantShareText(String scope, String name) {
+        String prompt = "image".equals(scope) ? imageAssistantPrompt(name, "") : assistantPrompt(name);
+        return name + (prompt.trim().isEmpty() ? "" : "\n\n" + prompt.trim());
+    }
+
+    private void saveCustomAssistant(String scope, String oldName, String name, String prompt) {
+        String cleanName = cleanDisplayText(name);
+        if (cleanName.isEmpty()) {
+            toast("助手名称不能为空");
+            return;
+        }
+        JSONArray rows = customAssistants(scope);
+        JSONArray next = new JSONArray();
+        try {
+            boolean saved = false;
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject item = rows.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                if (oldName.equals(item.optString("name")) || cleanName.equals(item.optString("name"))) {
+                    if (!saved) {
+                        next.put(new JSONObject().put("name", cleanName).put("prompt", prompt == null ? "" : prompt.trim()));
+                        saved = true;
+                    }
+                } else {
+                    next.put(item);
+                }
+            }
+            if (!saved) {
+                next.put(new JSONObject().put("name", cleanName).put("prompt", prompt == null ? "" : prompt.trim()));
+            }
+            saveCustomAssistants(scope, next);
+            if ("image".equals(scope)) {
+                selectedImageAssistant = cleanName;
+                prefs.edit().putString("selected_image_assistant", cleanName).apply();
+            } else {
+                selectedChatAssistant = cleanName;
+                prefs.edit().putString("selected_chat_assistant", cleanName).apply();
+            }
+            renderSection();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void deleteCustomAssistant(String scope, String name) {
+        JSONArray rows = customAssistants(scope);
+        boolean removed = false;
+        JSONArray next = new JSONArray();
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            if (item != null && name.equals(item.optString("name"))) {
+                removed = true;
+                continue;
+            }
+            if (item != null) {
+                next.put(item);
+            }
+        }
+        if (!removed) {
+            toast("内置助手不能删除");
+            return;
+        }
+        saveCustomAssistants(scope, next);
+        renderSection();
     }
 
     private String localConversationGroup(String mode) {
@@ -1330,10 +1500,11 @@ public class MainActivity extends Activity {
         renderAttachmentPreview();
         saveLocalRecent("chat", selectedChatAssistant, prompt);
         appendLocalConversation("chat", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt, System.currentTimeMillis()));
+        content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "chat", -1));
         scrollToBottom();
-        TextView live = addStreamingBubble("assistant", System.currentTimeMillis());
-        live.setText("正在思考...");
+        long assistantStartedAt = System.currentTimeMillis();
+        LinearLayout live = addStreamingBubble("assistant", assistantStartedAt);
+        updateStreamingBubble(live, "正在思考...", assistantStartedAt, false);
         scrollToBottom();
         runNetwork(() -> {
             JSONObject body = new JSONObject();
@@ -1344,7 +1515,7 @@ public class MainActivity extends Activity {
                 body.put("reasoning_effort", reasoning);
             }
             JSONArray messages = new JSONArray();
-            messages.put(new JSONObject().put("role", "system").put("content", assistantPrompt(selectedChatAssistant) + "\n上下文长度：" + selectedContextWindow));
+            messages.put(new JSONObject().put("role", "system").put("content", assistantPrompt(selectedChatAssistant) + "\n上下文：" + selectedContextWindow));
             for (int i = 0; i < contextMessages.length(); i++) {
                 JSONObject item = contextMessages.optJSONObject(i);
                 if (item != null) {
@@ -1363,14 +1534,14 @@ public class MainActivity extends Activity {
                 messages.put(new JSONObject().put("role", "user").put("content", contentParts));
             }
             body.put("messages", messages);
-            String text = streamChatResponse(body, live);
+            String text = streamChatResponse(body, live, assistantStartedAt);
             ui(() -> {
                 setSending(false);
                 if (text.trim().isEmpty()) {
-                    live.setText("本次没有返回可显示内容。");
+                    replaceStreamingBubble(live, "本次没有返回可显示内容。", assistantStartedAt);
                     appendLocalConversation("chat", "assistant", "text", "本次没有返回可显示内容。");
                 } else {
-                    live.setText(text);
+                    replaceStreamingBubble(live, text, assistantStartedAt);
                     appendLocalConversation("chat", "assistant", "text", text);
                 }
                 scrollToBottom();
@@ -1436,7 +1607,7 @@ public class MainActivity extends Activity {
         renderAttachmentPreview();
         saveLocalRecent("image", selectedImageAssistant, prompt);
         appendLocalConversation("image", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt, System.currentTimeMillis()));
+        content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "image", -1));
         scrollToBottom();
         LinearLayout progress = addImageProgressBubble();
         scrollToBottom();
@@ -1478,9 +1649,8 @@ public class MainActivity extends Activity {
     }
 
     private String imageQualityValue(String label) {
-        if (label.contains("高清")) return "hd";
-        if (label.contains("极致")) return "high";
-        return "standard";
+        if (label.contains("高清")) return "high";
+        return "medium";
     }
 
     private String uriToDataUrl(Uri uri) {
@@ -1539,7 +1709,7 @@ public class MainActivity extends Activity {
         return b64.isEmpty() ? "图片已生成，服务器返回了图片数据。" : "data:image/png;base64," + b64;
     }
 
-    private String streamChatResponse(JSONObject body, TextView live) throws Exception {
+    private String streamChatResponse(JSONObject body, LinearLayout live, long timestamp) throws Exception {
         String base = prefs.getString("server", "").replaceAll("/+$", "");
         HttpURLConnection conn = (HttpURLConnection) new URL(base + "/pg/chat/completions").openConnection();
         conn.setConnectTimeout(15000);
@@ -1570,7 +1740,7 @@ public class MainActivity extends Activity {
             String raw = readStream(conn.getInputStream());
             conn.disconnect();
             String text = extractChatText(new JSONObject(raw.isEmpty() ? "{}" : raw));
-            ui(() -> live.setText(text));
+            ui(() -> updateStreamingBubble(live, text, timestamp, false));
             return text;
         }
         StringBuilder answer = new StringBuilder();
@@ -1596,20 +1766,20 @@ public class MainActivity extends Activity {
                     if (delta == null) {
                         continue;
                     }
-                    String reasoning = cleanJsonString(delta, "reasoning_content");
-                    if (reasoning.isEmpty()) {
-                        reasoning = cleanJsonString(delta, "reasoning");
+                    String reasoning = rawJsonString(delta, "reasoning_content");
+                    if (reasoning.length() == 0) {
+                        reasoning = rawJsonString(delta, "reasoning");
                     }
-                    String content = cleanJsonString(delta, "content");
-                    if (!reasoning.isEmpty()) {
+                    String content = rawJsonString(delta, "content");
+                    if (reasoning.length() > 0) {
                         thinking.append(reasoning);
                     }
-                    if (!content.isEmpty()) {
+                    if (content.length() > 0) {
                         answer.append(content);
                     }
                     String rendered = renderLiveChatText(thinking.toString(), answer.toString());
                     ui(() -> {
-                        live.setText(rendered);
+                        updateStreamingBubble(live, rendered, timestamp, false);
                         scrollToBottom();
                     });
                 } catch (Exception ignored) {
@@ -1697,6 +1867,13 @@ public class MainActivity extends Activity {
         return cleanDisplayText(jsonValueToText(object.opt(key)));
     }
 
+    private String rawJsonString(JSONObject object, String key) {
+        if (object == null || key == null || !object.has(key) || object.isNull(key)) {
+            return "";
+        }
+        return jsonValueToText(object.opt(key)).replace("\u0000", "");
+    }
+
     private String jsonValueToText(Object value) {
         if (value == null || value == JSONObject.NULL) {
             return "";
@@ -1767,10 +1944,14 @@ public class MainActivity extends Activity {
             list.addView(card("暂无可订阅套餐", "服务器当前没有开启可订阅套餐。"));
             return;
         }
+        Set<String> recommendedPlans = recommendedPlanKeys(records);
         for (int i = 0; i < records.length(); i++) {
             JSONObject record = records.optJSONObject(i);
             JSONObject plan = record == null ? null : record.optJSONObject("plan");
             if (plan == null || !plan.optBoolean("enabled", true)) {
+                continue;
+            }
+            if (isTrialPlan(plan) && hasPurchasedPlan(record, plan)) {
                 continue;
             }
             String title = plan.optString("title", "套餐");
@@ -1778,23 +1959,150 @@ public class MainActivity extends Activity {
             String price = formatPlainPrice(plan.optDouble("price_amount", 0));
             String quota = formatQuotaAsUsd(plan.optDouble("total_amount", 0), 500000);
             String validity = formatDuration(plan);
-            LinearLayout panel = cardPanel();
+            String reset = resetLabel(plan.optString("quota_reset_period", "never"));
+            boolean trialPlan = isTrialPlan(plan);
+            boolean recommended = recommendedPlans.contains(planKey(plan));
+            FrameLayout frame = subscriptionCardFrame();
+            if (trialPlan) {
+                ImageView gift = new ImageView(this);
+                gift.setImageResource(R.drawable.plan_gift);
+                gift.setAlpha(0.5f);
+                gift.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                FrameLayout.LayoutParams giftLp = new FrameLayout.LayoutParams(dp(96), dp(96), Gravity.CENTER);
+                frame.addView(gift, giftLp);
+                frame.post(() -> {
+                    int side = Math.max(dp(72), frame.getHeight() / 2);
+                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(side, side, Gravity.CENTER);
+                    gift.setLayoutParams(lp);
+                });
+            }
+            LinearLayout panel = vertical();
+            panel.setPadding(dp(16), dp(15), dp(16), dp(15));
             LinearLayout head = horizontal();
             head.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-            TextView badge = copy(price + " 元");
-            badge.setTextColor(BLUE);
-            badge.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-            head.addView(badge, new LinearLayout.LayoutParams(dp(104), -2));
+            TextView badge = planBadge(plan);
+            head.addView(badge, new LinearLayout.LayoutParams(dp(74), dp(28)));
             panel.addView(head);
             panel.addView(copy(subtitle));
-            panel.addView(copy("总额度 " + quota + " · 有效期 " + validity + " · 重置 " + resetLabel(plan.optString("quota_reset_period", "never"))));
-            Button buy = primary("订阅套餐");
-            panel.addView(buy, compactFullButtonLp());
-            list.addView(panel);
+            panel.addView(copy("总额度 " + quota + " · 有效期 " + validity + " · " + reset));
+            LinearLayout foot = horizontal();
+            foot.setGravity(Gravity.CENTER_VERTICAL);
+            TextView priceView = bold(price + " 元");
+            priceView.setTextColor(BLUE);
+            foot.addView(priceView, new LinearLayout.LayoutParams(0, -2, 1));
+            if (recommended) {
+                ImageView sale = new ImageView(this);
+                sale.setImageResource(R.drawable.plan_sale);
+                sale.setAlpha(0.82f);
+                sale.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+                LinearLayout.LayoutParams saleLp = new LinearLayout.LayoutParams(dp(34), dp(34));
+                saleLp.setMargins(0, 0, dp(6), 0);
+                foot.addView(sale, saleLp);
+            }
+            ImageButton buy = tinyAction(R.drawable.ic_bubble_buy, "订阅套餐", () -> { });
+            foot.addView(buy, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, -2);
+            footLp.setMargins(0, dp(6), 0, 0);
+            panel.addView(foot, footLp);
+            frame.addView(panel, new FrameLayout.LayoutParams(-1, -2));
+            list.addView(frame);
         }
         if (list.getChildCount() == 0) {
             list.addView(card("暂无可订阅套餐", "服务器当前没有开启可订阅套餐。"));
         }
+    }
+
+    private FrameLayout subscriptionCardFrame() {
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackground(round(GLASS, dp(18), LINE));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, 0, 0, dp(16));
+        frame.setLayoutParams(lp);
+        return frame;
+    }
+
+    private Set<String> recommendedPlanKeys(JSONArray records) {
+        Set<String> keys = new HashSet<>();
+        double monthMax = -1;
+        double yearMax = -1;
+        String monthKey = "";
+        String yearKey = "";
+        for (int i = 0; i < records.length(); i++) {
+            JSONObject record = records.optJSONObject(i);
+            JSONObject plan = record == null ? null : record.optJSONObject("plan");
+            if (plan == null || !plan.optBoolean("enabled", true) || isTrialPlan(plan)) {
+                continue;
+            }
+            double price = plan.optDouble("price_amount", 0);
+            String unit = plan.optString("duration_unit", "month");
+            int value = Math.max(1, plan.optInt("duration_value", 1));
+            if ("year".equals(unit) || value >= 12) {
+                if (price > yearMax) {
+                    yearMax = price;
+                    yearKey = planKey(plan);
+                }
+            } else if ("month".equals(unit)) {
+                if (price > monthMax) {
+                    monthMax = price;
+                    monthKey = planKey(plan);
+                }
+            }
+        }
+        if (!monthKey.isEmpty()) keys.add(monthKey);
+        if (!yearKey.isEmpty()) keys.add(yearKey);
+        return keys;
+    }
+
+    private String planKey(JSONObject plan) {
+        if (plan == null) {
+            return "";
+        }
+        int id = plan.optInt("id", 0);
+        if (id != 0) {
+            return "id:" + id;
+        }
+        return plan.optString("title", "") + "|" + plan.optString("duration_unit", "") + "|" + plan.optInt("duration_value", 0);
+    }
+
+    private boolean isTrialPlan(JSONObject plan) {
+        String text = (plan.optString("title") + " " + plan.optString("subtitle") + " " + plan.optString("name")).toLowerCase(Locale.ROOT);
+        return text.contains("尝鲜") || text.contains("trial") || text.contains("体验");
+    }
+
+    private boolean hasPurchasedPlan(JSONObject record, JSONObject plan) {
+        if (record == null || plan == null) {
+            return false;
+        }
+        return record.optBoolean("purchased", false)
+                || record.optBoolean("subscribed", false)
+                || record.optBoolean("owned", false)
+                || record.optInt("purchase_count", 0) > 0
+                || record.optInt("buy_count", 0) > 0
+                || plan.optBoolean("purchased", false)
+                || plan.optInt("purchase_count", 0) > 0;
+    }
+
+    private TextView planBadge(JSONObject plan) {
+        String label;
+        int color;
+        String unit = plan.optString("duration_unit", "month");
+        int value = Math.max(1, plan.optInt("duration_value", 1));
+        if ("year".equals(unit) || value >= 12) {
+            label = "年付";
+            color = Color.argb(54, 91, 77, 215);
+        } else if ("month".equals(unit)) {
+            label = "月付";
+            color = Color.argb(54, 54, 104, 240);
+        } else {
+            label = formatDuration(plan);
+            color = Color.argb(54, 210, 132, 40);
+        }
+        TextView badge = copy(label);
+        badge.setTextColor(Color.rgb(66, 82, 108));
+        badge.setTextSize(12);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(round(color, dp(14), Color.argb(74, 145, 160, 184)));
+        return badge;
     }
 
     private void refreshWallet() {
@@ -2389,31 +2697,39 @@ public class MainActivity extends Activity {
         int level = e.optInt("level", 0);
         int accent = level >= 2 ? Color.rgb(216, 71, 86) : level == 1 ? Color.rgb(210, 132, 40) : phaseColor(phase);
         LinearLayout head = horizontal();
-        TextView toggle = copy("▸");
-        toggle.setTextColor(accent);
-        toggle.setTextSize(14);
-        head.addView(toggle, new LinearLayout.LayoutParams(dp(18), -2));
+        head.setGravity(Gravity.TOP);
         TextView dot = copy("●");
         dot.setTextColor(accent);
         dot.setTextSize(13);
+        dot.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         head.addView(dot, new LinearLayout.LayoutParams(dp(18), -2));
         TextView titleView = bold(title);
+        titleView.setTextSize(14);
+        titleView.setLineSpacing(dp(2), 1.04f);
         head.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView toggle = copy("▸");
+        toggle.setTextColor(accent);
+        toggle.setTextSize(14);
+        toggle.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        head.addView(toggle, new LinearLayout.LayoutParams(dp(18), -2));
         TextView phaseView = copy(phaseLabel(phase));
         phaseView.setTextColor(accent);
-        phaseView.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-        head.addView(phaseView, new LinearLayout.LayoutParams(dp(78), -2));
+        phaseView.setGravity(Gravity.START | Gravity.TOP);
+        head.addView(phaseView, new LinearLayout.LayoutParams(dp(58), -2));
         row.addView(head);
         LinearLayout detailBox = vertical();
-        detailBox.setVisibility(View.GONE);
+        String rowId = logRowId(e);
+        boolean initiallyExpanded = expandedLogIds.contains(rowId);
+        detailBox.setVisibility(initiallyExpanded ? View.VISIBLE : View.GONE);
+        toggle.setText(initiallyExpanded ? "▾" : "▸");
         if (!body.trim().isEmpty() && !"intent".equalsIgnoreCase(phase)) {
             detailBox.addView(copy(body));
         }
         if (!command.trim().isEmpty()) {
             TextView cmd = copy(command);
             cmd.setTextColor(Color.rgb(45, 74, 124));
-            cmd.setBackground(round(Color.argb(76, 54, 104, 240), dp(10), Color.TRANSPARENT));
-            cmd.setPadding(dp(10), dp(8), dp(10), dp(8));
+            cmd.setBackground(new ColorDrawable(Color.TRANSPARENT));
+            cmd.setPadding(0, dp(4), 0, dp(4));
             detailBox.addView(cmd);
         }
         if (!preview.trim().isEmpty()) {
@@ -2433,6 +2749,11 @@ public class MainActivity extends Activity {
                 boolean expanded = detailBox.getVisibility() == View.VISIBLE;
                 detailBox.setVisibility(expanded ? View.GONE : View.VISIBLE);
                 toggle.setText(expanded ? "▸" : "▾");
+                if (expanded) {
+                    expandedLogIds.remove(rowId);
+                } else {
+                    expandedLogIds.add(rowId);
+                }
             };
             row.setOnClickListener(toggleAction);
             head.setOnClickListener(toggleAction);
@@ -2448,6 +2769,18 @@ public class MainActivity extends Activity {
             renderInteraction(e);
         }
         timeline.addView(row);
+    }
+
+    private String logRowId(JSONObject e) {
+        String id = e.optString("id", e.optString("eventId", ""));
+        if (!id.trim().isEmpty()) {
+            return id.trim();
+        }
+        String key = logDedupeKey(e);
+        if (!key.trim().isEmpty()) {
+            return key.trim();
+        }
+        return e.optString("phase", e.optString("type", "log")) + ":" + e.optLong("timestamp", 0);
     }
 
     private boolean shouldHideLog(JSONObject e) {
@@ -2624,33 +2957,400 @@ public class MainActivity extends Activity {
     }
 
     private View messageBubble(String role, String text, long timestamp) {
+        return messageBubble(role, text, timestamp, "", -1);
+    }
+
+    private View messageBubble(String role, String text, long timestamp, String mode, int messageIndex) {
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         boolean user = "user".equals(role);
-        box.setBackground(round(user ? BLUE : GLASS, dp(16), user ? BLUE : LINE));
-        TextView t = copy(cleanDisplayText(text));
-        t.setTextColor(user ? Color.WHITE : INK);
-        box.addView(t);
-        addTimestamp(box, timestamp, user);
+        box.setBackground(round(user ? Color.WHITE : GLASS, dp(16), user ? LINE : LINE));
+        String clean = cleanDisplayText(text);
+        if (!user && ("chat".equals(mode) || mode.isEmpty()) && shouldRenderRichText(clean)) {
+            addRichAssistantContent(box, clean, () -> toggleActionRows(box));
+        } else {
+            addPlainMessageContent(box, clean, user, () -> toggleActionRows(box));
+        }
+        addTimestamp(box, timestamp, user, mode, messageIndex, clean);
         box.setLayoutParams(bubbleLayoutParams(user));
+        box.setOnClickListener(v -> toggleActionRows(box));
         return box;
     }
 
-    private TextView addStreamingBubble(String role) {
+    private void addPlainMessageContent(LinearLayout box, String text, boolean user) {
+        addPlainMessageContent(box, text, user, null);
+    }
+
+    private void addPlainMessageContent(LinearLayout box, String text, boolean user, Runnable clickAction) {
+        String[] split = splitThinkingBlock(text);
+        if (!user && !split[0].isEmpty()) {
+            addThinkingBlock(box, split[0], clickAction);
+            if (!split[1].isEmpty()) {
+                box.addView(gap(8));
+            }
+        }
+        TextView t = copy(split[1].isEmpty() ? text : split[1]);
+        t.setTextColor(user ? INK : INK);
+        t.setTextIsSelectable(true);
+        if (clickAction != null) {
+            t.setOnClickListener(v -> clickAction.run());
+        }
+        box.addView(t);
+    }
+
+    private String[] splitThinkingBlock(String text) {
+        String clean = cleanDisplayText(text);
+        if (!clean.startsWith("思考过程\n")) {
+            return new String[]{"", clean};
+        }
+        int split = clean.indexOf("\n\n");
+        if (split <= "思考过程\n".length()) {
+            return new String[]{clean.substring("思考过程\n".length()).trim(), ""};
+        }
+        return new String[]{
+                clean.substring("思考过程\n".length(), split).trim(),
+                clean.substring(split + 2).trim()
+        };
+    }
+
+    private boolean shouldRenderRichText(String text) {
+        String clean = cleanDisplayText(text);
+        return clean.contains("```")
+                || clean.contains("'''")
+                || clean.contains("# ")
+                || clean.matches("(?s).*#{1,6}[^#\\s].*")
+                || clean.startsWith("- ")
+                || clean.matches("(?s)^\\s*[-*+]\\s+.*")
+                || clean.matches("(?s).*(^|\\n)\\s*[-*+]\\s+.*")
+                || clean.matches("(?s).*(^|\\n)\\s*'\\s*(\\n|$).*")
+                || clean.contains("\n- ")
+                || clean.contains("\n1. ")
+                || clean.contains("**")
+                || clean.contains("|")
+                || clean.toLowerCase(Locale.ROOT).contains("mermaid");
+    }
+
+    private void addRichAssistantContent(LinearLayout box, String text, Runnable clickAction) {
+        String[] split = splitThinkingBlock(text);
+        String renderText = split[0].isEmpty() ? text : split[1];
+        boolean hasRenderText = !cleanDisplayText(renderText).isEmpty();
+        if (!split[0].isEmpty()) {
+            addThinkingBlock(box, split[0], clickAction);
+            if (hasRenderText) {
+                box.addView(gap(8));
+            }
+        }
+        if (!hasRenderText) {
+            return;
+        }
+        WebView web = new WebView(this);
+        configureContentWebView(web);
+        web.addJavascriptInterface(new MermaidBridge(web), "OneApiBridge");
+        if (clickAction != null) {
+            web.setOnClickListener(v -> clickAction.run());
+            final float[] touchStart = new float[2];
+            final boolean[] horizontalDrag = new boolean[1];
+            web.setOnTouchListener((v, event) -> {
+                if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                    touchStart[0] = event.getX();
+                    touchStart[1] = event.getY();
+                    horizontalDrag[0] = false;
+                } else if (event.getAction() == android.view.MotionEvent.ACTION_MOVE) {
+                    float dx = Math.abs(event.getX() - touchStart[0]);
+                    float dy = Math.abs(event.getY() - touchStart[1]);
+                    if (dx > dp(10) && dx > dy * 1.2f) {
+                        horizontalDrag[0] = true;
+                        suppressSwipeUntil = System.currentTimeMillis() + 700L;
+                        android.view.ViewParent parent = v.getParent();
+                        while (parent != null) {
+                            parent.requestDisallowInterceptTouchEvent(true);
+                            parent = parent.getParent();
+                        }
+                    }
+                } else if (event.getAction() == android.view.MotionEvent.ACTION_UP && !horizontalDrag[0]) {
+                    clickAction.run();
+                } else if (event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
+                    horizontalDrag[0] = false;
+                }
+                return false;
+            });
+        }
+        web.loadDataWithBaseURL("https://ai.oneapi.center/", markdownHtml(renderText), "text/html", "utf-8", null);
+        web.setVerticalScrollBarEnabled(false);
+        web.setHorizontalScrollBarEnabled(false);
+        web.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        box.addView(web, new LinearLayout.LayoutParams(-1, estimatedRichHeight(normalizeMarkdownForRender(renderText))));
+    }
+
+    private void addThinkingBlock(LinearLayout box, String thinkingText, Runnable clickAction) {
+        LinearLayout wrap = vertical();
+        wrap.setBackground(round(Color.argb(22, 54, 104, 240), dp(12), Color.argb(38, 54, 104, 240)));
+        wrap.setPadding(dp(10), dp(7), dp(10), dp(7));
+        TextView header = copy("Thinking：");
+        header.setTextColor(Color.rgb(70, 88, 120));
+        header.setTypeface(Typeface.DEFAULT_BOLD);
+        header.setTextSize(13);
+        TextView body = copy(thinkingText);
+        body.setTextColor(Color.rgb(84, 99, 128));
+        body.setTextIsSelectable(true);
+        body.setVisibility(View.GONE);
+        header.setOnClickListener(v -> body.setVisibility(body.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
+        if (clickAction != null) {
+            wrap.setOnClickListener(v -> clickAction.run());
+            body.setOnClickListener(v -> clickAction.run());
+        }
+        wrap.addView(header);
+        wrap.addView(body);
+        box.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void configureContentWebView(WebView web) {
+        WebSettings settings = web.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        web.setBackgroundColor(Color.TRANSPARENT);
+        web.setWebViewClient(new WebViewClient());
+    }
+
+    private int estimatedRichHeight(String text) {
+        String clean = cleanDisplayText(text);
+        int lines = Math.max(4, clean.split("\\n", -1).length + clean.length() / 48);
+        return Math.max(dp(96), Math.min(dp(360), dp(lines * 20)));
+    }
+
+    private String markdownHtml(String markdown) {
+        String jsMarkdown = JSONObject.quote(normalizeMarkdownForRender(markdown));
+        return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<style>html,body{margin:0;width:100%;max-width:100%;overflow-x:hidden;}body{font:14px/1.55 sans-serif;color:#171f30;background:transparent;overflow-y:hidden;}#root{max-width:100%;overflow-x:hidden;}p{margin:0 0 10px;}h1,h2,h3,h4,h5,h6{margin:12px 0 8px;line-height:1.28;color:#111827;font-weight:700;}h1{font-size:22px}h2{font-size:20px}h3{font-size:18px}h4,h5,h6{font-size:16px}ul,ol{margin:6px 0 10px;padding-left:22px;}li{margin:3px 0;}blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #9fb3e8;background:#f6f8ff;border-radius:8px;}hr{border:0;border-top:1px solid #dce4f1;margin:12px 0;}.code-wrap{position:relative;margin:8px 0;max-width:100%;overflow-x:auto;}.code-copy{position:absolute;right:8px;top:6px;border:1px solid #dce4f1;background:rgba(255,255,255,.95);color:#3668f0;border-radius:8px;padding:2px 6px;font-size:13px;line-height:1.2;z-index:2}pre{white-space:pre-wrap;background:#f4f7fb;border:1px solid #dce4f1;border-radius:10px;padding:30px 10px 10px;overflow:auto;margin:0;}code{font-family:monospace}strong{font-weight:700}.mermaid-wrap{position:relative;border:1px solid #dce4f1;border-radius:12px;padding:28px 8px 8px;margin:8px 0;background:#fff;max-width:100%;overflow-x:auto}.mermaid-tools{position:absolute;right:6px;top:4px;display:flex;gap:6px}.mermaid-tools button{border:0;background:transparent;font-size:16px;color:#3668f0;padding:2px 6px}.table-wrap{max-width:100%;overflow-x:auto;overflow-y:hidden;margin:8px 0 10px;border:1px solid #dce4f1;border-radius:10px;background:rgba(255,255,255,.72);-webkit-overflow-scrolling:touch;}.table-wrap::-webkit-scrollbar{height:6px}.table-wrap::-webkit-scrollbar-thumb{background:#b8c3d8;border-radius:6px}.table-wrap table{margin:0;border:0;}table{border-collapse:collapse;width:100%;max-width:100%;table-layout:fixed;font-size:12px;}td,th{border:1px solid #dce4f1;padding:5px 6px;vertical-align:top;min-width:0;word-break:break-word;overflow-wrap:anywhere;}th{font-weight:700;background:#f7f9ff;}</style>"
+                + "<script src='https://cdn.jsdelivr.net/npm/marked/marked.min.js'></script>"
+                + "<script src='https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js'></script></head><body><div id='root'></div>"
+                + "<script>const md=" + jsMarkdown + ";if(window.mermaid)mermaid.initialize({startOnLoad:false,securityLevel:'loose'});"
+                + "function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}"
+                + "function inlineFmt(s){return esc(s).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>')}"
+                + "function cells(line){let p=line.trim();if(p.startsWith('|'))p=p.slice(1);if(p.endsWith('|'))p=p.slice(0,-1);return p.split('|').map(x=>x.trim())}"
+                + "function tableSep(line){return /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?\\s*$/.test(line)}"
+                + "function fallbackMarkdown(s){const lines=String(s||'').split(/\\n/);let h='',i=0,inCode=false,code='',list='';const close=()=>{if(list){h+='</'+list+'>';list=''}};while(i<lines.length){let line=lines[i];if(/^\\s*```/.test(line)){if(inCode){h+='<pre><code>'+esc(code.replace(/\\n$/,''))+'</code></pre>';code='';inCode=false}else{close();inCode=true}i++;continue}if(inCode){code+=line+'\\n';i++;continue}if(!line.trim()){close();i++;continue}if(i+1<lines.length&&line.indexOf('|')>=0&&tableSep(lines[i+1])){close();const head=cells(line);i+=2;let rows=[];while(i<lines.length&&lines[i].indexOf('|')>=0&&lines[i].trim()){rows.push(cells(lines[i]));i++}h+='<table><thead><tr>'+head.map(c=>'<th>'+inlineFmt(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>'<td>'+inlineFmt(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';continue}let m=line.match(/^(#{1,6})\\s+(.+)$/);if(m){close();h+='<h'+m[1].length+'>'+inlineFmt(m[2])+'</h'+m[1].length+'>';i++;continue}if(/^\\s*---+\\s*$/.test(line)){close();h+='<hr>';i++;continue}m=line.match(/^\\s*[-*+]\\s+(.+)$/);if(m){if(list!=='ul'){close();list='ul';h+='<ul>'}h+='<li>'+inlineFmt(m[1])+'</li>';i++;continue}m=line.match(/^\\s*\\d+[\\.、]\\s+(.+)$/);if(m){if(list!=='ol'){close();list='ol';h+='<ol>'}h+='<li>'+inlineFmt(m[1])+'</li>';i++;continue}close();h+='<p>'+inlineFmt(line)+'</p>';i++}close();if(inCode)h+='<pre><code>'+esc(code)+'</code></pre>';return h}"
+                + "function resizeRoot(){if(window.OneApiBridge){const root=document.getElementById('root');const h=Math.ceil(root?root.getBoundingClientRect().height:document.body.scrollHeight);OneApiBridge.resize(h)}}"
+                + "function enhanceMermaid(){document.querySelectorAll('pre code.language-mermaid,pre code.lang-mermaid').forEach(code=>{const src=code.textContent;const wrap=document.createElement('div');wrap.className='mermaid-wrap';wrap.innerHTML='<div class=\"mermaid-tools\"><button type=\"button\" onclick=\"downloadMermaid(this)\">⇩</button><button type=\"button\" onclick=\"fullscreenMermaid(this)\">⛶</button></div><div class=\"mermaid\">'+src+'</div>';code.closest('pre').replaceWith(wrap);});}"
+                + "function enhanceTables(){document.querySelectorAll('table').forEach(table=>{if(table.closest('.table-wrap'))return;const wrap=document.createElement('div');wrap.className='table-wrap';table.parentNode.insertBefore(wrap,table);wrap.appendChild(table);});}"
+                + "function enhanceCodeBlocks(){document.querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const code=pre.querySelector('code');if(code&&/(^|\\s)(language-)?mermaid(\\s|$)/.test(code.className))return;pre.dataset.enhanced='1';const wrap=document.createElement('div');wrap.className='code-wrap';const btn=document.createElement('button');btn.type='button';btn.className='code-copy';btn.textContent='⧉';btn.onclick=(e)=>{e.stopPropagation();if(window.OneApiBridge)OneApiBridge.copyText(code?code.innerText:pre.innerText)};pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(btn);wrap.appendChild(pre);});}"
+                + "if(window.marked){marked.setOptions({gfm:true,breaks:true});document.getElementById('root').innerHTML=marked.parse(md)}else{document.getElementById('root').innerHTML=fallbackMarkdown(md)}"
+                + "enhanceMermaid();enhanceCodeBlocks();enhanceTables();"
+                + "if(window.mermaid){try{Promise.resolve(mermaid.run()).finally(()=>setTimeout(resizeRoot,80))}catch(e){setTimeout(resizeRoot,80)}}setTimeout(resizeRoot,80);requestAnimationFrame(()=>setTimeout(resizeRoot,0));function svgFor(btn){const svg=btn.closest('.mermaid-wrap').querySelector('svg');return svg?new XMLSerializer().serializeToString(svg):''}"
+                + "function toPng(svg,cb){const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=Math.max(1,img.width);c.height=Math.max(1,img.height);const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0);cb(c.toDataURL('image/png'))};img.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svg)));}"
+                + "function downloadMermaid(btn){const svg=svgFor(btn);if(window.OneApiBridge&&svg)toPng(svg,(png)=>OneApiBridge.savePng(png))}"
+                + "function fullscreenMermaid(btn){const svg=svgFor(btn);if(window.OneApiBridge&&svg)OneApiBridge.openMermaid(svg)}</script></body></html>";
+    }
+
+    private String normalizeMarkdownForRender(String markdown) {
+        String source = cleanDisplayText(markdown).replace("\r\n", "\n").replace('\r', '\n');
+        if (source.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        boolean inFence = false;
+        boolean inAltFence = false;
+        String[] lines = source.split("\n", -1);
+        for (String rawLine : lines) {
+            String line = rawLine;
+            String trimmed = line.trim();
+            if (trimmed.startsWith("```") && !inAltFence) {
+                inFence = !inFence;
+                appendNormalizedLine(out, line);
+                continue;
+            }
+            if (("'".equals(trimmed) || "'''".equals(trimmed) || trimmed.startsWith("'''")) && (!inFence || inAltFence)) {
+                inFence = !inFence;
+                inAltFence = !inAltFence;
+                appendNormalizedLine(out, line.replaceFirst("^\\s*'''", "```").replaceFirst("^\\s*'\\s*$", "```"));
+                continue;
+            }
+            if (!inFence) {
+                line = normalizeMarkdownLine(line);
+            }
+            appendNormalizedLine(out, line);
+        }
+        String value = out.toString().trim();
+        value = value.replaceAll("\\s*---\\s*(#{1,6})", "\n\n---\n\n$1 ");
+        value = value.replaceAll("([^\\n])\\s+(#{1,6})([^#\\s])", "$1\n\n$2 $3");
+        value = value.replaceAll("(?m)(^|\\n)(#{1,6})([^#\\s])", "$1$2 $3");
+        value = value.replaceAll("([^\\n])\\s+[-*]([^\\s\\-*])", "$1\n- $2");
+        value = value.replaceAll("([^\\n])\\s+(\\d+[\\.、])([^\\s])", "$1\n$2 $3");
+        return value.replaceAll("\\n{3,}", "\n\n").trim();
+    }
+
+    private String normalizeMarkdownLine(String line) {
+        String value = line == null ? "" : line;
+        value = value.replaceAll("^(\\s{0,3}#{1,6})([^#\\s])", "$1 $2");
+        value = value.replaceAll("^(\\s*[-*+])([^\\s])", "$1 $2");
+        value = value.replaceAll("^(\\s*\\d+[\\.、])([^\\s])", "$1 $2");
+        return value;
+    }
+
+    private void appendNormalizedLine(StringBuilder out, String line) {
+        if (out.length() > 0) {
+            out.append('\n');
+        }
+        out.append(line);
+    }
+
+    private class MermaidBridge {
+        private final WebView web;
+
+        MermaidBridge() {
+            this.web = null;
+        }
+
+        MermaidBridge(WebView web) {
+            this.web = web;
+        }
+
+        @JavascriptInterface
+        public void openMermaid(String svg) {
+            ui(() -> showMermaidPreview(svg));
+        }
+
+        @JavascriptInterface
+        public void savePng(String dataUrl) {
+            ui(() -> saveDataUrlImage(dataUrl));
+        }
+
+        @JavascriptInterface
+        public void copyText(String text) {
+            ui(() -> copyToClipboard(text));
+        }
+
+        @JavascriptInterface
+        public void resize(int height) {
+            if (web == null) {
+                return;
+            }
+            ui(() -> {
+                int targetHeight = Math.max(dp(120), dp(Math.min(height + 24, 5000)));
+                web.setLayoutParams(new LinearLayout.LayoutParams(-1, targetHeight));
+                web.requestLayout();
+            });
+        }
+    }
+
+    private void showMermaidPreview(String svg) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(Color.argb(190, 15, 23, 42));
+        LinearLayout panel = vertical();
+        panel.setPadding(dp(12), dp(12), dp(12), dp(12));
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        LinearLayout titleRow = horizontal();
+        titleRow.addView(bold("Mermaid"), new LinearLayout.LayoutParams(0, -2, 1));
+        Button save = iconButton("⇩");
+        save.setContentDescription("下载");
+        save.setOnClickListener(v -> saveSvgAsPng(svg));
+        titleRow.addView(save, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        Button close = iconButton("×");
+        close.setContentDescription("关闭");
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        panel.addView(titleRow);
+        WebView web = new WebView(this);
+        configureContentWebView(web);
+        String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>html,body{height:100%;margin:0;background:#fff;overflow:auto}svg{max-width:none}</style></head><body>" + (svg == null ? "" : svg) + "</body></html>";
+        web.loadDataWithBaseURL("https://ai.oneapi.center/", html, "text/html", "utf-8", null);
+        LinearLayout.LayoutParams webLp = new LinearLayout.LayoutParams(-1, dp(560));
+        webLp.setMargins(0, dp(8), 0, 0);
+        panel.addView(web, webLp);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
+        lp.setMargins(dp(14), 0, dp(14), 0);
+        overlay.addView(panel, lp);
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        dialog.setContentView(overlay);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+        }
+    }
+
+    private LinearLayout addStreamingBubble(String role) {
         return addStreamingBubble(role, 0);
     }
 
-    private TextView addStreamingBubble(String role, long timestamp) {
+    private LinearLayout addStreamingBubble(String role, long timestamp) {
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         box.setBackground(round(GLASS, dp(16), LINE));
-        TextView t = copy("");
-        t.setTextColor(INK);
-        box.addView(t);
-        addTimestamp(box, timestamp, "user".equals(role));
         box.setLayoutParams(bubbleLayoutParams("user".equals(role)));
+        box.setOnClickListener(v -> toggleActionRows(box));
         content.addView(box);
-        return t;
+        return box;
+    }
+
+    private void replaceStreamingBubble(LinearLayout box, String text, long timestamp) {
+        if (box == null) {
+            return;
+        }
+        renderAssistantBubbleContent(box, text, timestamp, true);
+    }
+
+    private void updateStreamingBubble(LinearLayout box, String text, long timestamp, boolean withActions) {
+        if (box == null) {
+            return;
+        }
+        renderAssistantBubbleContent(box, text, timestamp, withActions);
+    }
+
+    private void renderAssistantBubbleContent(LinearLayout box, String text, long timestamp, boolean withActions) {
+        box.removeAllViews();
+        String clean = cleanDisplayText(text);
+        if (!withActions) {
+            addLiveAssistantContent(box, clean);
+        } else if (shouldRenderRichText(clean) || !splitThinkingBlock(clean)[0].isEmpty()) {
+            addRichAssistantContent(box, clean, () -> toggleActionRows(box));
+        } else {
+            addPlainMessageContent(box, clean, false, () -> toggleActionRows(box));
+        }
+        addTimestamp(box, timestamp, false, "chat", -1, withActions ? clean : "");
+    }
+
+    private void addLiveAssistantContent(LinearLayout box, String text) {
+        String[] split = splitThinkingBlock(text);
+        if (!split[0].isEmpty()) {
+            addLiveThinkingBlock(box, split[0]);
+            if (!split[1].isEmpty()) {
+                box.addView(gap(8));
+            }
+        }
+        String answer = split[1].isEmpty() ? (split[0].isEmpty() ? text : "") : split[1];
+        if (!cleanDisplayText(answer).isEmpty()) {
+            TextView body = copy(answer);
+            body.setTextColor(INK);
+            body.setTextIsSelectable(true);
+            box.addView(body);
+        }
+    }
+
+    private void addLiveThinkingBlock(LinearLayout box, String thinkingText) {
+        LinearLayout wrap = vertical();
+        wrap.setBackground(round(Color.argb(22, 54, 104, 240), dp(12), Color.argb(38, 54, 104, 240)));
+        wrap.setPadding(dp(10), dp(7), dp(10), dp(7));
+        TextView header = copy("Thinking：");
+        header.setTextColor(Color.rgb(70, 88, 120));
+        header.setTypeface(Typeface.DEFAULT_BOLD);
+        header.setTextSize(13);
+        TextView body = copy(thinkingText);
+        body.setTextColor(Color.rgb(84, 99, 128));
+        body.setTextIsSelectable(true);
+        wrap.addView(header);
+        if (!cleanDisplayText(thinkingText).isEmpty()) {
+            wrap.addView(body);
+        }
+        box.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private LinearLayout addImageProgressBubble() {
@@ -2680,7 +3380,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams bubbleLayoutParams(boolean user) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(user ? dp(42) : 0, dp(8), user ? 0 : dp(42), dp(8));
+        lp.setMargins(user ? dp(42) : 0, dp(8), 0, dp(8));
         return lp;
     }
 
@@ -2689,11 +3389,16 @@ public class MainActivity extends Activity {
     }
 
     private View imageResultBubble(String source, long timestamp) {
+        return imageResultBubble(source, timestamp, "", -1);
+    }
+
+    private View imageResultBubble(String source, long timestamp, String mode, int messageIndex) {
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         box.setBackground(round(GLASS, dp(16), LINE));
         box.setLayoutParams(bubbleLayoutParams(false));
-        renderImageResult(box, source, timestamp);
+        renderImageResult(box, source, timestamp, mode, messageIndex);
+        box.setOnClickListener(v -> toggleActionRows(box));
         return box;
     }
 
@@ -2702,6 +3407,10 @@ public class MainActivity extends Activity {
     }
 
     private void renderImageResult(LinearLayout box, String source, long timestamp) {
+        renderImageResult(box, source, timestamp, "", -1);
+    }
+
+    private void renderImageResult(LinearLayout box, String source, long timestamp, String mode, int messageIndex) {
         if (box == null) {
             content.addView(messageBubble("assistant", source));
             return;
@@ -2712,31 +3421,102 @@ public class MainActivity extends Activity {
             image.setAdjustViewBounds(true);
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
             image.setBackground(round(Color.WHITE, dp(14), LINE));
-            image.setOnClickListener(v -> showImagePreview(Uri.parse(source)));
+            final long[] lastTapAt = {0L};
+            image.setOnClickListener(v -> {
+                long now = System.currentTimeMillis();
+                if (now - lastTapAt[0] < 320L) {
+                    lastTapAt[0] = 0L;
+                    showImagePreview(Uri.parse(source));
+                    return;
+                }
+                lastTapAt[0] = now;
+                toggleActionRows(box);
+            });
+            image.setOnLongClickListener(v -> {
+                showImagePreview(Uri.parse(source));
+                return true;
+            });
             box.addView(image, new LinearLayout.LayoutParams(-1, dp(240)));
             setImageSource(image, source);
-            Button edit = ghost("编辑这张图");
-            edit.setOnClickListener(v -> referenceImageForEdit(source));
-            LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(-1, dp(38));
-            editLp.setMargins(0, dp(10), 0, 0);
-            box.addView(edit, editLp);
         } else {
-            box.addView(copy(cleanDisplayText(source)));
+            addPlainMessageContent(box, cleanDisplayText(source), false, () -> toggleActionRows(box));
         }
-        addTimestamp(box, timestamp, false);
+        addTimestamp(box, timestamp, false, mode, messageIndex, source);
     }
 
     private void addTimestamp(LinearLayout box, long timestamp, boolean user) {
-        if (timestamp <= 0) {
-            return;
+        addTimestamp(box, timestamp, user, "", -1, "");
+    }
+
+    private void addTimestamp(LinearLayout box, long timestamp, boolean user, String mode, int messageIndex, String messageText) {
+        LinearLayout row = horizontal();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setTag("bubble_meta");
+        LinearLayout actions = horizontal();
+        actions.setTag("bubble_actions");
+        actions.setVisibility(View.GONE);
+        boolean editableImage = !user && ("image".equals(mode) || mode.isEmpty()) && isImageSource(messageText);
+        if (editableImage) {
+            actions.addView(tinyAction(R.drawable.ic_bubble_edit, "编辑这张图", () -> referenceImageForEdit(messageText)));
+            actions.addView(tinyAction(R.drawable.ic_bubble_download, "下载图片", () -> saveImageSource(messageText)));
         }
-        TextView time = copy(formatDateTime(timestamp));
+        if (!cleanDisplayText(messageText).isEmpty()) {
+            actions.addView(tinyAction(R.drawable.ic_bubble_copy, "复制", () -> copyToClipboard(cleanDisplayText(messageText))));
+            actions.addView(tinyAction(R.drawable.ic_bubble_share, "分享", () -> shareText(cleanDisplayText(messageText))));
+        }
+        boolean localMessage = ("chat".equals(mode) || "image".equals(mode)) && messageIndex >= 0;
+        if (localMessage) {
+            if (user) {
+                actions.addView(tinyAction(R.drawable.ic_bubble_edit, "编辑", () -> editLocalMessage(mode, messageIndex)));
+            }
+            actions.addView(tinyAction(R.drawable.ic_bubble_delete, "删除", () -> deleteLocalMessage(mode, messageIndex)));
+        }
+        TextView time = copy(timestamp <= 0 ? "" : formatDateTime(timestamp));
         time.setTextSize(11);
-        time.setTextColor(user ? Color.argb(210, 255, 255, 255) : MUTED);
+        time.setTextColor(MUTED);
         time.setGravity(user ? Gravity.END : Gravity.START);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.setMargins(0, dp(6), 0, 0);
-        box.addView(time, lp);
+        if (user) {
+            row.addView(actions, new LinearLayout.LayoutParams(-2, dp(28)));
+            row.addView(time, new LinearLayout.LayoutParams(0, -2, 1));
+        } else {
+            row.addView(time, new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(actions, new LinearLayout.LayoutParams(-2, dp(28)));
+        }
+        box.addView(row, lp);
+    }
+
+    private ImageButton tinyAction(int iconRes, String description, Runnable action) {
+        ImageButton b = new ImageButton(this);
+        b.setImageResource(iconRes);
+        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        b.setPadding(dp(5), dp(5), dp(5), dp(5));
+        b.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        b.setContentDescription(description);
+        b.setOnClickListener(v -> action.run());
+        b.setLayoutParams(new LinearLayout.LayoutParams(dp(28), dp(28)));
+        return b;
+    }
+
+    private void toggleActionRows(LinearLayout box) {
+        View row = box.findViewWithTag("bubble_actions");
+        if (row == null) {
+            return;
+        }
+        boolean willShow = row.getVisibility() != View.VISIBLE;
+        if (activeBubbleActions != null && activeBubbleActions != row) {
+            activeBubbleActions.setVisibility(View.GONE);
+        }
+        row.setVisibility(willShow ? View.VISIBLE : View.GONE);
+        activeBubbleActions = willShow ? row : null;
+    }
+
+    private boolean isImageSource(String source) {
+        String value = source == null ? "" : source.trim().toLowerCase(Locale.ROOT);
+        return value.startsWith("http://")
+                || value.startsWith("https://")
+                || value.startsWith("data:image/");
     }
 
     private void referenceImageForEdit(String source) {
@@ -2746,8 +3526,179 @@ public class MainActivity extends Activity {
         selectedAttachmentUris.clear();
         selectedAttachmentUris.add(Uri.parse(source.trim()));
         renderAttachmentPreview();
-        if (activeInput != null) {
-            activeInput.requestFocus();
+        focusComposerInput();
+    }
+
+    private void copyToClipboard(String text) {
+        String clean = cleanDisplayText(text);
+        if (clean.isEmpty()) {
+            return;
+        }
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("OneAPI", clean));
+    }
+
+    private void shareText(String text) {
+        String clean = cleanDisplayText(text);
+        if (clean.isEmpty()) {
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TEXT, clean);
+        try {
+            startActivity(Intent.createChooser(intent, "分享"));
+        } catch (Exception ignored) {
+            toast("当前系统没有可用的分享应用");
+        }
+    }
+
+    private void editLocalMessage(String mode, int index) {
+        JSONObject item = localMessageAt(mode, index);
+        if (item == null || activeInput == null) {
+            return;
+        }
+        activeInput.setText(cleanDisplayText(item.optString("text", "")));
+        focusComposerInput();
+    }
+
+    private void deleteLocalMessage(String mode, int index) {
+        try {
+            JSONObject root = localConversationStore(mode);
+            JSONObject session = findLocalSession(root, activeLocalSessionId(mode));
+            JSONArray messages = session == null ? null : session.optJSONArray("messages");
+            if (messages == null || index < 0 || index >= messages.length()) {
+                return;
+            }
+            JSONArray next = new JSONArray();
+            for (int i = 0; i < messages.length(); i++) {
+                if (i != index) {
+                    next.put(messages.opt(i));
+                }
+            }
+            session.put("messages", next);
+            session.put("updatedAt", System.currentTimeMillis());
+            saveLocalConversationStore(mode, root);
+            renderSection();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private JSONObject localMessageAt(String mode, int index) {
+        JSONArray messages = localConversationMessages(mode);
+        return index >= 0 && index < messages.length() ? messages.optJSONObject(index) : null;
+    }
+
+    private void saveImageSource(String source) {
+        String value = cleanDisplayText(source);
+        if (value.isEmpty()) {
+            return;
+        }
+        if (value.startsWith("data:image/")) {
+            saveDataUrlImage(value);
+            return;
+        }
+        if (!value.startsWith("http://") && !value.startsWith("https://")) {
+            toast("图片地址无法保存");
+            return;
+        }
+        executor.execute(() -> {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(value).openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(60000);
+                String mime = conn.getContentType();
+                try (InputStream input = conn.getInputStream();
+                     ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = input.read(buffer)) != -1) {
+                        output.write(buffer, 0, read);
+                    }
+                    saveImageBytes(output.toByteArray(), mime == null ? "image/png" : mime);
+                }
+            } catch (Exception ignored) {
+                ui(() -> toast("图片下载失败"));
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        });
+    }
+
+    private void saveImageBytes(byte[] bytes, String mime) {
+        try {
+            if (bytes == null || bytes.length == 0) {
+                ui(() -> toast("图片数据无法保存"));
+                return;
+            }
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, "oneapi_" + System.currentTimeMillis() + ".png");
+            values.put(MediaStore.Images.Media.MIME_TYPE, (mime == null || mime.trim().isEmpty()) ? "image/png" : mime.split(";")[0].trim());
+            Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                ui(() -> toast("无法保存图片"));
+                return;
+            }
+            try (OutputStream output = getContentResolver().openOutputStream(uri)) {
+                if (output != null) {
+                    output.write(bytes);
+                }
+            }
+        } catch (Exception ignored) {
+            ui(() -> toast("图片保存失败"));
+        }
+    }
+
+    private void saveDataUrlImage(String dataUrl) {
+        try {
+            String value = dataUrl == null ? "" : dataUrl.trim();
+            int comma = value.indexOf(',');
+            if (!value.startsWith("data:image/") || comma < 0) {
+                toast("图片数据无法保存");
+                return;
+            }
+            byte[] bytes = android.util.Base64.decode(value.substring(comma + 1), android.util.Base64.DEFAULT);
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, "oneapi_" + System.currentTimeMillis() + ".png");
+            values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+            Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                toast("无法保存图片");
+                return;
+            }
+            try (OutputStream output = getContentResolver().openOutputStream(uri)) {
+                if (output != null) {
+                    output.write(bytes);
+                }
+            }
+        } catch (Exception ignored) {
+            toast("图片保存失败");
+        }
+    }
+
+    private void saveSvgAsPng(String svg) {
+        try {
+            if (shell == null) {
+                toast("当前页面无法导出图片");
+                return;
+            }
+            WebView converter = new WebView(this);
+            configureContentWebView(converter);
+            converter.addJavascriptInterface(new MermaidBridge(), "OneApiBridge");
+            String encoded = android.util.Base64.encodeToString((svg == null ? "" : svg).getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+            String html = "<!doctype html><html><body><script>"
+                    + "const svg=atob('" + encoded + "');const img=new Image();"
+                    + "img.onload=()=>{const c=document.createElement('canvas');c.width=Math.max(1,img.width);c.height=Math.max(1,img.height);const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0);OneApiBridge.savePng(c.toDataURL('image/png'));};"
+                    + "img.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svg)));"
+                    + "</script></body></html>";
+            shell.addView(converter, new FrameLayout.LayoutParams(1, 1));
+            converter.loadDataWithBaseURL("https://ai.oneapi.center/", html, "text/html", "utf-8", null);
+            handler.postDelayed(() -> shell.removeView(converter), 2500);
+        } catch (Exception ignored) {
+            toast("无法导出 Mermaid 图片");
         }
     }
 
@@ -3165,7 +4116,7 @@ public class MainActivity extends Activity {
                     if (session == null || !client.equals(session.optString("client"))) {
                         continue;
                     }
-                    String title = session.optString("title", label(client) + " 会话");
+                    String title = cliSessionProjectTitle(session, client);
                     List<String> options = new ArrayList<>();
                     JSONArray messages = session.optJSONArray("messages");
                     int added = 0;
@@ -3174,14 +4125,24 @@ public class MainActivity extends Activity {
                             JSONObject msg = messages.optJSONObject(j);
                             String preview = msg == null ? "" : msg.optString("text", "");
                             if (!preview.trim().isEmpty()) {
-                                options.add(preview.substring(0, Math.min(36, preview.length())));
+                                String raw = preview.substring(0, Math.min(36, preview.length()));
+                                options.add(cliRecentAlias(client, title, raw));
                                 added++;
                             }
                         }
                     }
                     if (options.isEmpty()) {
-                        options.add("暂无最近会话");
+                        continue;
                     }
+                    Set<String> pinned = pinnedRecentSessions(client);
+                    options.sort((a, b) -> {
+                        boolean ap = pinned.contains(title + "\n" + a);
+                        boolean bp = pinned.contains(title + "\n" + b);
+                        if (ap != bp) {
+                            return ap ? -1 : 1;
+                        }
+                        return 0;
+                    });
                     grouped.put(title, options);
                     tabs.add(title);
                     projects++;
@@ -3190,15 +4151,41 @@ public class MainActivity extends Activity {
             if (tabs.isEmpty()) {
                 String title = label(client);
                 tabs.add(title);
-                grouped.put(title, list("暂无最近会话"));
+                grouped.put(title, list("暂无会话记录"));
             }
-            ui(() -> showStackedGroupedChoice(label(client) + " 最近会话", tabs, grouped, selectedCliSession, value -> {
+            ui(() -> showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
                 selectedCliSession = value.trim();
-                if (!"暂无最近会话".equals(selectedCliSession)) {
+                if (!"暂无会话记录".equals(selectedCliSession)) {
                     pollSessionsOnce();
                 }
             }, null));
         });
+    }
+
+    private String cliSessionProjectTitle(JSONObject session, String client) {
+        String projectName = cleanDisplayText(session.optString("projectName", ""));
+        if (!projectName.isEmpty()) {
+            return projectName;
+        }
+        String projectPath = cleanDisplayText(session.optString("projectPath", ""));
+        String fromPath = fileNameFromPath(projectPath);
+        if (!fromPath.isEmpty()) {
+            return fromPath;
+        }
+        String title = cleanDisplayText(session.optString("title", ""));
+        if (!title.isEmpty() && !title.equals(label(client) + " 远程会话")) {
+            return title;
+        }
+        return "本机项目";
+    }
+
+    private String fileNameFromPath(String path) {
+        String clean = cleanDisplayText(path).replace("\\", "/");
+        while (clean.endsWith("/")) {
+            clean = clean.substring(0, clean.length() - 1);
+        }
+        int index = clean.lastIndexOf('/');
+        return index >= 0 ? clean.substring(index + 1).trim() : clean.trim();
     }
 
     private void showLocalRecentSessions(String mode) {
@@ -3212,12 +4199,20 @@ public class MainActivity extends Activity {
             if (sessions != null) {
                 for (int i = 0; i < sessions.length(); i++) {
                     JSONObject session = sessions.optJSONObject(i);
-                    if (session != null) {
+                    if (session != null && hasSessionContent(session)) {
                         rows.add(session);
                     }
                 }
             }
-            rows.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
+            Set<String> pinned = pinnedRecentSessions(mode);
+            rows.sort((a, b) -> {
+                boolean ap = pinned.contains(a.optString("id"));
+                boolean bp = pinned.contains(b.optString("id"));
+                if (ap != bp) {
+                    return ap ? -1 : 1;
+                }
+                return Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt"));
+            });
             for (JSONObject session : rows) {
                 String group = session.optString("group", "默认助手");
                 List<String> values = grouped.get(group);
@@ -3234,11 +4229,11 @@ public class MainActivity extends Activity {
         }
         if (tabs.isEmpty()) {
             String fallback = "chat".equals(mode) ? selectedChatAssistant : selectedImageAssistant;
-            grouped.put(fallback, list("暂无最近会话"));
+            grouped.put(fallback, list("暂无会话记录"));
             tabs.add(fallback);
         }
-        showStackedGroupedChoice(label(mode) + " 最近会话", tabs, grouped, "", value -> {
-            if (!"暂无最近会话".equals(value)) {
+        showStackedGroupedChoice(label(mode) + " 会话记录", tabs, grouped, "", value -> {
+            if (!"暂无会话记录".equals(value)) {
                 String selectedId = "";
                 for (String tab : tabs) {
                     selectedId = sessionIdByTitle.get(tab + "\n" + value);
@@ -3255,6 +4250,20 @@ public class MainActivity extends Activity {
             createLocalConversation(mode);
             renderSection();
         });
+    }
+
+    private boolean hasSessionContent(JSONObject session) {
+        JSONArray messages = session == null ? null : session.optJSONArray("messages");
+        if (messages == null || messages.length() == 0) {
+            return false;
+        }
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject item = messages.optJSONObject(i);
+            if (item != null && !cleanDisplayText(item.optString("text", "")).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void saveLocalRecent(String mode, String group, String prompt) {
@@ -3385,6 +4394,21 @@ public class MainActivity extends Activity {
         }
         Button close = iconButton("×");
         close.setOnClickListener(v -> dialog.dismiss());
+        String cliClient = recentDialogClient(title);
+        if (!cliClient.isEmpty()) {
+            Button refresh = iconButton("↻");
+            refresh.setContentDescription("刷新会话记录");
+            refresh.setOnClickListener(v -> {
+                dialog.dismiss();
+                showRecentSessions(cliClient);
+                if (cliClient.equals(section)) {
+                    pollSessionsOnce(true);
+                }
+            });
+            LinearLayout.LayoutParams refreshLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+            refreshLp.setMargins(0, 0, dp(8), 0);
+            titleRow.addView(refresh, refreshLp);
+        }
         titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
         panel.addView(titleRow);
         panel.addView(gap(8));
@@ -3400,7 +4424,7 @@ public class MainActivity extends Activity {
             list.addView(header, headerLp);
             List<String> values = grouped == null ? null : grouped.get(group);
             if (values == null || values.isEmpty()) {
-                list.addView(copy("暂无最近会话"));
+                list.addView(copy("暂无会话记录"));
                 continue;
             }
             for (String option : values) {
@@ -3413,11 +4437,15 @@ public class MainActivity extends Activity {
                     handler.onChoice(option);
                     dialog.dismiss();
                 });
+                entry.setOnLongClickListener(v -> {
+                    showRecentSessionActions(title, group, option);
+                    return true;
+                });
                 list.addView(entry);
             }
         }
         if (list.getChildCount() == 0) {
-            list.addView(copy("暂无最近会话"));
+            list.addView(copy("暂无会话记录"));
         }
         scroller.addView(list);
         panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(360)));
@@ -3436,13 +4464,300 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showRecentSessionActions(String title, String group, String option) {
+        if (option == null || option.equals("暂无会话记录")) {
+            return;
+        }
+        String mode = title.startsWith("Image") ? "image" : title.startsWith("Chat") ? "chat" : recentDialogClient(title);
+        List<String> labels = new ArrayList<>();
+        List<Runnable> actions = new ArrayList<>();
+        if (!mode.isEmpty()) {
+            labels.add("重命名");
+            actions.add(() -> {
+                if ("chat".equals(mode) || "image".equals(mode)) {
+                    showRenameLocalSession(mode, group, option);
+                } else {
+                    showRenameCliRecent(mode, group, option);
+                }
+            });
+            labels.add("置顶");
+            actions.add(() -> togglePinRecent(mode, group, option));
+            if ("chat".equals(mode) || "image".equals(mode)) {
+                labels.add("删除");
+                actions.add(() -> deleteLocalSessionByTitle(mode, group, option));
+                labels.add("分享");
+                actions.add(() -> shareText(localSessionShareText(mode, group, option)));
+            }
+            showLongPressMenu(labels, actions);
+            return;
+        }
+        showLongPressMenu(list("分享"), listRunnable(() -> shareText(option)));
+    }
+
+    private String recentDialogClient(String title) {
+        if (title == null) {
+            return "";
+        }
+        if (title.startsWith("Codex")) return "codex";
+        if (title.startsWith("Claude")) return "claude";
+        return "";
+    }
+
+    private Button textAction(String text, Runnable action) {
+        Button b = ghost(text);
+        b.setOnClickListener(v -> action.run());
+        return b;
+    }
+
+    private void showLongPressMenu(List<String> labels, List<Runnable> actions) {
+        if (labels == null || labels.isEmpty()) {
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout panel = vertical();
+        panel.setPadding(dp(14), dp(12), dp(14), dp(12));
+        panel.setGravity(Gravity.CENTER_HORIZONTAL);
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(20), LINE));
+        for (int i = 0; i < labels.size(); i++) {
+            String label = labels.get(i);
+            Runnable action = actions != null && i < actions.size() ? actions.get(i) : () -> { };
+            Button button = ghost(label);
+            button.setTextSize(15);
+            button.setGravity(Gravity.CENTER);
+            button.setMinWidth(dp(82));
+            button.setMinimumWidth(dp(82));
+            button.setPadding(dp(16), 0, dp(16), 0);
+            button.setOnClickListener(v -> {
+                dialog.dismiss();
+                action.run();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(38));
+            lp.setMargins(0, i == 0 ? 0 : dp(6), 0, 0);
+            panel.addView(button, lp);
+        }
+        dialog.setContentView(panel);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private List<Runnable> listRunnable(Runnable... actions) {
+        List<Runnable> out = new ArrayList<>();
+        Collections.addAll(out, actions);
+        return out;
+    }
+
+    private Set<String> pinnedRecentSessions(String mode) {
+        Set<String> out = new HashSet<>();
+        String raw = prefs.getString(mode + "_pinned_sessions", "");
+        for (String item : raw.split("\\n")) {
+            String clean = item.trim();
+            if (!clean.isEmpty()) {
+                out.add(clean);
+            }
+        }
+        return out;
+    }
+
+    private void savePinnedRecentSessions(String mode, Set<String> values) {
+        StringBuilder raw = new StringBuilder();
+        for (String item : values) {
+            if (raw.length() > 0) raw.append('\n');
+            raw.append(item);
+        }
+        prefs.edit().putString(mode + "_pinned_sessions", raw.toString()).apply();
+    }
+
+    private JSONObject findLocalSessionByTitle(String mode, String group, String title) {
+        try {
+            JSONArray sessions = localConversationStore(mode).optJSONArray("sessions");
+            if (sessions == null) {
+                return null;
+            }
+            for (int i = 0; i < sessions.length(); i++) {
+                JSONObject session = sessions.optJSONObject(i);
+                if (session != null
+                        && group.equals(session.optString("group"))
+                        && title.equals(session.optString("title", "未命名会话"))) {
+                    return session;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private void showRenameLocalSession(String mode, String group, String title) {
+        JSONObject target = findLocalSessionByTitle(mode, group, title);
+        if (target == null) {
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout panel = vertical();
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        panel.addView(bold("重命名"));
+        EditText edit = outlinedInput("会话名称");
+        edit.setText(title);
+        panel.addView(edit);
+        Button ok = primary("保存");
+        ok.setOnClickListener(v -> {
+            renameLocalSession(mode, target.optString("id"), trim(edit));
+            dialog.dismiss();
+        });
+        panel.addView(ok, compactFullButtonLp());
+        dialog.setContentView(panel);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(dp(300), WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private void renameLocalSession(String mode, String sessionId, String nextTitle) {
+        String clean = cleanDisplayText(nextTitle);
+        if (clean.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject root = localConversationStore(mode);
+            JSONObject session = findLocalSession(root, sessionId);
+            if (session != null) {
+                session.put("title", cleanSessionTitle(clean));
+                session.put("updatedAt", System.currentTimeMillis());
+                saveLocalConversationStore(mode, root);
+                renderSection();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void togglePinLocalSession(String mode, String group, String title) {
+        JSONObject session = findLocalSessionByTitle(mode, group, title);
+        if (session == null) {
+            return;
+        }
+        Set<String> pinned = pinnedRecentSessions(mode);
+        String id = session.optString("id");
+        if (pinned.contains(id)) {
+            pinned.remove(id);
+        } else {
+            pinned.add(id);
+        }
+        savePinnedRecentSessions(mode, pinned);
+    }
+
+    private void togglePinRecent(String mode, String group, String title) {
+        if ("chat".equals(mode) || "image".equals(mode)) {
+            togglePinLocalSession(mode, group, title);
+            return;
+        }
+        Set<String> pinned = pinnedRecentSessions(mode);
+        String key = group + "\n" + title;
+        if (pinned.contains(key)) {
+            pinned.remove(key);
+        } else {
+            pinned.add(key);
+        }
+        savePinnedRecentSessions(mode, pinned);
+    }
+
+    private String cliRecentAlias(String client, String group, String preview) {
+        String key = "cli_recent_alias_" + client + "_" + Integer.toHexString((group + "\n" + preview).hashCode());
+        return prefs.getString(key, preview);
+    }
+
+    private void showRenameCliRecent(String client, String group, String title) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout panel = vertical();
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        panel.addView(bold("重命名"));
+        EditText edit = outlinedInput("会话名称");
+        edit.setText(title);
+        panel.addView(edit);
+        Button ok = primary("保存");
+        ok.setOnClickListener(v -> {
+            String key = "cli_recent_alias_" + client + "_" + Integer.toHexString((group + "\n" + title).hashCode());
+            String clean = cleanDisplayText(trim(edit));
+            if (!clean.isEmpty()) {
+                prefs.edit().putString(key, clean).apply();
+            }
+            dialog.dismiss();
+            showRecentSessions(client);
+        });
+        panel.addView(ok, compactFullButtonLp());
+        dialog.setContentView(panel);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(dp(300), WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private void deleteLocalSessionByTitle(String mode, String group, String title) {
+        try {
+            JSONObject root = localConversationStore(mode);
+            JSONArray sessions = root.optJSONArray("sessions");
+            if (sessions == null) {
+                return;
+            }
+            JSONArray next = new JSONArray();
+            String removedId = "";
+            for (int i = 0; i < sessions.length(); i++) {
+                JSONObject session = sessions.optJSONObject(i);
+                boolean remove = session != null
+                        && group.equals(session.optString("group"))
+                        && title.equals(session.optString("title", "未命名会话"));
+                if (remove) {
+                    removedId = session.optString("id");
+                } else if (session != null) {
+                    next.put(session);
+                }
+            }
+            root.put("sessions", next);
+            if (removedId.equals(activeLocalSessionId(mode))) {
+                setActiveLocalSessionId(mode, "");
+            }
+            saveLocalConversationStore(mode, root);
+            renderSection();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String localSessionShareText(String mode, String group, String title) {
+        JSONObject session = findLocalSessionByTitle(mode, group, title);
+        if (session == null) {
+            return title;
+        }
+        StringBuilder out = new StringBuilder(title);
+        JSONArray messages = session.optJSONArray("messages");
+        if (messages != null) {
+            for (int i = 0; i < messages.length(); i++) {
+                JSONObject item = messages.optJSONObject(i);
+                if (item == null) continue;
+                out.append("\n\n").append("user".equals(item.optString("role")) ? "用户：" : "AI：")
+                        .append(cleanDisplayText(item.optString("text")));
+            }
+        }
+        return out.toString();
+    }
+
     private void showGroupedChoice(String title, List<String> tabs, Map<String, List<String>> grouped, String current, ChoiceHandler handler) {
         showGroupedChoice(title, tabs, grouped, current, handler, null);
     }
 
     private boolean favoriteChoiceEnabled(String title) {
         String t = title == null ? "" : title;
-        return t.contains("助手") || t.contains("AI 模型") || t.contains("Skill") || t.contains("Plugin");
+        return t.contains("助手") || t.contains("模型选择") || t.contains("AI 模型") || t.contains("Skill") || t.contains("Plugin");
     }
 
     private String favoriteChoiceKey(String title) {
@@ -3508,6 +4823,12 @@ public class MainActivity extends Activity {
                 entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
             }
             entry.setOnClickListener(v -> onChoose.run());
+            if (title.contains("助手") && !header && !"暂无可选项".equals(option)) {
+                entry.setOnLongClickListener(v -> {
+                    showAssistantActions(option);
+                    return true;
+                });
+            }
             return entry;
         }
 
@@ -3523,6 +4844,16 @@ public class MainActivity extends Activity {
         pick.setTextColor(selected ? BLUE : INK);
         pick.setBackground(new ColorDrawable(Color.TRANSPARENT));
         pick.setOnClickListener(v -> onChoose.run());
+        if (title.contains("助手") && !"暂无可选项".equals(option)) {
+            row.setOnLongClickListener(v -> {
+                showAssistantActions(option);
+                return true;
+            });
+            pick.setOnLongClickListener(v -> {
+                showAssistantActions(option);
+                return true;
+            });
+        }
         row.addView(pick, new LinearLayout.LayoutParams(0, -1, 1));
         Button star = iconButton(favorites.contains(option) ? "★" : "☆");
         star.setTextColor(favorites.contains(option) ? Color.rgb(224, 157, 42) : MUTED);
@@ -3539,6 +4870,69 @@ public class MainActivity extends Activity {
         });
         row.addView(star, new LinearLayout.LayoutParams(dp(38), dp(38)));
         return row;
+    }
+
+    private void showAssistantActions(String option) {
+        String scope = "image".equals(activeComposerMode) ? "image" : "chat";
+        showLongPressMenu(
+                list("分享", "编辑", "删除"),
+                listRunnable(
+                        () -> shareText(assistantShareText(scope, option)),
+                        () -> showAssistantEditDialog(scope, option),
+                        () -> deleteCustomAssistant(scope, option)
+                )
+        );
+    }
+
+    private String assistantEditorPrompt(String scope, String option) {
+        String custom = customAssistantPrompt(scope, option);
+        if (!custom.trim().isEmpty()) {
+            return custom;
+        }
+        if ("image".equals(scope)) {
+            return imageAssistantPrompt(option, "")
+                    .replace("\n\n用户图片需求：", "")
+                    .replace("用户图片需求：", "")
+                    .trim();
+        }
+        return assistantPrompt(option);
+    }
+
+    private void showAssistantEditDialog(String scope, String option) {
+        boolean create = cleanDisplayText(option).isEmpty();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout panel = vertical();
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        panel.addView(bold(create ? "新建助手" : "编辑助手"));
+        panel.addView(gap(8));
+        EditText name = outlinedInput("助手名称");
+        if (!create) {
+            name.setText(option);
+        }
+        panel.addView(name);
+        panel.addView(gap(8));
+        EditText prompt = outlinedInput("助手提示词");
+        prompt.setMinLines(4);
+        prompt.setMaxLines(8);
+        if (!create) {
+            prompt.setText(assistantEditorPrompt(scope, option));
+        }
+        panel.addView(prompt);
+        Button save = primary("保存");
+        save.setOnClickListener(v -> {
+            saveCustomAssistant(scope, create ? "" : option, trim(name), prompt.getText().toString());
+            dialog.dismiss();
+        });
+        panel.addView(save, compactFullButtonLp());
+        dialog.setContentView(panel);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(dp(320), WindowManager.LayoutParams.WRAP_CONTENT);
+        }
     }
 
     private void showGroupedChoice(String title, List<String> tabs, Map<String, List<String>> grouped, String current, ChoiceHandler handler, Runnable newAction) {
@@ -3669,6 +5063,17 @@ public class MainActivity extends Activity {
         panel.setPadding(dp(16), dp(14), dp(16), dp(14));
         LinearLayout titleRow = horizontal();
         titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
+        if ("助手".equals(title)) {
+            Button add = iconButton("+");
+            add.setContentDescription("新建助手");
+            add.setOnClickListener(v -> {
+                dialog.dismiss();
+                showAssistantEditDialog("image".equals(activeComposerMode) ? "image" : "chat", "");
+            });
+            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+            addLp.setMargins(0, 0, dp(8), 0);
+            titleRow.addView(add, addLp);
+        }
         Button close = iconButton("×");
         close.setOnClickListener(v -> dialog.dismiss());
         titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
@@ -3780,11 +5185,18 @@ public class MainActivity extends Activity {
         e.setTextColor(INK);
         e.setHintTextColor(Color.rgb(130, 142, 162));
         e.setTextSize(13);
-        e.setPadding(dp(14), dp(9), dp(14), dp(9));
-        e.setBackground(round(Color.argb(205, 255, 255, 255), dp(16), LINE));
+        e.setPadding(dp(8), dp(8), dp(8), dp(8));
+        e.setBackground(new ColorDrawable(Color.TRANSPARENT));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.setMargins(0, 0, 0, 0);
         e.setLayoutParams(lp);
+        return e;
+    }
+
+    private EditText outlinedInput(String hint) {
+        EditText e = input(hint);
+        e.setPadding(dp(10), dp(8), dp(10), dp(8));
+        e.setBackground(round(Color.argb(225, 255, 255, 255), dp(12), LINE));
         return e;
     }
 
@@ -3885,6 +5297,8 @@ public class MainActivity extends Activity {
         Button b = ghost(text);
         b.setGravity(Gravity.CENTER_VERTICAL);
         b.setTextSize(15);
+        b.setSingleLine(true);
+        b.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(42));
         lp.setMargins(0, dp(8), 0, 0);
         b.setLayoutParams(lp);
@@ -3893,19 +5307,23 @@ public class MainActivity extends Activity {
 
     private View drawerEntry(String item) {
         LinearLayout row = horizontal();
-        row.setPadding(dp(12), 0, dp(3), 0);
+        row.setGravity(Gravity.CENTER);
+        row.setPadding(dp(4), 0, dp(2), 0);
         row.setBackground(round(Color.argb(120, 255, 255, 255), dp(16), LINE));
+        LinearLayout group = horizontal();
+        group.setGravity(Gravity.CENTER);
         ImageView icon = new ImageView(this);
         icon.setImageResource(drawerIconRes(item));
         icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
         icon.setPadding(dp(5), dp(5), dp(5), dp(5));
-        row.addView(icon, new LinearLayout.LayoutParams(dp(30), -1));
+        group.addView(icon, new LinearLayout.LayoutParams(dp(30), -1));
         TextView text = bold(label(item));
         text.setTextSize(16);
-        text.setGravity(Gravity.CENTER);
-        row.addView(text, new LinearLayout.LayoutParams(0, -1, 1));
-        View spacer = new View(this);
-        row.addView(spacer, new LinearLayout.LayoutParams(dp(14), -1));
+        text.setGravity(Gravity.CENTER_VERTICAL);
+        text.setSingleLine(true);
+        text.setEllipsize(TextUtils.TruncateAt.END);
+        group.addView(text, new LinearLayout.LayoutParams(-2, -1));
+        row.addView(group, new LinearLayout.LayoutParams(-1, -1));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(46));
         lp.setMargins(0, dp(10), 0, 0);
         row.setLayoutParams(lp);
@@ -4227,17 +5645,114 @@ public class MainActivity extends Activity {
             shell.getWindowVisibleDisplayFrame(visible);
             int rootHeight = shell.getRootView().getHeight();
             int keyboard = Math.max(0, rootHeight - visible.bottom);
+            LinearLayout.LayoutParams lp = composerHost.getLayoutParams() instanceof LinearLayout.LayoutParams
+                    ? (LinearLayout.LayoutParams) composerHost.getLayoutParams()
+                    : null;
             if (keyboard > dp(120)) {
-                composerHost.setTranslationY(-Math.max(0, keyboard - dp(12)));
-                composerHost.bringToFront();
+                composerHost.setTranslationY(0);
+                composerHost.setPadding(0, 0, 0, dp(6));
+                if (lp != null && lp.bottomMargin != keyboard) {
+                    lp.bottomMargin = keyboard;
+                    composerHost.setLayoutParams(lp);
+                }
+                scrollToBottom();
             } else {
                 composerHost.setTranslationY(0);
+                composerHost.setPadding(0, 0, 0, dp(12));
+                if (lp != null && lp.bottomMargin != 0) {
+                    lp.bottomMargin = 0;
+                    composerHost.setLayoutParams(lp);
+                    scrollToBottom();
+                }
             }
         });
     }
 
+    private void installSwipeNavigation() {
+        if (shell == null) {
+            return;
+        }
+        View.OnTouchListener listener = (v, event) -> {
+            switch (event.getAction()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    swipeStartX = event.getX();
+                    swipeStartY = event.getY();
+                    break;
+                case android.view.MotionEvent.ACTION_UP:
+                    handleHorizontalSwipe(event.getX() - swipeStartX, event.getY() - swipeStartY);
+                    break;
+                default:
+                    break;
+            }
+            return false;
+        };
+        shell.setOnTouchListener(listener);
+        if (contentScroll != null) {
+            contentScroll.setOnTouchListener(listener);
+        }
+    }
+
+    private void handleHorizontalSwipe(float dx, float dy) {
+        if (System.currentTimeMillis() < suppressSwipeUntil) {
+            return;
+        }
+        float absX = Math.abs(dx);
+        float absY = Math.abs(dy);
+        if (absX < dp(118) || absX < absY * 2.8f || absY > dp(72)) {
+            return;
+        }
+        String[] items = new String[]{"chat", "image", "codex", "claude"};
+        int current = -1;
+        String effective = "assistants".equals(section) ? "chat" : section;
+        for (int i = 0; i < items.length; i++) {
+            if (items[i].equals(effective)) {
+                current = i;
+                break;
+            }
+        }
+        if (current < 0) {
+            return;
+        }
+        int direction = dx < 0 ? 1 : -1;
+        int next = current + direction;
+        if (next >= 0 && next < items.length) {
+            section = items[next];
+            refreshBottomNav();
+            renderSection();
+            lastExitSwipeAt = 0;
+            lastExitSwipeDirection = 0;
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (lastExitSwipeDirection == direction && now - lastExitSwipeAt < 1800L) {
+            finish();
+            return;
+        }
+        lastExitSwipeDirection = direction;
+        lastExitSwipeAt = now;
+        toast("再次滑动退出应用");
+    }
+
     private void hideKeyboard(View view) {
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(view.getWindowToken(), 0);
+    }
+
+    private void focusComposerInput() {
+        if (activeInput == null) {
+            return;
+        }
+        activeInput.setFocusableInTouchMode(true);
+        activeInput.requestFocus();
+        activeInput.setSelection(activeInput.getText().length());
+        handler.postDelayed(() -> showKeyboard(activeInput), 80);
+    }
+
+    private void showKeyboard(View view) {
+        if (view == null) {
+            return;
+        }
+        view.requestFocus();
+        ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
     }
 
     private void ui(Runnable runnable) {
