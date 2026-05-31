@@ -20,7 +20,9 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
@@ -51,6 +53,8 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -131,6 +135,11 @@ public class MainActivity extends Activity {
     private long lastExitSwipeAt = 0L;
     private int lastExitSwipeDirection = 0;
     private long suppressSwipeUntil = 0L;
+    private String pendingAndroidUpdateUrl = "";
+    private String pendingAndroidUpdateVersion = "";
+    private Uri downloadedAndroidUpdateUri = null;
+    private boolean updateDownloading = false;
+    private Runnable pendingComposerKeyboardRunnable = null;
     private final Set<String> autoScrolledSections = new HashSet<>();
     private final Set<String> expandedLogIds = new HashSet<>();
     private final List<Uri> selectedAttachmentUris = new ArrayList<>();
@@ -521,13 +530,14 @@ public class MainActivity extends Activity {
     private void renderMe() {
         content.addView(sectionTitle("系统设置"));
         renderAnnouncementsModule();
-        renderVersionModule();
 
         LinearLayout list = vertical();
         list.setTag("device_list");
         content.addView(list);
         renderDeviceList(list, new JSONArray());
         refreshDevices(true);
+
+        renderVersionModule();
 
         LinearLayout account = cardPanel();
         account.addView(bold("账户"));
@@ -539,7 +549,7 @@ public class MainActivity extends Activity {
             showLogin();
         });
         account.addView(gap(10));
-        account.addView(logout, compactFullButtonLp());
+        account.addView(logout, compactCenteredButtonLp());
         content.addView(account);
     }
 
@@ -624,9 +634,13 @@ public class MainActivity extends Activity {
         LinearLayout panel = cardPanel();
         panel.addView(bold("版本信息"));
         panel.addView(copy("当前版本：" + currentVersionName()));
+        TextView progress = copy("");
+        progress.setGravity(Gravity.CENTER);
+        progress.setVisibility(View.GONE);
+        panel.addView(progress);
         Button check = primary("检查更新");
-        check.setOnClickListener(v -> checkAndroidUpdate(check));
-        panel.addView(check, compactFullButtonLp());
+        check.setOnClickListener(v -> handleAndroidUpdateAction(check, progress));
+        panel.addView(check, compactCenteredButtonLp());
         content.addView(panel);
     }
 
@@ -638,12 +652,19 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void checkAndroidUpdate(Button action) {
-        Object tag = action.getTag();
-        if (tag instanceof String && !((String) tag).isEmpty()) {
-            openExternalUrl((String) tag);
+    private void handleAndroidUpdateAction(Button action, TextView progress) {
+        if (downloadedAndroidUpdateUri != null) {
+            installDownloadedApk(downloadedAndroidUpdateUri);
             return;
         }
+        if (!pendingAndroidUpdateUrl.isEmpty()) {
+            downloadAndroidUpdate(action, progress, pendingAndroidUpdateUrl, pendingAndroidUpdateVersion);
+            return;
+        }
+        checkAndroidUpdate(action, progress);
+    }
+
+    private void checkAndroidUpdate(Button action, TextView progress) {
         action.setText("正在检查");
         runNetwork(() -> {
             JSONObject envelope = api("GET", "/api/download/packages", null);
@@ -658,14 +679,52 @@ public class MainActivity extends Activity {
             boolean hasUpdate = !latest.isEmpty() && compareVersion(latest, currentVersionName()) > 0;
             ui(() -> {
                 if (hasUpdate) {
+                    pendingAndroidUpdateUrl = finalUrl;
+                    pendingAndroidUpdateVersion = latest;
+                    downloadedAndroidUpdateUri = null;
                     action.setText("下载更新");
-                    action.setTag(finalUrl);
                     toast("发现新版本 " + latest);
                 } else {
+                    pendingAndroidUpdateUrl = "";
+                    pendingAndroidUpdateVersion = "";
+                    downloadedAndroidUpdateUri = null;
                     action.setText("检查更新");
-                    action.setTag("");
+                    progress.setVisibility(View.GONE);
+                    showTextDialog("检查更新", "已是最新版");
                 }
             });
+        });
+    }
+
+    private void downloadAndroidUpdate(Button action, TextView progress, String url, String version) {
+        if (updateDownloading) {
+            return;
+        }
+        updateDownloading = true;
+        action.setEnabled(false);
+        action.setText("更新中");
+        progress.setVisibility(View.VISIBLE);
+        progress.setText("下载进度 0%");
+        executor.execute(() -> {
+            try {
+                Uri uri = downloadApk(url, version, percent -> ui(() -> progress.setText("下载进度 " + percent + "%")));
+                ui(() -> {
+                    updateDownloading = false;
+                    downloadedAndroidUpdateUri = uri;
+                    action.setEnabled(true);
+                    action.setText("现在安装");
+                    progress.setText("下载完成");
+                });
+            } catch (Exception e) {
+                ui(() -> {
+                    updateDownloading = false;
+                    downloadedAndroidUpdateUri = null;
+                    action.setEnabled(true);
+                    action.setText("下载更新");
+                    progress.setVisibility(View.GONE);
+                    toast(userMessage(e));
+                });
+            }
         });
     }
 
@@ -686,6 +745,109 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         } catch (Exception e) {
             toast("无法打开下载链接");
+        }
+    }
+
+    private Uri downloadApk(String url, String version, ProgressHandler progress) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(180000);
+        String cookie = prefs.getString("cookie", "");
+        if (!cookie.isEmpty()) {
+            conn.setRequestProperty("Cookie", cookie);
+        }
+        int code = conn.getResponseCode();
+        if (code >= 400) {
+            String raw = readStream(conn.getErrorStream());
+            conn.disconnect();
+            throw new ApiException(code, raw, "安装包下载失败，请稍后重试");
+        }
+        int total = conn.getContentLength();
+        Uri target = createApkTargetUri(version);
+        try (InputStream input = conn.getInputStream(); OutputStream output = openApkOutputStream(target)) {
+            byte[] buffer = new byte[16 * 1024];
+            long read = 0;
+            int lastPercent = -1;
+            int len;
+            while ((len = input.read(buffer)) >= 0) {
+                output.write(buffer, 0, len);
+                read += len;
+                if (total > 0) {
+                    int percent = Math.max(0, Math.min(100, (int) (read * 100 / total)));
+                    if (percent != lastPercent) {
+                        lastPercent = percent;
+                        progress.onProgress(percent);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            getContentResolver().delete(target, null, null);
+            throw e;
+        } finally {
+            conn.disconnect();
+        }
+        publishApkTarget(target);
+        progress.onProgress(100);
+        return target;
+    }
+
+    private Uri createApkTargetUri(String version) throws Exception {
+        String safeVersion = (version == null || version.trim().isEmpty() ? currentVersionName() : version).replaceAll("[^0-9A-Za-z._-]", "_");
+        String name = "OneAPI-" + safeVersion + ".apk";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "application/vnd.android.package-archive");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                throw new Exception("安装包保存失败");
+            }
+            return uri;
+        }
+        File file = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), name);
+        return Uri.fromFile(file);
+    }
+
+    private OutputStream openApkOutputStream(Uri uri) throws Exception {
+        if ("file".equals(uri.getScheme())) {
+            File file = new File(uri.getPath());
+            File parent = file.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
+            return new FileOutputStream(file);
+        }
+        OutputStream output = getContentResolver().openOutputStream(uri);
+        if (output == null) {
+            throw new Exception("安装包保存失败");
+        }
+        return output;
+    }
+
+    private void publishApkTarget(Uri uri) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !"file".equals(uri.getScheme())) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            getContentResolver().update(uri, values, null, null);
+        }
+    }
+
+    private void installDownloadedApk(Uri uri) {
+        try {
+            if ("file".equals(uri.getScheme())) {
+                try {
+                    Class.forName("android.os.StrictMode").getMethod("disableDeathOnFileUriExposure").invoke(null);
+                } catch (Exception ignored) {
+                }
+            }
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intent);
+        } catch (Exception e) {
+            toast("无法启动安装，请检查系统安装权限");
         }
     }
 
@@ -746,6 +908,9 @@ public class MainActivity extends Activity {
         box.addView(extensionPreviewHost);
         renderAttachmentPreview();
         renderExtensionPreview();
+        if ("chat".equals(mode) || "image".equals(mode)) {
+            box.addView(currentAssistantTag(mode));
+        }
         activeInput = input(hint);
         if ("assistants".equals(section)) {
             activeInput.setBackground(round(Color.argb(18, 255, 255, 255), dp(14), LINE));
@@ -758,8 +923,8 @@ public class MainActivity extends Activity {
         activeInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         activeInput.setOnClickListener(v -> focusComposerInput());
         activeInput.setOnFocusChangeListener((v, hasFocus) -> {
-            if (hasFocus) {
-                handler.postDelayed(() -> showKeyboard(activeInput), 80);
+            if (!hasFocus) {
+                cancelComposerKeyboardRequest();
             }
         });
         box.addView(activeInput);
@@ -792,6 +957,20 @@ public class MainActivity extends Activity {
         return box;
     }
 
+    private View currentAssistantTag(String mode) {
+        TextView tag = copy("助手：" + ("image".equals(mode) ? selectedImageAssistant : selectedChatAssistant));
+        tag.setTextColor(Color.rgb(45, 74, 124));
+        tag.setTextSize(12);
+        tag.setSingleLine(true);
+        tag.setEllipsize(TextUtils.TruncateAt.END);
+        tag.setPadding(dp(10), dp(4), dp(10), dp(4));
+        tag.setBackground(round(Color.argb(72, 54, 104, 240), dp(12), Color.argb(88, 54, 104, 240)));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(28));
+        lp.setMargins(0, 0, 0, dp(6));
+        tag.setLayoutParams(lp);
+        return tag;
+    }
+
     private void addComposerTools(LinearLayout left, String mode) {
         if ("chat".equals(mode)) {
             addToolButton(left, R.drawable.tool_add, "上传附件", this::openImagePicker);
@@ -801,6 +980,9 @@ public class MainActivity extends Activity {
                 prefs.edit().putString("selected_chat_model", value).apply();
             }));
             addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", chatAssistantOptions(), selectedChatAssistant, value -> {
+                if (value.equals(selectedChatAssistant)) {
+                    return;
+                }
                 selectedChatAssistant = value;
                 prefs.edit().putString("selected_chat_assistant", value).apply();
                 createLocalConversation("chat");
@@ -820,6 +1002,9 @@ public class MainActivity extends Activity {
             addToolButton(left, R.drawable.tool_add, "上传附件", this::openImagePicker);
             addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
             addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", imageAssistantOptions(), selectedImageAssistant, value -> {
+                if (value.equals(selectedImageAssistant)) {
+                    return;
+                }
                 selectedImageAssistant = value;
                 prefs.edit().putString("selected_image_assistant", value).apply();
                 createLocalConversation("image");
@@ -1437,10 +1622,10 @@ public class MainActivity extends Activity {
         return messages == null ? new JSONArray() : messages;
     }
 
-    private void appendLocalConversation(String mode, String role, String type, String text) {
+    private int appendLocalConversation(String mode, String role, String type, String text) {
         String clean = cleanDisplayText(text);
         if (clean.isEmpty()) {
-            return;
+            return -1;
         }
         try {
             JSONObject root = localConversationStore(mode);
@@ -1450,6 +1635,7 @@ public class MainActivity extends Activity {
                 messages = new JSONArray();
                 session.put("messages", messages);
             }
+            int index = messages.length();
             messages.put(new JSONObject()
                     .put("role", role)
                     .put("type", type)
@@ -1461,7 +1647,9 @@ public class MainActivity extends Activity {
             }
             trimLocalSessions(root);
             saveLocalConversationStore(mode, root);
+            return index;
         } catch (Exception ignored) {
+            return -1;
         }
     }
 
@@ -1606,19 +1794,19 @@ public class MainActivity extends Activity {
         selectedAttachmentUris.clear();
         renderAttachmentPreview();
         saveLocalRecent("image", selectedImageAssistant, prompt);
-        appendLocalConversation("image", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "image", -1));
+        int userIndex = appendLocalConversation("image", "user", "text", prompt);
+        content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "image", userIndex));
         scrollToBottom();
         LinearLayout progress = addImageProgressBubble();
         scrollToBottom();
         runNetwork(() -> {
             JSONObject body = new JSONObject();
-            body.put("model", "gpt-image-1");
+            body.put("model", "gpt-image-2");
             body.put("prompt", imageAssistantPrompt(selectedImageAssistant, prompt));
             body.put("n", 1);
             body.put("size", selectedImageSize);
             body.put("quality", imageQualityValue(selectedImageQuality));
-            body.put("response_format", "url");
+            body.put("response_format", "b64_json");
             if (imageRandomSeed) {
                 body.put("seed", System.currentTimeMillis() % 1000000);
             }
@@ -1633,9 +1821,9 @@ public class MainActivity extends Activity {
             String text = extractImageText(response);
             ui(() -> {
                 setSending(false);
-                String result = text.isEmpty() ? "图片任务已提交。" : text;
-                renderImageResult(progress, result);
-                appendLocalConversation("image", "assistant", result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/") ? "image" : "text", result);
+                String result = text.isEmpty() ? "模型没有返回可展示的图片。" : text;
+                int assistantIndex = appendLocalConversation("image", "assistant", result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/") ? "image" : "text", result);
+                renderImageResult(progress, result, System.currentTimeMillis(), "image", assistantIndex);
                 scrollToBottom();
             });
         });
@@ -1686,27 +1874,88 @@ public class MainActivity extends Activity {
     }
 
     private String extractImageText(JSONObject response) {
-        JSONArray data = response.optJSONArray("data");
-        if (data == null) {
-            JSONObject nested = response.optJSONObject("data");
-            if (nested != null) {
-                return extractImageText(nested);
-            }
-            return cleanJsonString(response, "message");
+        String image = findImageSource(response);
+        if (!image.isEmpty()) {
+            return image;
         }
-        JSONObject first = data.optJSONObject(0);
-        if (first == null) {
+        return "";
+    }
+
+    private String findImageSource(Object value) {
+        if (value == null || value == JSONObject.NULL) {
             return "";
         }
-        String url = cleanJsonString(first, "url");
-        if (!url.isEmpty()) {
-            return url;
+        if (value instanceof String) {
+            String text = cleanDisplayText((String) value);
+            if (looksLikeImageSource(text)) {
+                return normalizeImageSource(text);
+            }
+            return "";
         }
-        String b64 = cleanJsonString(first, "b64_json");
-        if (b64.isEmpty()) {
-            b64 = cleanJsonString(first, "b64Json");
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) {
+                String found = findImageSource(array.opt(i));
+                if (!found.isEmpty()) {
+                    return found;
+                }
+            }
+            return "";
         }
-        return b64.isEmpty() ? "图片已生成，服务器返回了图片数据。" : "data:image/png;base64," + b64;
+        if (!(value instanceof JSONObject)) {
+            return "";
+        }
+        JSONObject object = (JSONObject) value;
+        for (String key : new String[]{"url", "image_url", "imageUrl"}) {
+            String source = cleanJsonString(object, key);
+            if (!source.isEmpty()) {
+                return normalizeImageSource(source);
+            }
+        }
+        for (String key : new String[]{"b64_json", "b64Json", "image_base64", "binary_data_base64", "base64"}) {
+            String source = cleanJsonString(object, key);
+            if (!source.isEmpty()) {
+                return normalizeImageSource(source);
+            }
+        }
+        String type = cleanJsonString(object, "type");
+        String result = firstNonEmptyJsonString(object, "result", "image", "output_image");
+        if (!result.isEmpty() && (type.equals("image_generation_call") || type.equals("output_image") || type.equals("image"))) {
+            return normalizeImageSource(result);
+        }
+        for (String key : new String[]{"data", "output", "images", "result", "image_urls", "image_base64", "binary_data_base64"}) {
+            String found = findImageSource(object.opt(key));
+            if (!found.isEmpty()) {
+                return found;
+            }
+        }
+        return "";
+    }
+
+    private String firstNonEmptyJsonString(JSONObject object, String... keys) {
+        for (String key : keys) {
+            String value = cleanJsonString(object, key);
+            if (!value.isEmpty()) {
+                return value;
+            }
+        }
+        return "";
+    }
+
+    private boolean looksLikeImageSource(String value) {
+        String text = value == null ? "" : value.trim();
+        return text.startsWith("http://")
+                || text.startsWith("https://")
+                || text.startsWith("data:image/")
+                || text.length() > 120 && text.matches("^[A-Za-z0-9+/=\\r\\n]+$");
+    }
+
+    private String normalizeImageSource(String source) {
+        String value = cleanDisplayText(source).replace("\n", "").replace("\r", "");
+        if (value.startsWith("http://") || value.startsWith("https://") || value.startsWith("data:image/")) {
+            return value;
+        }
+        return "data:image/png;base64," + value;
     }
 
     private String streamChatResponse(JSONObject body, LinearLayout live, long timestamp) throws Exception {
@@ -1954,16 +2203,17 @@ public class MainActivity extends Activity {
             if (isTrialPlan(plan) && hasPurchasedPlan(record, plan)) {
                 continue;
             }
+            double priceAmount = plan.optDouble("price_amount", 0);
             String title = plan.optString("title", "套餐");
             String subtitle = plan.optString("subtitle", "适合稳定使用。");
-            String price = formatPlainPrice(plan.optDouble("price_amount", 0));
+            String price = formatPlainPrice(priceAmount);
             String quota = formatQuotaAsUsd(plan.optDouble("total_amount", 0), 500000);
             String validity = formatDuration(plan);
             String reset = resetLabel(plan.optString("quota_reset_period", "never"));
             boolean trialPlan = isTrialPlan(plan);
             boolean recommended = recommendedPlans.contains(planKey(plan));
             FrameLayout frame = subscriptionCardFrame();
-            if (trialPlan) {
+            if (trialPlan && Math.abs(priceAmount - 50D) < 0.01D) {
                 ImageView gift = new ImageView(this);
                 gift.setImageResource(R.drawable.plan_gift);
                 gift.setAlpha(0.5f);
@@ -1995,12 +2245,13 @@ public class MainActivity extends Activity {
                 sale.setImageResource(R.drawable.plan_sale);
                 sale.setAlpha(0.82f);
                 sale.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                LinearLayout.LayoutParams saleLp = new LinearLayout.LayoutParams(dp(34), dp(34));
+                LinearLayout.LayoutParams saleLp = new LinearLayout.LayoutParams(dp(17), dp(17));
                 saleLp.setMargins(0, 0, dp(6), 0);
                 foot.addView(sale, saleLp);
             }
-            ImageButton buy = tinyAction(R.drawable.ic_bubble_buy, "订阅套餐", () -> { });
-            foot.addView(buy, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            JSONObject selectedPlan = plan;
+            ImageButton buy = tinyAction(R.drawable.ic_bubble_buy, "订阅套餐", () -> showSubscriptionPayDialog(selectedPlan));
+            foot.addView(buy, new LinearLayout.LayoutParams(dp(88), dp(88)));
             LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, -2);
             footLp.setMargins(0, dp(6), 0, 0);
             panel.addView(foot, footLp);
@@ -2089,7 +2340,7 @@ public class MainActivity extends Activity {
         int value = Math.max(1, plan.optInt("duration_value", 1));
         if ("year".equals(unit) || value >= 12) {
             label = "年付";
-            color = Color.argb(54, 91, 77, 215);
+            color = Color.argb(54, 245, 158, 11);
         } else if ("month".equals(unit)) {
             label = "月付";
             color = Color.argb(54, 54, 104, 240);
@@ -2103,6 +2354,71 @@ public class MainActivity extends Activity {
         badge.setGravity(Gravity.CENTER);
         badge.setBackground(round(color, dp(14), Color.argb(74, 145, 160, 184)));
         return badge;
+    }
+
+    private void showSubscriptionPayDialog(JSONObject plan) {
+        if (plan == null) {
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(Color.argb(104, 15, 23, 42));
+        LinearLayout panel = vertical();
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        panel.addView(bold("钱包支付"));
+        panel.addView(copy(plan.optString("title", "套餐") + " · " + formatPlainPrice(plan.optDouble("price_amount", 0)) + " 元"));
+        panel.addView(copy("确认后将从钱包余额扣除并购买该套餐。"));
+        LinearLayout actions = horizontal();
+        actions.setPadding(0, dp(14), 0, 0);
+        Button cancel = ghost("取消");
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        Button confirm = primary("确认支付");
+        confirm.setOnClickListener(v -> {
+            confirm.setEnabled(false);
+            confirm.setText("支付中");
+            executor.execute(() -> {
+                try {
+                    JSONObject body = new JSONObject();
+                    body.put("plan_id", plan.optInt("id", 0));
+                    JSONObject res = api("POST", "/api/subscription/wallet/pay", body);
+                    JSONObject data = res.optJSONObject("data");
+                    String notice = data == null ? "" : data.optString("notice", "");
+                    ui(() -> {
+                        dialog.dismiss();
+                        toast(notice.isEmpty() ? "套餐购买成功" : notice);
+                        refreshSubscriptions();
+                        refreshWallet();
+                    });
+                } catch (Exception e) {
+                    ui(() -> {
+                        confirm.setEnabled(true);
+                        confirm.setText("确认支付");
+                        toast(userMessage(e));
+                    });
+                }
+            });
+        });
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, dp(42), 1);
+        cancelLp.setMargins(0, 0, dp(8), 0);
+        LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(0, dp(42), 1);
+        confirmLp.setMargins(dp(8), 0, 0, 0);
+        actions.addView(cancel, cancelLp);
+        actions.addView(confirm, confirmLp);
+        panel.addView(actions);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2, Gravity.CENTER);
+        lp.setMargins(dp(18), 0, dp(18), 0);
+        overlay.addView(panel, lp);
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        dialog.setContentView(overlay);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+        }
     }
 
     private void refreshWallet() {
@@ -3125,7 +3441,7 @@ public class MainActivity extends Activity {
     private String markdownHtml(String markdown) {
         String jsMarkdown = JSONObject.quote(normalizeMarkdownForRender(markdown));
         return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                + "<style>html,body{margin:0;width:100%;max-width:100%;overflow-x:hidden;}body{font:14px/1.55 sans-serif;color:#171f30;background:transparent;overflow-y:hidden;}#root{max-width:100%;overflow-x:hidden;}p{margin:0 0 10px;}h1,h2,h3,h4,h5,h6{margin:12px 0 8px;line-height:1.28;color:#111827;font-weight:700;}h1{font-size:22px}h2{font-size:20px}h3{font-size:18px}h4,h5,h6{font-size:16px}ul,ol{margin:6px 0 10px;padding-left:22px;}li{margin:3px 0;}blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #9fb3e8;background:#f6f8ff;border-radius:8px;}hr{border:0;border-top:1px solid #dce4f1;margin:12px 0;}.code-wrap{position:relative;margin:8px 0;max-width:100%;overflow-x:auto;}.code-copy{position:absolute;right:8px;top:6px;border:1px solid #dce4f1;background:rgba(255,255,255,.95);color:#3668f0;border-radius:8px;padding:2px 6px;font-size:13px;line-height:1.2;z-index:2}pre{white-space:pre-wrap;background:#f4f7fb;border:1px solid #dce4f1;border-radius:10px;padding:30px 10px 10px;overflow:auto;margin:0;}code{font-family:monospace}strong{font-weight:700}.mermaid-wrap{position:relative;border:1px solid #dce4f1;border-radius:12px;padding:28px 8px 8px;margin:8px 0;background:#fff;max-width:100%;overflow-x:auto}.mermaid-tools{position:absolute;right:6px;top:4px;display:flex;gap:6px}.mermaid-tools button{border:0;background:transparent;font-size:16px;color:#3668f0;padding:2px 6px}.table-wrap{max-width:100%;overflow-x:auto;overflow-y:hidden;margin:8px 0 10px;border:1px solid #dce4f1;border-radius:10px;background:rgba(255,255,255,.72);-webkit-overflow-scrolling:touch;}.table-wrap::-webkit-scrollbar{height:6px}.table-wrap::-webkit-scrollbar-thumb{background:#b8c3d8;border-radius:6px}.table-wrap table{margin:0;border:0;}table{border-collapse:collapse;width:100%;max-width:100%;table-layout:fixed;font-size:12px;}td,th{border:1px solid #dce4f1;padding:5px 6px;vertical-align:top;min-width:0;word-break:break-word;overflow-wrap:anywhere;}th{font-weight:700;background:#f7f9ff;}</style>"
+                + "<style>html,body{margin:0;width:100%;max-width:100%;overflow-x:hidden;}body{font:14px/1.55 sans-serif;color:#171f30;background:transparent;overflow-y:hidden;}#root{max-width:100%;overflow-x:hidden;}p{margin:0 0 10px;}h1,h2,h3,h4,h5,h6{margin:12px 0 8px;line-height:1.28;color:#111827;font-weight:700;}h1{font-size:22px}h2{font-size:20px}h3{font-size:18px}h4,h5,h6{font-size:16px}ul,ol{margin:6px 0 10px;padding-left:22px;}li{margin:3px 0;}blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #9fb3e8;background:#f6f8ff;border-radius:8px;}hr{border:0;border-top:1px solid #dce4f1;margin:12px 0;}.code-wrap{position:relative;margin:8px 0;max-width:100%;overflow-x:auto;}.code-copy{position:absolute;right:8px;top:6px;border:1px solid #dce4f1;background:rgba(255,255,255,.95);color:#3668f0;border-radius:8px;padding:2px 6px;font-size:13px;line-height:1.2;z-index:2}pre{white-space:pre-wrap;background:#f4f7fb;border:1px solid #dce4f1;border-radius:10px;padding:30px 10px 10px;overflow:auto;margin:0;}code{font-family:monospace}strong{font-weight:700}.mermaid-wrap{position:relative;border:1px solid #dce4f1;border-radius:12px;padding:28px 8px 8px;margin:8px 0;background:#fff;max-width:100%;overflow-x:auto}.mermaid-tools{position:absolute;right:6px;top:4px;display:flex;gap:6px}.mermaid-tools button{border:0;background:transparent;font-size:16px;color:#3668f0;padding:2px 6px}.table-wrap{max-width:100%;overflow-x:auto;overflow-y:hidden;margin:8px 0 10px;border:1px solid #dce4f1;border-radius:10px;background:rgba(255,255,255,.72);-webkit-overflow-scrolling:touch;touch-action:pan-x;overscroll-behavior:contain;}.table-wrap::-webkit-scrollbar{height:6px}.table-wrap::-webkit-scrollbar-thumb{background:#b8c3d8;border-radius:6px}.table-wrap table{margin:0;border:0;}table{border-collapse:collapse;width:max-content;min-width:100%;table-layout:auto;font-size:12px;}td,th{border:1px solid #dce4f1;padding:5px 6px;vertical-align:top;min-width:72px;max-width:80vw;word-break:break-word;overflow-wrap:anywhere;}th{font-weight:700;background:#f7f9ff;}</style>"
                 + "<script src='https://cdn.jsdelivr.net/npm/marked/marked.min.js'></script>"
                 + "<script src='https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js'></script></head><body><div id='root'></div>"
                 + "<script>const md=" + jsMarkdown + ";if(window.mermaid)mermaid.initialize({startOnLoad:false,securityLevel:'loose'});"
@@ -3136,7 +3452,7 @@ public class MainActivity extends Activity {
                 + "function fallbackMarkdown(s){const lines=String(s||'').split(/\\n/);let h='',i=0,inCode=false,code='',list='';const close=()=>{if(list){h+='</'+list+'>';list=''}};while(i<lines.length){let line=lines[i];if(/^\\s*```/.test(line)){if(inCode){h+='<pre><code>'+esc(code.replace(/\\n$/,''))+'</code></pre>';code='';inCode=false}else{close();inCode=true}i++;continue}if(inCode){code+=line+'\\n';i++;continue}if(!line.trim()){close();i++;continue}if(i+1<lines.length&&line.indexOf('|')>=0&&tableSep(lines[i+1])){close();const head=cells(line);i+=2;let rows=[];while(i<lines.length&&lines[i].indexOf('|')>=0&&lines[i].trim()){rows.push(cells(lines[i]));i++}h+='<table><thead><tr>'+head.map(c=>'<th>'+inlineFmt(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>'<td>'+inlineFmt(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';continue}let m=line.match(/^(#{1,6})\\s+(.+)$/);if(m){close();h+='<h'+m[1].length+'>'+inlineFmt(m[2])+'</h'+m[1].length+'>';i++;continue}if(/^\\s*---+\\s*$/.test(line)){close();h+='<hr>';i++;continue}m=line.match(/^\\s*[-*+]\\s+(.+)$/);if(m){if(list!=='ul'){close();list='ul';h+='<ul>'}h+='<li>'+inlineFmt(m[1])+'</li>';i++;continue}m=line.match(/^\\s*\\d+[\\.、]\\s+(.+)$/);if(m){if(list!=='ol'){close();list='ol';h+='<ol>'}h+='<li>'+inlineFmt(m[1])+'</li>';i++;continue}close();h+='<p>'+inlineFmt(line)+'</p>';i++}close();if(inCode)h+='<pre><code>'+esc(code)+'</code></pre>';return h}"
                 + "function resizeRoot(){if(window.OneApiBridge){const root=document.getElementById('root');const h=Math.ceil(root?root.getBoundingClientRect().height:document.body.scrollHeight);OneApiBridge.resize(h)}}"
                 + "function enhanceMermaid(){document.querySelectorAll('pre code.language-mermaid,pre code.lang-mermaid').forEach(code=>{const src=code.textContent;const wrap=document.createElement('div');wrap.className='mermaid-wrap';wrap.innerHTML='<div class=\"mermaid-tools\"><button type=\"button\" onclick=\"downloadMermaid(this)\">⇩</button><button type=\"button\" onclick=\"fullscreenMermaid(this)\">⛶</button></div><div class=\"mermaid\">'+src+'</div>';code.closest('pre').replaceWith(wrap);});}"
-                + "function enhanceTables(){document.querySelectorAll('table').forEach(table=>{if(table.closest('.table-wrap'))return;const wrap=document.createElement('div');wrap.className='table-wrap';table.parentNode.insertBefore(wrap,table);wrap.appendChild(table);});}"
+                + "function enhanceTables(){document.querySelectorAll('table').forEach(table=>{if(table.closest('.table-wrap'))return;const wrap=document.createElement('div');wrap.className='table-wrap';let sx=0,sy=0;wrap.addEventListener('touchstart',e=>{const t=e.touches&&e.touches[0];if(t){sx=t.clientX;sy=t.clientY}}, {passive:true});wrap.addEventListener('touchmove',e=>{const t=e.touches&&e.touches[0];if(!t)return;const dx=Math.abs(t.clientX-sx),dy=Math.abs(t.clientY-sy);if(dx>10&&dx>dy*1.15&&window.OneApiBridge)OneApiBridge.suppressSwipe()}, {passive:true});table.parentNode.insertBefore(wrap,table);wrap.appendChild(table);});}"
                 + "function enhanceCodeBlocks(){document.querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const code=pre.querySelector('code');if(code&&/(^|\\s)(language-)?mermaid(\\s|$)/.test(code.className))return;pre.dataset.enhanced='1';const wrap=document.createElement('div');wrap.className='code-wrap';const btn=document.createElement('button');btn.type='button';btn.className='code-copy';btn.textContent='⧉';btn.onclick=(e)=>{e.stopPropagation();if(window.OneApiBridge)OneApiBridge.copyText(code?code.innerText:pre.innerText)};pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(btn);wrap.appendChild(pre);});}"
                 + "if(window.marked){marked.setOptions({gfm:true,breaks:true});document.getElementById('root').innerHTML=marked.parse(md)}else{document.getElementById('root').innerHTML=fallbackMarkdown(md)}"
                 + "enhanceMermaid();enhanceCodeBlocks();enhanceTables();"
@@ -3222,6 +3538,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void copyText(String text) {
             ui(() -> copyToClipboard(text));
+        }
+
+        @JavascriptInterface
+        public void suppressSwipe() {
+            suppressSwipeUntil = System.currentTimeMillis() + 900L;
         }
 
         @JavascriptInterface
@@ -3856,6 +4177,10 @@ public class MainActivity extends Activity {
 
     private interface JsonRunnable {
         void run() throws Exception;
+    }
+
+    private interface ProgressHandler {
+        void onProgress(int percent);
     }
 
     private interface ChoiceHandler {
@@ -5675,6 +6000,9 @@ public class MainActivity extends Activity {
         View.OnTouchListener listener = (v, event) -> {
             switch (event.getAction()) {
                 case android.view.MotionEvent.ACTION_DOWN:
+                    if (!isTouchInsideActiveInput(event)) {
+                        cancelComposerInputMode();
+                    }
                     swipeStartX = event.getX();
                     swipeStartY = event.getY();
                     break;
@@ -5741,17 +6069,49 @@ public class MainActivity extends Activity {
         if (activeInput == null) {
             return;
         }
+        cancelComposerKeyboardRequest();
+        EditText target = activeInput;
         activeInput.setFocusableInTouchMode(true);
         activeInput.requestFocus();
         activeInput.setSelection(activeInput.getText().length());
-        handler.postDelayed(() -> showKeyboard(activeInput), 80);
+        pendingComposerKeyboardRunnable = () -> {
+            pendingComposerKeyboardRunnable = null;
+            if (target == activeInput && target.hasFocus()) {
+                showKeyboard(target);
+            }
+        };
+        handler.postDelayed(pendingComposerKeyboardRunnable, 80);
+    }
+
+    private void cancelComposerInputMode() {
+        cancelComposerKeyboardRequest();
+        if (activeInput != null && activeInput.hasFocus()) {
+            hideKeyboard(activeInput);
+            activeInput.clearFocus();
+        }
+    }
+
+    private void cancelComposerKeyboardRequest() {
+        if (pendingComposerKeyboardRunnable != null) {
+            handler.removeCallbacks(pendingComposerKeyboardRunnable);
+            pendingComposerKeyboardRunnable = null;
+        }
+    }
+
+    private boolean isTouchInsideActiveInput(android.view.MotionEvent event) {
+        if (activeInput == null || event == null) {
+            return false;
+        }
+        int[] location = new int[2];
+        activeInput.getLocationOnScreen(location);
+        Rect bounds = new Rect(location[0], location[1], location[0] + activeInput.getWidth(), location[1] + activeInput.getHeight());
+        return bounds.contains((int) event.getRawX(), (int) event.getRawY());
     }
 
     private void showKeyboard(View view) {
-        if (view == null) {
+        if (view == null || !view.hasFocus()) {
             return;
         }
-        view.requestFocus();
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
     }
 
@@ -5779,6 +6139,11 @@ public class MainActivity extends Activity {
 
     private void setSending(boolean running) {
         requestRunning = running;
+        if (running) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
         syncSendButton();
     }
 
@@ -5797,6 +6162,13 @@ public class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams compactFullButtonLp() {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(42));
+        lp.setMargins(0, dp(6), 0, 0);
+        return lp;
+    }
+
+    private LinearLayout.LayoutParams compactCenteredButtonLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(150), dp(42));
+        lp.gravity = Gravity.CENTER_HORIZONTAL;
         lp.setMargins(0, dp(6), 0, 0);
         return lp;
     }

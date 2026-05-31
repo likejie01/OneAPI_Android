@@ -1,5 +1,5 @@
 # Project Context
-Last updated: 2026-06-01 00:02
+Last updated: 2026-06-01 00:24
 
 ## Overview
 - **Name**: OneAPIAndroidRebuild
@@ -22,7 +22,7 @@ Last updated: 2026-06-01 00:02
 | `public/` | Canonical image assets for Android UI icons |
 
 ## Current State
-- Last worked on: Android Markdown table sizing/touch isolation, composer focus behavior, Codex/Claude log title sizing, drawer entry alignment, and subscription card recommendation/trial artwork.
+- Last worked on: Android subscription wallet purchase flow, in-app Android update download/install flow, settings module ordering/button sizing, and Markdown table horizontal scrolling/cell width behavior.
 - Release build verified with `gradle.bat assembleRelease`; APK output remains arm64-only.
 
 ## Recent Commits
