@@ -44,6 +44,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -76,6 +77,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private static final int REQ_PICK_IMAGE = 701;
@@ -88,6 +91,9 @@ public class MainActivity extends Activity {
     private static final int LINE = Color.argb(88, 145, 160, 184);
     private static final int GLASS = Color.argb(205, 255, 255, 255);
     private static final int GLASS_SOFT = Color.argb(158, 255, 255, 255);
+    private static final int INITIAL_RENDER_ITEM_COUNT = 40;
+    private static final int RENDER_PAGE_INCREMENT = 40;
+    private static final int RENDER_CHUNK_SIZE = 6;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -98,6 +104,7 @@ public class MainActivity extends Activity {
     private LinearLayout content;
     private LinearLayout composerHost;
     private LinearLayout scrollDock;
+    private View loadingOverlay;
     private LinearLayout topNav;
     private TextView navMenuSeparator;
     private LinearLayout timeline;
@@ -132,7 +139,8 @@ public class MainActivity extends Activity {
     private String selectedClaudeModel = "";
     private boolean imageRandomSeed = false;
     private boolean requestRunning = false;
-    private boolean cliRefreshRunning = false;
+    private final Set<String> cliRefreshRunningClients = Collections.synchronizedSet(new HashSet<>());
+    private boolean desktopSessionsRefreshRunning = false;
     private boolean localAutoScrollEnabled = true;
     private boolean scrollDockDirectionDown = true;
     private int lastContentScrollY = 0;
@@ -143,6 +151,12 @@ public class MainActivity extends Activity {
     private int lastExitSwipeDirection = 0;
     private long suppressSwipeUntil = 0L;
     private final Map<String, String> cliTimelineSignatures = new HashMap<>();
+    private final Map<String, JSONArray> cliTimelineCache = new HashMap<>();
+    private final Map<String, Integer> localVisibleMessageCounts = new HashMap<>();
+    private final Map<String, Integer> timelineVisibleItemCounts = new HashMap<>();
+    private final Map<String, String> localConversationRawCache = new HashMap<>();
+    private final Map<String, JSONObject> localConversationRootCache = new HashMap<>();
+    private JSONArray cachedDesktopSessions = new JSONArray();
     private String pendingAndroidUpdateUrl = "";
     private String pendingAndroidUpdateVersion = "";
     private Uri downloadedAndroidUpdateUri = null;
@@ -152,7 +166,9 @@ public class MainActivity extends Activity {
     private final Set<String> expandedLogIds = new HashSet<>();
     private final List<Uri> selectedAttachmentUris = new ArrayList<>();
     private final List<JSONObject> selectedExtensionRefs = new ArrayList<>();
+    private final Map<String, String> markdownHtmlCache = new LinkedHashMap<>();
     private View activeBubbleActions;
+    private int renderGeneration = 0;
 
     private String section = "chat";
     private String boundDeviceId = "";
@@ -177,6 +193,7 @@ public class MainActivity extends Activity {
         boundDeviceId = prefs.getString("bound_device_id", "");
         seedModels();
         loadSelections();
+        loadDesktopSessionCache();
         if (prefs.getString("cookie", "").isEmpty()) {
             showLogin();
         } else {
@@ -301,11 +318,8 @@ public class MainActivity extends Activity {
         scroll.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
             scrollDockDirectionDown = scrollY >= oldScrollY;
             lastContentScrollY = scrollY;
-            if ("chat".equals(section) || "image".equals(section) || "assistants".equals(section)) {
+            if ("chat".equals(section) || "image".equals(section) || "assistants".equals(section) || isCliSection()) {
                 localAutoScrollEnabled = isContentNearBottom(scroll);
-            }
-            if (isCliSection() && isContentNearBottom(scroll)) {
-                refreshCliAtEdge();
             }
             updateScrollDock();
         });
@@ -330,6 +344,7 @@ public class MainActivity extends Activity {
         refreshModels();
         refreshAssistants(false);
         refreshDevices(false);
+        refreshDesktopSessionsCache(true);
         startPolling();
         installKeyboardLift();
         installSwipeNavigation();
@@ -375,6 +390,7 @@ public class MainActivity extends Activity {
             b.setContentDescription(label(item));
             b.setOnClickListener(v -> {
                 section = item;
+                localAutoScrollEnabled = true;
                 refreshBottomNav();
                 renderSection();
             });
@@ -411,6 +427,7 @@ public class MainActivity extends Activity {
             View entry = drawerEntry(item);
             entry.setOnClickListener(v -> {
                 section = item;
+                localAutoScrollEnabled = true;
                 refreshBottomNav();
                 renderSection();
                 dialog.dismiss();
@@ -440,28 +457,51 @@ public class MainActivity extends Activity {
         if (content == null || composerHost == null) {
             return;
         }
+        int generation = ++renderGeneration;
+        String targetSection = section;
+        hidePageLoading();
+        resetContentScrollPosition();
         activeBubbleActions = null;
         cliProjectTagView = null;
-        content.removeAllViews();
-        composerHost.removeAllViews();
-        if ("codex".equals(section) || "claude".equals(section)) {
-            renderCliWorkspace(section);
-        } else if ("settings".equals(section)) {
-            renderMe();
-        } else if ("assistants".equals(section)) {
-            renderAiChat();
-        } else if ("subscriptions".equals(section)) {
-            renderSubscriptions();
-        } else if ("service".equals(section)) {
-            renderServiceStatus();
-        } else if ("wallet".equals(section)) {
-            renderWallet();
-        } else if ("chat".equals(section)) {
-            renderChat();
-        } else if ("image".equals(section)) {
-            renderImage();
-        } else {
-            renderPlaceholder(label(section));
+        clearContainer(content);
+        clearContainer(composerHost);
+        content.addView(centerLoadingView("正在加载" + label(targetSection) + "..."));
+        updateScrollDock();
+        handler.post(() -> renderSectionBody(targetSection, generation));
+    }
+
+    private void renderSectionBody(String targetSection, int generation) {
+        if (generation != renderGeneration || !targetSection.equals(section) || content == null || composerHost == null) {
+            return;
+        }
+        activeBubbleActions = null;
+        cliProjectTagView = null;
+        clearContainer(content);
+        clearContainer(composerHost);
+        try {
+            if ("codex".equals(targetSection) || "claude".equals(targetSection)) {
+                renderCliWorkspace(targetSection);
+            } else if ("settings".equals(targetSection)) {
+                renderMe();
+            } else if ("assistants".equals(targetSection)) {
+                renderAiChat();
+            } else if ("subscriptions".equals(targetSection)) {
+                renderSubscriptions();
+            } else if ("service".equals(targetSection)) {
+                renderServiceStatus();
+            } else if ("wallet".equals(targetSection)) {
+                renderWallet();
+            } else if ("chat".equals(targetSection)) {
+                renderChat();
+            } else if ("image".equals(targetSection)) {
+                renderImage();
+            } else {
+                renderPlaceholder(label(targetSection));
+            }
+        } catch (Exception error) {
+            clearContainer(content);
+            clearContainer(composerHost);
+            content.addView(messageBubble("assistant", "页面渲染失败，请切换标签后重试。"));
         }
         updateScrollDock();
     }
@@ -482,36 +522,69 @@ public class MainActivity extends Activity {
     }
 
     private void renderLocalConversation(String mode) {
-        String expectedSection = section;
-        content.addView(loadingRow("正在加载历史聊天记录..."));
-        handler.postDelayed(() -> {
-            if (!expectedSection.equals(section) || content == null) {
-                return;
+        renderLocalConversationNow(mode, true);
+    }
+
+    private void renderLocalConversationNow(String mode, boolean scrollLatest) {
+        if (content == null) {
+            return;
+        }
+        int generation = ++renderGeneration;
+        showPageLoading("正在加载聊天记录...");
+        resetContentScrollPosition();
+        clearContainer(content);
+        JSONArray messages = localConversationMessages(mode);
+        int visibleCount = localVisibleMessageCounts.getOrDefault(mode, INITIAL_RENDER_ITEM_COUNT);
+        int startIndex = Math.max(0, messages.length() - visibleCount);
+        if (messages.length() == 0) {
+            hidePageLoading();
+            content.addView(card(label(mode), "暂无聊天记录。点击会话记录可切换历史会话，或直接输入开始新会话。"));
+            updateScrollDock();
+            return;
+        }
+        if (startIndex > 0) {
+            content.addView(loadEarlierButton("加载更早聊天记录（剩余 " + startIndex + " 条）", () -> {
+                localVisibleMessageCounts.put(mode, visibleCount + RENDER_PAGE_INCREMENT);
+                renderLocalConversationNow(mode, false);
+            }));
+        }
+        handler.post(() -> renderLocalConversationChunk(mode, messages, startIndex, startIndex, generation, scrollLatest));
+    }
+
+    private void renderLocalConversationChunk(String mode, JSONArray messages, int startIndex, int index, int generation, boolean scrollLatest) {
+        if (generation != renderGeneration || content == null) {
+            return;
+        }
+        int end = Math.min(messages.length(), index + RENDER_CHUNK_SIZE);
+        for (int i = index; i < end; i++) {
+            JSONObject item = messages.optJSONObject(i);
+            if (item == null) {
+                continue;
             }
-            content.removeAllViews();
-            JSONArray messages = localConversationMessages(mode);
-            for (int i = 0; i < messages.length(); i++) {
-                JSONObject item = messages.optJSONObject(i);
-                if (item == null) {
-                    continue;
-                }
-                String type = item.optString("type", "text");
-                String role = item.optString("role", "assistant");
-                String text = cleanDisplayText(item.optString("text", ""));
-                if (text.isEmpty()) {
-                    continue;
-                }
-                long timestamp = item.optLong("timestamp", 0);
-                if ("image".equals(type)) {
-                    content.addView(imageResultBubble(text, timestamp, mode, i, role));
-                } else {
-                    content.addView(messageBubble(role, text, timestamp, mode, i));
-                }
+            String type = item.optString("type", "text");
+            String role = item.optString("role", "assistant");
+            String text = cleanDisplayText(item.optString("text", ""));
+            if (text.isEmpty()) {
+                continue;
             }
+            long timestamp = item.optLong("timestamp", 0);
+            if ("image".equals(type)) {
+                content.addView(imageResultBubble(text, timestamp, mode, i, role));
+            } else {
+                String renderMode = (!"user".equals(role) && i < messages.length() - 3) ? mode + ":plain" : mode;
+                content.addView(messageBubble(role, text, timestamp, renderMode, i));
+            }
+        }
+        if (end < messages.length()) {
+            handler.post(() -> renderLocalConversationChunk(mode, messages, startIndex, end, generation, scrollLatest));
+            return;
+        }
+        hidePageLoading();
+        if (scrollLatest) {
             localAutoScrollEnabled = true;
             scrollToBottom();
-            updateScrollDock();
-        }, 80);
+        }
+        updateScrollDock();
     }
 
     private View loadingRow(String text) {
@@ -522,6 +595,104 @@ public class MainActivity extends Activity {
         lp.setMargins(0, dp(18), 0, dp(18));
         row.setLayoutParams(lp);
         return row;
+    }
+
+    private void clearContainer(LinearLayout group) {
+        if (group == null) {
+            return;
+        }
+        destroyWebViews(group);
+        group.removeAllViews();
+    }
+
+    private void destroyWebViews(View rootView) {
+        if (rootView == null) {
+            return;
+        }
+        if (rootView instanceof WebView) {
+            WebView web = (WebView) rootView;
+            try {
+                web.stopLoading();
+                web.loadUrl("about:blank");
+                web.removeAllViews();
+                web.destroy();
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+        if (rootView instanceof LinearLayout) {
+            LinearLayout group = (LinearLayout) rootView;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                destroyWebViews(group.getChildAt(i));
+            }
+        } else if (rootView instanceof FrameLayout) {
+            FrameLayout group = (FrameLayout) rootView;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                destroyWebViews(group.getChildAt(i));
+            }
+        } else if (rootView instanceof ScrollView) {
+            ScrollView group = (ScrollView) rootView;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                destroyWebViews(group.getChildAt(i));
+            }
+        }
+    }
+
+    private View centerLoadingView(String text) {
+        LinearLayout wrap = vertical();
+        wrap.setGravity(Gravity.CENTER);
+        wrap.setMinimumHeight(Math.max(dp(360), getResources().getDisplayMetrics().heightPixels - dp(260)));
+        ProgressBar progress = new ProgressBar(this);
+        progress.setIndeterminate(true);
+        wrap.addView(progress, new LinearLayout.LayoutParams(dp(46), dp(46)));
+        TextView label = copy(text);
+        label.setTextColor(MUTED);
+        label.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(-2, -2);
+        labelLp.setMargins(0, dp(10), 0, 0);
+        wrap.addView(label, labelLp);
+        return wrap;
+    }
+
+    private void showPageLoading(String text) {
+        if (shell == null) {
+            return;
+        }
+        if (loadingOverlay == null) {
+            FrameLayout overlay = new FrameLayout(this);
+            overlay.setClickable(true);
+            overlay.setBackgroundColor(Color.argb(18, 255, 255, 255));
+            LinearLayout card = vertical();
+            card.setGravity(Gravity.CENTER);
+            card.setPadding(dp(18), dp(16), dp(18), dp(16));
+            card.setBackground(round(Color.argb(236, 255, 255, 255), dp(18), Color.argb(96, 145, 160, 184)));
+            ProgressBar progress = new ProgressBar(this);
+            progress.setIndeterminate(true);
+            card.addView(progress, new LinearLayout.LayoutParams(dp(42), dp(42)));
+            TextView label = copy(text);
+            label.setTag("page_loading_text");
+            label.setTextColor(MUTED);
+            label.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(-2, -2);
+            labelLp.setMargins(0, dp(8), 0, 0);
+            card.addView(label, labelLp);
+            overlay.addView(card, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+            loadingOverlay = overlay;
+        }
+        TextView label = taggedTextView(loadingOverlay, "page_loading_text");
+        if (label != null) {
+            label.setText(text);
+        }
+        if (loadingOverlay.getParent() == null) {
+            shell.addView(loadingOverlay, new FrameLayout.LayoutParams(-1, -1));
+        }
+        loadingOverlay.bringToFront();
+    }
+
+    private void hidePageLoading() {
+        if (loadingOverlay != null && loadingOverlay.getParent() instanceof FrameLayout) {
+            ((FrameLayout) loadingOverlay.getParent()).removeView(loadingOverlay);
+        }
     }
 
     private void renderPlaceholder(String name) {
@@ -903,8 +1074,6 @@ public class MainActivity extends Activity {
     }
 
     private void renderCliWorkspace(String client) {
-        cliTimelineSignatures.remove(client);
-        autoScrolledSections.remove("timeline:" + client);
         modelSpinner = spinner("codex".equals(client) ? codexModels : claudeModels);
         reasoningSpinner = spinner(list("关闭思考", "低", "中", "高"));
         permissionSpinner = spinner(list("受限模式", "全权限模式"));
@@ -916,8 +1085,15 @@ public class MainActivity extends Activity {
         content.addView(interactionBar);
         timeline = vertical();
         content.addView(timeline);
-        renderTimeline(new JSONArray());
+        JSONArray cached = cliTimelineCache.get(client);
+        if (cached == null || cached.length() == 0) {
+            timeline.addView(loadingCard("正在同步客户端会话记录..."));
+            cliTimelineSignatures.put(client, "loading:" + System.currentTimeMillis());
+        } else {
+            renderTimeline(cached, true);
+        }
         composerHost.addView(composer("输入要执行的任务", client, () -> sendCliJob(client)));
+        pollSessionsOnce(false);
     }
 
     private View composer(String hint, String mode, Runnable sendAction) {
@@ -1216,7 +1392,39 @@ public class MainActivity extends Activity {
     }
 
     private String imageSourceForBubble(Uri uri) {
-        return uri == null ? "" : uri.toString();
+        if (uri == null) {
+            return "";
+        }
+        String cached = cacheImageForBubble(uri);
+        return cached.isEmpty() ? uri.toString() : cached;
+    }
+
+    private String cacheImageForBubble(Uri uri) {
+        try {
+            File dir = new File(getFilesDir(), "chat-images");
+            if (!dir.exists() && !dir.mkdirs()) {
+                return "";
+            }
+            String mime = getContentResolver().getType(uri);
+            String ext = mime != null && mime.toLowerCase(Locale.ROOT).contains("webp") ? ".webp"
+                    : mime != null && mime.toLowerCase(Locale.ROOT).contains("jpeg") ? ".jpg"
+                    : ".png";
+            File target = new File(dir, UUID.randomUUID().toString() + ext);
+            try (InputStream input = getContentResolver().openInputStream(uri);
+                 OutputStream output = new FileOutputStream(target)) {
+                if (input == null) {
+                    return "";
+                }
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+            }
+            return Uri.fromFile(target).toString();
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private String imagePreviewHtml(String source) {
@@ -1312,11 +1520,21 @@ public class MainActivity extends Activity {
     }
 
     private void openImagePicker() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.setType("image/*");
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, "chat".equals(activeComposerMode));
+        int limit = "chat".equals(activeComposerMode) ? 5 : 1;
+        Intent intent;
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            intent.setType("image/*");
+            if (limit > 1) {
+                intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, limit);
+            }
+        } else {
+            intent = new Intent(Intent.ACTION_GET_CONTENT);
+            intent.setType("image/*");
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit > 1);
+        }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
             startActivityForResult(Intent.createChooser(intent, "选择图片"), REQ_PICK_IMAGE);
         } catch (Exception error) {
@@ -1617,19 +1835,31 @@ public class MainActivity extends Activity {
         } else {
             activeChatSessionId = id;
         }
+        localVisibleMessageCounts.put(mode, INITIAL_RENDER_ITEM_COUNT);
         prefs.edit().putString(mode + "_active_session_id", id == null ? "" : id).apply();
     }
 
     private JSONObject localConversationStore(String mode) {
+        String key = mode + "_conversation_store";
+        String raw = prefs.getString(key, "{}");
+        JSONObject cached = localConversationRootCache.get(mode);
+        if (cached != null && raw.equals(localConversationRawCache.get(mode))) {
+            return cached;
+        }
         try {
-            JSONObject root = new JSONObject(prefs.getString(mode + "_conversation_store", "{}"));
+            JSONObject root = new JSONObject(raw);
             if (root.optJSONArray("sessions") == null) {
                 root.put("sessions", new JSONArray());
             }
+            localConversationRawCache.put(mode, raw);
+            localConversationRootCache.put(mode, root);
             return root;
         } catch (Exception ignored) {
             try {
-                return new JSONObject().put("sessions", new JSONArray());
+                JSONObject root = new JSONObject().put("sessions", new JSONArray());
+                localConversationRawCache.put(mode, root.toString());
+                localConversationRootCache.put(mode, root);
+                return root;
             } catch (Exception impossible) {
                 return new JSONObject();
             }
@@ -1637,7 +1867,14 @@ public class MainActivity extends Activity {
     }
 
     private void saveLocalConversationStore(String mode, JSONObject root) {
-        prefs.edit().putString(mode + "_conversation_store", root.toString()).apply();
+        String raw = root == null ? "{}" : root.toString();
+        localConversationRawCache.put(mode, raw);
+        if (root != null) {
+            localConversationRootCache.put(mode, root);
+        } else {
+            localConversationRootCache.remove(mode);
+        }
+        prefs.edit().putString(mode + "_conversation_store", raw).apply();
     }
 
     private JSONObject findLocalSession(JSONObject root, String id) {
@@ -1708,12 +1945,34 @@ public class MainActivity extends Activity {
 
     private JSONArray localConversationMessages(String mode) {
         JSONObject root = localConversationStore(mode);
-        JSONObject session = findLocalSession(root, activeLocalSessionId(mode));
-        if (session != null && !localConversationGroup(mode).equals(session.optString("group"))) {
-            session = null;
-        }
+        JSONObject session = resolveActiveLocalSession(mode, root);
         JSONArray messages = session == null ? null : session.optJSONArray("messages");
         return messages == null ? new JSONArray() : messages;
+    }
+
+    private JSONObject resolveActiveLocalSession(String mode, JSONObject root) {
+        String group = localConversationGroup(mode);
+        JSONObject session = findLocalSession(root, activeLocalSessionId(mode));
+        if (session != null && group.equals(session.optString("group"))) {
+            return session;
+        }
+        JSONArray sessions = root.optJSONArray("sessions");
+        JSONObject best = null;
+        if (sessions != null) {
+            for (int i = 0; i < sessions.length(); i++) {
+                JSONObject item = sessions.optJSONObject(i);
+                if (item == null || !group.equals(item.optString("group"))) {
+                    continue;
+                }
+                if (best == null || item.optLong("updatedAt") > best.optLong("updatedAt")) {
+                    best = item;
+                }
+            }
+        }
+        if (best != null) {
+            setActiveLocalSessionId(mode, best.optString("id"));
+        }
+        return best;
     }
 
     private int appendLocalConversation(String mode, String role, String type, String text) {
@@ -2120,6 +2379,7 @@ public class MainActivity extends Activity {
         }
         StringBuilder answer = new StringBuilder();
         StringBuilder thinking = new StringBuilder();
+        long[] lastLiveUpdateAt = new long[]{0L};
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -2152,18 +2412,24 @@ public class MainActivity extends Activity {
                     if (content.length() > 0) {
                         answer.append(content);
                     }
-                    String rendered = renderLiveChatText(thinking.toString(), answer.toString());
-                    ui(() -> {
-                        updateStreamingBubble(live, rendered, timestamp, false);
-                        scrollToBottomIfLocalAuto();
-                    });
+                    long now = System.currentTimeMillis();
+                    if (now - lastLiveUpdateAt[0] >= 90L) {
+                        lastLiveUpdateAt[0] = now;
+                        String rendered = renderLiveChatText(thinking.toString(), answer.toString());
+                        ui(() -> {
+                            updateStreamingBubble(live, rendered, timestamp, false);
+                            scrollToBottomIfLocalAuto();
+                        });
+                    }
                 } catch (Exception ignored) {
                 }
             }
         } finally {
             conn.disconnect();
         }
-        return renderLiveChatText(thinking.toString(), answer.toString());
+        String finalText = renderLiveChatText(thinking.toString(), answer.toString());
+        ui(() -> updateStreamingBubble(live, finalText, timestamp, false));
+        return finalText;
     }
 
     private String renderLiveChatText(String thinking, String answer) {
@@ -2994,10 +3260,98 @@ public class MainActivity extends Activity {
                 if (!polling) {
                     return;
                 }
-                pollSessionsOnce();
-                handler.postDelayed(this, 3000);
+                if (isCliSection() && shouldAutoRefreshCliSection(section)) {
+                    pollSessionsOnce(false);
+                    handler.postDelayed(this, 3000);
+                } else {
+                    handler.postDelayed(this, 12000);
+                }
             }
         }, 800);
+    }
+
+    private boolean shouldAutoRefreshCliSection(String client) {
+        if (!"codex".equals(client) && !"claude".equals(client)) {
+            return false;
+        }
+        if (requestRunning) {
+            return true;
+        }
+        for (int i = 0; i < cachedDesktopSessions.length(); i++) {
+            JSONObject session = cachedDesktopSessions.optJSONObject(i);
+            if (session == null || !client.equals(session.optString("client"))) {
+                continue;
+            }
+            String status = session.optString("status", "").toLowerCase(Locale.ROOT);
+            if ("queued".equals(status) || "claimed".equals(status) || "running".equals(status) || "waiting_interaction".equals(status)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void loadDesktopSessionCache() {
+        try {
+            cachedDesktopSessions = new JSONArray(prefs.getString("desktop_sessions_cache", "[]"));
+            hydrateCliTimelineCache(cachedDesktopSessions);
+        } catch (Exception ignored) {
+            cachedDesktopSessions = new JSONArray();
+        }
+    }
+
+    private void refreshDesktopSessionsCache(boolean force) {
+        if (desktopSessionsRefreshRunning && !force) {
+            return;
+        }
+        desktopSessionsRefreshRunning = true;
+        runNetworkQuiet(() -> {
+            try {
+                JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
+                JSONArray sessions = envelope.optJSONArray("data");
+                if (sessions == null) {
+                    sessions = new JSONArray();
+                }
+                JSONArray finalSessions = sessions;
+                prefs.edit().putString("desktop_sessions_cache", finalSessions.toString()).apply();
+                ui(() -> {
+                    cachedDesktopSessions = finalSessions;
+                    updateCliTimelineCaches(finalSessions, isCliSection());
+                });
+            } finally {
+                desktopSessionsRefreshRunning = false;
+            }
+        });
+    }
+
+    private void hydrateCliTimelineCache(JSONArray sessions) {
+        updateCliTimelineCaches(sessions, false);
+    }
+
+    private void updateCliTimelineCaches(JSONArray sessions, boolean renderActiveChange) {
+        for (String client : new String[]{"codex", "claude"}) {
+            try {
+                JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, client);
+                String signature = events.toString();
+                String previous = cliTimelineSignatures.get(client);
+                cliTimelineCache.put(client, events);
+                if (signature.equals(previous)) {
+                    continue;
+                }
+                cliTimelineSignatures.put(client, signature);
+                if (renderActiveChange && client.equals(section)) {
+                    renderTimeline(events, true);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void renderCachedCliTimeline(String client) {
+        if (!client.equals(section) || timeline == null) {
+            return;
+        }
+        JSONArray cached = cliTimelineCache.get(client);
+        renderTimeline(cached == null ? new JSONArray() : cached, false);
     }
 
     private void pollSessionsOnce() {
@@ -3008,20 +3362,31 @@ public class MainActivity extends Activity {
         if (!"codex".equals(section) && !"claude".equals(section)) {
             return;
         }
-        if (cliRefreshRunning && !force) {
-            return;
+        String targetSection = section;
+        synchronized (cliRefreshRunningClients) {
+            if (cliRefreshRunningClients.contains(targetSection)) {
+                return;
+            }
+            cliRefreshRunningClients.add(targetSection);
         }
-        cliRefreshRunning = true;
         runNetworkQuiet(() -> {
             try {
                 JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
                 JSONArray sessions = envelope.optJSONArray("data");
-                String targetSection = section;
-                JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, targetSection);
+                if (sessions == null) {
+                    sessions = new JSONArray();
+                }
+                prefs.edit().putString("desktop_sessions_cache", sessions.toString()).apply();
+                JSONArray events = mergedEventsForClient(sessions, targetSection);
                 String signature = events.toString();
-                ui(() -> renderTimelineIfChanged(targetSection, events, signature));
+                JSONArray finalSessions = sessions;
+                ui(() -> {
+                    cachedDesktopSessions = finalSessions;
+                    cliTimelineCache.put(targetSection, events);
+                    renderTimelineIfChanged(targetSection, events, signature);
+                });
             } finally {
-                cliRefreshRunning = false;
+                cliRefreshRunningClients.remove(targetSection);
             }
         });
     }
@@ -3162,31 +3527,71 @@ public class MainActivity extends Activity {
     }
 
     private void renderTimeline(JSONArray events) {
+        renderTimeline(events, true);
+    }
+
+    private void renderTimeline(JSONArray events, boolean scrollLatest) {
         if (timeline == null) {
             return;
         }
-        timeline.removeAllViews();
-        if (interactionBar != null) {
-            interactionBar.removeAllViews();
+        int generation = ++renderGeneration;
+        String targetClient = section;
+        showPageLoading("正在加载聊天记录...");
+        resetContentScrollPosition();
+        if (scrollLatest) {
+            localAutoScrollEnabled = true;
         }
-        if (events.length() == 0) {
+        clearContainer(timeline);
+        if (interactionBar != null) {
+            clearContainer(interactionBar);
+        }
+        if (events == null || events.length() == 0) {
+            hidePageLoading();
+            timeline.addView(card(label(targetClient), "暂无可显示的会话内容。请先在会话记录中选择其他会话，或从输入框发起新任务。"));
+            updateScrollDock();
             return;
         }
-        for (int i = 0; i < events.length(); i++) {
+        int visibleCount = timelineVisibleItemCounts.getOrDefault(targetClient, INITIAL_RENDER_ITEM_COUNT);
+        int startIndex = Math.max(0, events.length() - visibleCount);
+        if (startIndex > 0) {
+            timeline.addView(loadEarlierButton("加载更早执行记录（剩余 " + startIndex + " 条）", () -> {
+                timelineVisibleItemCounts.put(targetClient, visibleCount + RENDER_PAGE_INCREMENT);
+                JSONArray cached = cliTimelineCache.get(targetClient);
+                renderTimeline(cached == null ? events : cached, false);
+            }));
+        }
+        handler.post(() -> renderTimelineChunk(events, startIndex, generation, scrollLatest, targetClient));
+    }
+
+    private void renderTimelineChunk(JSONArray events, int index, int generation, boolean scrollLatest, String targetClient) {
+        if (generation != renderGeneration || timeline == null || !targetClient.equals(section)) {
+            return;
+        }
+        int end = Math.min(events.length(), index + RENDER_CHUNK_SIZE);
+        for (int i = index; i < end; i++) {
             JSONObject e = events.optJSONObject(i);
             if (e == null) {
                 continue;
             }
             if ("message".equals(e.optString("_kind"))) {
-                String text = cleanDisplayText(e.optString("text"));
+                String text = compactLocalFileReferences(cleanDisplayText(e.optString("text")));
                 if (!text.isEmpty()) {
-                    timeline.addView(messageBubble(e.optString("role"), text));
+                    long timestamp = e.optLong("timestamp", e.optLong("createdAt", 0));
+                    timeline.addView(messageBubble(e.optString("role"), text, timestamp, targetClient + ":plain", -1));
                 }
             } else {
                 addLogRow(e);
             }
         }
-        scrollToBottomOnce("timeline:" + section);
+        if (end < events.length()) {
+            handler.post(() -> renderTimelineChunk(events, end, generation, scrollLatest, targetClient));
+            return;
+        }
+        hidePageLoading();
+        if (scrollLatest) {
+            scrollToBottom();
+        }
+        updateScrollDock();
     }
 
     private void renderTimelineIfChanged(String targetSection, JSONArray events, String signature) {
@@ -3441,6 +3846,31 @@ public class MainActivity extends Activity {
         return clean.substring(0, 900) + "\n...";
     }
 
+    private String compactLocalFileReferences(String value) {
+        String clean = cleanDisplayText(value);
+        if (clean.isEmpty()) {
+            return clean;
+        }
+        clean = compactPathPattern(clean, Pattern.compile("(?i)([A-Z]:\\\\(?:[^\\\\\\s<>:\"|?*]+\\\\)*[^\\\\\\s<>:\"|?*]+)"));
+        clean = compactPathPattern(clean, Pattern.compile("(?<![A-Za-z0-9:/])(/(?:Users|home|Volumes|mnt|var|tmp|private)/(?:[^\\s<>]+/)*[^\\s<>]+)"));
+        return clean;
+    }
+
+    private String compactPathPattern(String value, Pattern pattern) {
+        Matcher matcher = pattern.matcher(value);
+        StringBuffer out = new StringBuffer();
+        while (matcher.find()) {
+            String pathValue = matcher.group(1);
+            String fileName = fileNameFromPath(pathValue);
+            if (fileName.isEmpty()) {
+                fileName = "本地文件";
+            }
+            matcher.appendReplacement(out, Matcher.quoteReplacement("[" + fileName + "]"));
+        }
+        matcher.appendTail(out);
+        return out.toString();
+    }
+
     private int phaseColor(String phase) {
         String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
         if (p.contains("invoke")) return INDIGO;
@@ -3500,13 +3930,16 @@ public class MainActivity extends Activity {
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
         boolean user = "user".equals(role);
         box.setBackground(round(user ? Color.WHITE : GLASS, dp(16), user ? LINE : LINE));
+        String rawMode = mode == null ? "" : mode;
+        boolean forcePlain = rawMode.endsWith(":plain");
+        String actionMode = forcePlain ? rawMode.substring(0, rawMode.length() - ":plain".length()) : rawMode;
         String clean = cleanDisplayText(text);
-        if (!user && ("chat".equals(mode) || mode.isEmpty()) && shouldRenderRichText(clean)) {
+        if (!forcePlain && !user && ("chat".equals(actionMode) || actionMode.isEmpty()) && shouldRenderRichText(clean)) {
             addRichAssistantContent(box, clean, () -> toggleActionRows(box));
         } else {
             addPlainMessageContent(box, clean, user, () -> toggleActionRows(box));
         }
-        addTimestamp(box, timestamp, user, mode, messageIndex, clean);
+        addTimestamp(box, timestamp, user, actionMode, messageIndex, clean);
         box.setLayoutParams(bubbleLayoutParams(user));
         box.setOnClickListener(v -> toggleActionRows(box));
         return box;
@@ -3653,12 +4086,28 @@ public class MainActivity extends Activity {
 
     private int estimatedRichHeight(String text) {
         String clean = cleanDisplayText(text);
-        int lines = Math.max(4, clean.split("\\n", -1).length + clean.length() / 48);
-        return Math.max(dp(96), Math.min(dp(360), dp(lines * 20)));
+        int lines = Math.max(2, clean.split("\\n", -1).length + clean.length() / 52);
+        return Math.max(dp(64), Math.min(dp(220), dp(lines * 19)));
     }
 
     private String markdownHtml(String markdown) {
-        String jsMarkdown = JSONObject.quote(normalizeMarkdownForRender(markdown));
+        String normalized = normalizeMarkdownForRender(markdown);
+        String cacheKey = Integer.toHexString(normalized.hashCode()) + ":" + normalized.length();
+        String cached = markdownHtmlCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+        String html = buildMarkdownHtml(normalized);
+        markdownHtmlCache.put(cacheKey, html);
+        while (markdownHtmlCache.size() > 80) {
+            String oldestKey = markdownHtmlCache.keySet().iterator().next();
+            markdownHtmlCache.remove(oldestKey);
+        }
+        return html;
+    }
+
+    private String buildMarkdownHtml(String normalizedMarkdown) {
+        String jsMarkdown = JSONObject.quote(normalizedMarkdown);
         return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
                 + "<style>html,body{margin:0;width:100%;max-width:100%;overflow-x:hidden;}body{font:14px/1.55 sans-serif;color:#171f30;background:transparent;overflow-y:hidden;}#root{max-width:100%;overflow-x:hidden;}p{margin:0 0 10px;}h1,h2,h3,h4,h5,h6{margin:12px 0 8px;line-height:1.28;color:#111827;font-weight:700;}h1{font-size:22px}h2{font-size:20px}h3{font-size:18px}h4,h5,h6{font-size:16px}ul,ol{margin:6px 0 10px;padding-left:22px;}li{margin:3px 0;}blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #9fb3e8;background:#f6f8ff;border-radius:8px;}hr{border:0;border-top:1px solid #dce4f1;margin:12px 0;}.code-wrap{position:relative;margin:8px 0;max-width:100%;overflow-x:auto;}.code-copy{position:absolute;right:8px;top:6px;border:1px solid #dce4f1;background:rgba(255,255,255,.95);color:#3668f0;border-radius:8px;padding:2px 6px;font-size:13px;line-height:1.2;z-index:2}pre{white-space:pre-wrap;background:#f4f7fb;border:1px solid #dce4f1;border-radius:10px;padding:30px 10px 10px;overflow:auto;margin:0;}code{font-family:monospace}strong{font-weight:700}.mermaid-wrap{position:relative;border:1px solid #dce4f1;border-radius:12px;padding:28px 8px 8px;margin:8px 0;background:#fff;max-width:100%;overflow-x:auto}.mermaid-tools{position:absolute;right:6px;top:4px;display:flex;gap:6px}.mermaid-tools button{border:0;background:transparent;font-size:16px;color:#3668f0;padding:2px 6px}.table-wrap{max-width:100%;overflow-x:auto;overflow-y:hidden;margin:8px 0 10px;border:1px solid #dce4f1;border-radius:10px;background:rgba(255,255,255,.72);-webkit-overflow-scrolling:touch;touch-action:pan-x;overscroll-behavior:contain;}.table-wrap::-webkit-scrollbar{height:6px}.table-wrap::-webkit-scrollbar-thumb{background:#b8c3d8;border-radius:6px}.table-wrap table{margin:0;border:0;}table{border-collapse:collapse;width:max-content;min-width:100%;table-layout:auto;font-size:12px;}td,th{border:1px solid #dce4f1;padding:5px 6px;vertical-align:top;min-width:72px;max-width:80vw;word-break:break-word;overflow-wrap:anywhere;}th{font-weight:700;background:#f7f9ff;}</style>"
                 + "<script src='https://cdn.jsdelivr.net/npm/marked/marked.min.js'></script>"
@@ -3770,7 +4219,7 @@ public class MainActivity extends Activity {
                 return;
             }
             ui(() -> {
-                int targetHeight = Math.max(dp(120), dp(Math.min(height + 24, 5000)));
+                int targetHeight = Math.max(dp(56), dp(Math.min(height + 10, 1600)));
                 web.setLayoutParams(new LinearLayout.LayoutParams(-1, targetHeight));
                 web.requestLayout();
             });
@@ -3842,11 +4291,93 @@ public class MainActivity extends Activity {
         if (box == null) {
             return;
         }
+        if (!withActions) {
+            updateLiveAssistantBubble(box, text, timestamp);
+            return;
+        }
         renderAssistantBubbleContent(box, text, timestamp, withActions);
     }
 
+    private void updateLiveAssistantBubble(LinearLayout box, String text, long timestamp) {
+        String clean = cleanDisplayText(text);
+        String[] split = splitThinkingBlock(clean);
+        boolean needsThinking = !split[0].isEmpty();
+        String answer = split[1].isEmpty() ? (needsThinking ? "" : clean) : split[1];
+        TextView thinkingBody = taggedTextView(box, "live_thinking_body");
+        TextView answerBody = taggedTextView(box, "live_answer_body");
+        boolean hasThinkingView = thinkingBody != null;
+        boolean hasAnswerView = answerBody != null;
+        if (needsThinking != hasThinkingView || (!answer.trim().isEmpty() && !hasAnswerView)) {
+            clearContainer(box);
+            if (needsThinking) {
+                LinearLayout wrap = vertical();
+                wrap.setTag("live_thinking_wrap");
+                wrap.setBackground(round(Color.argb(22, 54, 104, 240), dp(12), Color.argb(38, 54, 104, 240)));
+                wrap.setPadding(dp(10), dp(7), dp(10), dp(7));
+                TextView header = copy("Thinking：");
+                header.setTextColor(Color.rgb(70, 88, 120));
+                header.setTypeface(Typeface.DEFAULT_BOLD);
+                header.setTextSize(13);
+                TextView body = copy(split[0]);
+                body.setTag("live_thinking_body");
+                body.setTextColor(Color.rgb(84, 99, 128));
+                body.setTextIsSelectable(true);
+                wrap.addView(header);
+                wrap.addView(body);
+                box.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
+                if (!answer.trim().isEmpty()) {
+                    box.addView(gap(8));
+                }
+            }
+            if (!answer.trim().isEmpty()) {
+                TextView body = copy(answer);
+                body.setTag("live_answer_body");
+                body.setTextColor(INK);
+                body.setTextIsSelectable(true);
+                box.addView(body);
+            }
+            addTimestamp(box, timestamp, false, "chat", -1, "");
+            return;
+        }
+        if (thinkingBody != null) {
+            thinkingBody.setText(split[0]);
+        }
+        if (answerBody != null) {
+            answerBody.setText(answer);
+        }
+    }
+
+    private TextView taggedTextView(View rootView, String tag) {
+        if (rootView == null) {
+            return null;
+        }
+        Object currentTag = rootView.getTag();
+        if (tag.equals(currentTag) && rootView instanceof TextView) {
+            return (TextView) rootView;
+        }
+        if (rootView instanceof LinearLayout) {
+            LinearLayout group = (LinearLayout) rootView;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                TextView found = taggedTextView(group.getChildAt(i), tag);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        if (rootView instanceof FrameLayout) {
+            FrameLayout group = (FrameLayout) rootView;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                TextView found = taggedTextView(group.getChildAt(i), tag);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
     private void renderAssistantBubbleContent(LinearLayout box, String text, long timestamp, boolean withActions) {
-        box.removeAllViews();
+        clearContainer(box);
         String clean = cleanDisplayText(text);
         if (!withActions) {
             addLiveAssistantContent(box, clean);
@@ -3964,8 +4495,8 @@ public class MainActivity extends Activity {
             content.addView(messageBubble("assistant", source));
             return;
         }
-        box.removeAllViews();
-        if (source.startsWith("http://") || source.startsWith("https://") || source.startsWith("data:image/")) {
+        clearContainer(box);
+        if (isImageSource(source)) {
             ImageView image = new ImageView(this);
             image.setAdjustViewBounds(true);
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -4065,7 +4596,9 @@ public class MainActivity extends Activity {
         String value = source == null ? "" : source.trim().toLowerCase(Locale.ROOT);
         return value.startsWith("http://")
                 || value.startsWith("https://")
-                || value.startsWith("data:image/");
+                || value.startsWith("data:image/")
+                || value.startsWith("content:")
+                || value.startsWith("file:");
     }
 
     private void referenceImageForEdit(String source) {
@@ -4128,7 +4661,7 @@ public class MainActivity extends Activity {
             session.put("messages", next);
             session.put("updatedAt", System.currentTimeMillis());
             saveLocalConversationStore(mode, root);
-            renderSection();
+            renderLocalConversationNow(mode, false);
         } catch (Exception ignored) {
         }
     }
@@ -4641,6 +5174,34 @@ public class MainActivity extends Activity {
         return c;
     }
 
+    private View loadingCard(String desc) {
+        LinearLayout c = cardPanel();
+        LinearLayout row = horizontal();
+        ProgressBar progress = new ProgressBar(this);
+        progress.setIndeterminate(true);
+        row.addView(progress, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        TextView label = copy(desc);
+        label.setTextColor(MUTED);
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(0, -2, 1);
+        labelLp.setMargins(dp(10), 0, 0, 0);
+        row.addView(label, labelLp);
+        c.addView(row);
+        return c;
+    }
+
+    private View loadEarlierButton(String text, Runnable action) {
+        TextView button = copy(text);
+        button.setGravity(Gravity.CENTER);
+        button.setTextColor(BLUE);
+        button.setPadding(dp(10), dp(9), dp(10), dp(9));
+        button.setBackground(round(Color.argb(210, 255, 255, 255), dp(14), Color.argb(76, 54, 104, 240)));
+        button.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(4), 0, dp(8));
+        button.setLayoutParams(lp);
+        return button;
+    }
+
     private View sectionTitle(String text) {
         TextView t = title(text);
         t.setTextSize(22);
@@ -4728,9 +5289,21 @@ public class MainActivity extends Activity {
             showLocalRecentSessions(client);
             return;
         }
+        if (cachedDesktopSessions != null && cachedDesktopSessions.length() > 0) {
+            showRecentSessionsFromArray(client, cachedDesktopSessions);
+            refreshDesktopSessionsCache(true);
+            return;
+        }
         runNetwork(() -> {
             JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
             JSONArray sessions = envelope.optJSONArray("data");
+            JSONArray finalSessions = sessions == null ? new JSONArray() : sessions;
+            prefs.edit().putString("desktop_sessions_cache", finalSessions.toString()).apply();
+            ui(() -> {
+                cachedDesktopSessions = finalSessions;
+                hydrateCliTimelineCache(finalSessions);
+            });
+            sessions = finalSessions;
             Map<String, List<String>> grouped = new HashMap<>();
             List<String> tabs = new ArrayList<>();
             Map<String, String> sessionIdByOption = new HashMap<>();
@@ -4787,13 +5360,15 @@ public class MainActivity extends Activity {
                         if (preview.isEmpty()) {
                             continue;
                         }
-                        String raw = preview.substring(0, Math.min(36, preview.length()));
-                        String option = cliRecentAlias(client, title, raw);
-                        if (!seenOptions.add(option)) {
-                            continue;
-                        }
-                        options.add(option);
                         String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
+                        String raw = preview.substring(0, Math.min(36, preview.length()));
+                        String option = uniqueSessionOptionLabel(
+                                cliRecentAlias(client, title, raw),
+                                session.optLong("updatedAt", 0),
+                                sessionKey,
+                                seenOptions);
+                        seenOptions.add(option);
+                        options.add(option);
                         if (!sessionKey.isEmpty()) {
                             String key = title + "\n" + option;
                             sessionIdByOption.put(key, sessionKey);
@@ -4825,6 +5400,7 @@ public class MainActivity extends Activity {
                         if (id != null && !id.trim().isEmpty()) {
                             selectedCliSessionIds.put(client, id.trim());
                             prefs.edit().putString("cli_active_session_id_" + client, id.trim()).apply();
+                            timelineVisibleItemCounts.put(client, INITIAL_RENDER_ITEM_COUNT);
                             JSONObject chosen = sessionByOption.get(key);
                             if (chosen != null) {
                                 updateSelectedCliProject(client, chosen);
@@ -4837,6 +5413,123 @@ public class MainActivity extends Activity {
                 }
             }, null));
         });
+    }
+
+    private void showRecentSessionsFromArray(String client, JSONArray sessions) {
+        Map<String, List<String>> grouped = new HashMap<>();
+        List<String> tabs = new ArrayList<>();
+        Map<String, String> sessionIdByOption = new HashMap<>();
+        Map<String, JSONObject> sessionByOption = new HashMap<>();
+        if (sessions != null) {
+            List<JSONObject> cliSessions = new ArrayList<>();
+            for (int i = 0; i < sessions.length(); i++) {
+                JSONObject session = sessions.optJSONObject(i);
+                if (session == null || !client.equals(session.optString("client"))) {
+                    continue;
+                }
+                cliSessions.add(session);
+            }
+            cliSessions.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
+            Map<String, List<JSONObject>> byProject = new LinkedHashMap<>();
+            List<String> projectKeys = new ArrayList<>();
+            Set<String> seenSessions = new HashSet<>();
+            for (JSONObject session : cliSessions) {
+                String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
+                if (sessionKey.isEmpty()) {
+                    sessionKey = session.optString("id", "").trim();
+                }
+                if (!sessionKey.isEmpty() && !seenSessions.add(sessionKey)) {
+                    continue;
+                }
+                String title = cliSessionProjectTitle(session, client);
+                String projectKey = cliSessionProjectKey(session, client);
+                List<JSONObject> bucket = byProject.get(projectKey);
+                if (bucket == null) {
+                    if (byProject.size() >= 3) {
+                        continue;
+                    }
+                    bucket = new ArrayList<>();
+                    byProject.put(projectKey, bucket);
+                    projectKeys.add(projectKey);
+                    tabs.add(title);
+                }
+                if (bucket.size() < 5) {
+                    bucket.add(session);
+                }
+            }
+            Set<String> pinned = pinnedRecentSessions(client);
+            for (int projectIndex = 0; projectIndex < tabs.size(); projectIndex++) {
+                String title = tabs.get(projectIndex);
+                String projectKey = projectKeys.get(projectIndex);
+                List<JSONObject> projectSessions = byProject.get(projectKey);
+                List<String> options = new ArrayList<>();
+                Set<String> seenOptions = new HashSet<>();
+                if (projectSessions == null) {
+                    continue;
+                }
+                for (JSONObject session : projectSessions) {
+                    String preview = cliSessionPreview(session);
+                    if (preview.isEmpty()) {
+                        continue;
+                    }
+                    String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
+                    String raw = preview.substring(0, Math.min(36, preview.length()));
+                    String option = uniqueSessionOptionLabel(
+                            cliRecentAlias(client, title, raw),
+                            session.optLong("updatedAt", 0),
+                            sessionKey,
+                            seenOptions);
+                    seenOptions.add(option);
+                    options.add(option);
+                    if (!sessionKey.isEmpty()) {
+                        String key = title + "\n" + option;
+                        sessionIdByOption.put(key, sessionKey);
+                        sessionByOption.put(key, session);
+                    }
+                }
+                options.sort((a, b) -> {
+                    boolean ap = pinned.contains(title + "\n" + a);
+                    boolean bp = pinned.contains(title + "\n" + b);
+                    if (ap != bp) {
+                        return ap ? -1 : 1;
+                    }
+                    return 0;
+                });
+                grouped.put(title, options.isEmpty() ? list("暂无会话记录") : options);
+            }
+        }
+        if (tabs.isEmpty()) {
+            String title = label(client);
+            tabs.add(title);
+            grouped.put(title, list("暂无会话记录"));
+        }
+        showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
+            selectedCliSession = value.trim();
+            if (!"暂无会话记录".equals(selectedCliSession)) {
+                for (String tab : tabs) {
+                    String key = tab + "\n" + selectedCliSession;
+                    String id = sessionIdByOption.get(key);
+                    if (id != null && !id.trim().isEmpty()) {
+                        selectedCliSessionIds.put(client, id.trim());
+                        prefs.edit().putString("cli_active_session_id_" + client, id.trim()).apply();
+                        timelineVisibleItemCounts.put(client, INITIAL_RENDER_ITEM_COUNT);
+                        JSONObject chosen = sessionByOption.get(key);
+                        if (chosen != null) {
+                            updateSelectedCliProject(client, chosen);
+                            try {
+                                JSONArray selectedEvents = mergedEventsForClient(cachedDesktopSessions, client);
+                                cliTimelineCache.put(client, selectedEvents);
+                                cliTimelineSignatures.put(client, "");
+                            } catch (Exception ignored) {
+                            }
+                        }
+                        break;
+                    }
+                }
+                renderSection();
+                pollSessionsOnce(true);
+            }
+        }, null);
     }
 
     private String cliSessionProjectKey(JSONObject session, String client) {
@@ -4934,7 +5627,12 @@ public class MainActivity extends Activity {
                     grouped.put(group, values);
                     tabs.add(group);
                 }
-                String title = session.optString("title", "未命名会话");
+                Set<String> seen = new HashSet<>(values);
+                String title = uniqueSessionOptionLabel(
+                        session.optString("title", "未命名会话"),
+                        session.optLong("updatedAt", 0),
+                        session.optString("id", ""),
+                        seen);
                 values.add(title);
                 sessionIdByTitle.put(group + "\n" + title, session.optString("id"));
             }
@@ -4948,13 +5646,16 @@ public class MainActivity extends Activity {
         showStackedGroupedChoice(label(mode) + " 会话记录", tabs, grouped, "", value -> {
             if (!"暂无会话记录".equals(value)) {
                 String selectedId = "";
+                String selectedGroup = "";
                 for (String tab : tabs) {
                     selectedId = sessionIdByTitle.get(tab + "\n" + value);
                     if (selectedId != null && !selectedId.isEmpty()) {
+                        selectedGroup = tab;
                         break;
                     }
                 }
                 if (selectedId != null && !selectedId.isEmpty()) {
+                    applyLocalSessionGroup(mode, selectedGroup);
                     setActiveLocalSessionId(mode, selectedId);
                     renderSection();
                 }
@@ -4977,6 +5678,51 @@ public class MainActivity extends Activity {
             }
         }
         return false;
+    }
+
+    private void applyLocalSessionGroup(String mode, String group) {
+        String clean = cleanDisplayText(group);
+        if (clean.isEmpty() || "暂无会话记录".equals(clean)) {
+            return;
+        }
+        SharedPreferences.Editor edit = prefs.edit();
+        if ("image".equals(mode)) {
+            selectedImageAssistant = clean;
+            edit.putString("selected_image_assistant", clean);
+        } else {
+            selectedChatAssistant = clean;
+            edit.putString("selected_chat_assistant", clean);
+        }
+        edit.apply();
+    }
+
+    private String uniqueSessionOptionLabel(String title, long updatedAt, String id, Set<String> used) {
+        String base = cleanDisplayText(title);
+        if (base.isEmpty()) {
+            base = "未命名会话";
+        }
+        if (used == null) {
+            used = new HashSet<>();
+        }
+        String label = base;
+        if (used.contains(label)) {
+            String time = updatedAt > 0 ? formatDateTime(updatedAt) : "";
+            String suffix = time.isEmpty() ? shortId(id) : time;
+            label = suffix.isEmpty() ? base : base + " · " + suffix;
+        }
+        if (used.contains(label)) {
+            String suffix = shortId(id);
+            if (!suffix.isEmpty()) {
+                label = label + " · " + suffix;
+            }
+        }
+        int suffix = 2;
+        String candidate = label;
+        while (used.contains(candidate)) {
+            candidate = label + " (" + suffix + ")";
+            suffix++;
+        }
+        return candidate;
     }
 
     private void saveLocalRecent(String mode, String group, String prompt) {
@@ -6434,6 +7180,7 @@ public class MainActivity extends Activity {
         int next = current + direction;
         if (next >= 0 && next < items.length) {
             section = items[next];
+            localAutoScrollEnabled = true;
             refreshBottomNav();
             renderSection();
             lastExitSwipeAt = 0;
@@ -6508,13 +7255,29 @@ public class MainActivity extends Activity {
         handler.post(runnable);
     }
 
+    private void resetContentScrollPosition() {
+        if (contentScroll == null) {
+            return;
+        }
+        contentScroll.scrollTo(0, 0);
+        lastContentScrollY = 0;
+    }
+
     private void scrollToBottom() {
+        scrollToBottomStable(0);
+    }
+
+    private void scrollToBottomStable(int pass) {
         if (contentScroll == null) {
             return;
         }
         contentScroll.post(() -> {
             contentScroll.scrollTo(0, contentBottomScrollY(contentScroll));
+            contentScroll.fullScroll(View.FOCUS_DOWN);
             updateScrollDock();
+            if (pass < 4 && contentScroll != null) {
+                handler.postDelayed(() -> scrollToBottomStable(pass + 1), pass == 0 ? 32L : 80L);
+            }
         });
     }
 
@@ -6535,19 +7298,19 @@ public class MainActivity extends Activity {
         }
         scrollDock.removeAllViews();
         if (scrollDockDirectionDown) {
-            scrollDock.addView(scrollDockButton("⇩", "最新聊天记录", () -> {
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_bottom, "最新聊天记录", () -> {
                 localAutoScrollEnabled = true;
                 scrollToBottom();
             }));
-            scrollDock.addView(scrollDockButton("⌄", "当前气泡底部", () -> scrollCurrentContentChild(false)));
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_bottom, "当前气泡底部", () -> scrollCurrentContentChild(false)));
         } else {
-            scrollDock.addView(scrollDockButton("⇧", "聊天记录顶部", () -> {
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_top, "聊天记录顶部", () -> {
                 localAutoScrollEnabled = false;
                 if (contentScroll != null) {
                     contentScroll.smoothScrollTo(0, 0);
                 }
             }));
-            scrollDock.addView(scrollDockButton("⌃", "当前气泡顶部", () -> scrollCurrentContentChild(true)));
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_top, "当前气泡顶部", () -> scrollCurrentContentChild(true)));
         }
         scrollDock.setVisibility(View.VISIBLE);
     }
@@ -6560,13 +7323,18 @@ public class MainActivity extends Activity {
                 || "claude".equals(section);
     }
 
-    private Button scrollDockButton(String text, String description, Runnable action) {
-        Button b = iconButton(text);
+    private ImageButton scrollDockButton(int iconRes, String description, Runnable action) {
+        ImageButton b = new ImageButton(this);
+        b.setImageResource(iconRes);
         b.setContentDescription(description);
-        b.setTextSize(18);
+        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        b.setPadding(dp(7), dp(7), dp(7), dp(7));
+        b.setColorFilter(Color.rgb(61, 92, 114));
+        b.setAlpha(0.58f);
+        b.setBackground(round(Color.argb(92, 255, 255, 255), dp(10), Color.argb(80, 145, 160, 184)));
         b.setOnClickListener(v -> action.run());
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(36), dp(36));
-        lp.setMargins(0, dp(5), 0, dp(5));
+        lp.setMargins(0, dp(4), 0, dp(4));
         b.setLayoutParams(lp);
         return b;
     }
@@ -6599,6 +7367,7 @@ public class MainActivity extends Activity {
         int nextY = top
                 ? Math.max(0, target.getTop() - dp(8))
                 : Math.max(0, target.getBottom() - contentScroll.getHeight() + dp(8));
+        nextY = Math.min(nextY, contentBottomScrollY(contentScroll));
         contentScroll.smoothScrollTo(0, nextY);
     }
 
