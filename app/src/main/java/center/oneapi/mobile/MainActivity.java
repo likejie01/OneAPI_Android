@@ -58,6 +58,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.DataOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.net.URL;
@@ -67,6 +68,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -95,12 +97,14 @@ public class MainActivity extends Activity {
     private LinearLayout root;
     private LinearLayout content;
     private LinearLayout composerHost;
+    private LinearLayout scrollDock;
     private LinearLayout topNav;
     private TextView navMenuSeparator;
     private LinearLayout timeline;
     private LinearLayout interactionBar;
     private ScrollView contentScroll;
     private TextView statusText;
+    private TextView cliProjectTagView;
     private EditText activeInput;
     private Spinner modelSpinner;
     private Spinner reasoningSpinner;
@@ -129,12 +133,16 @@ public class MainActivity extends Activity {
     private boolean imageRandomSeed = false;
     private boolean requestRunning = false;
     private boolean cliRefreshRunning = false;
+    private boolean localAutoScrollEnabled = true;
+    private boolean scrollDockDirectionDown = true;
+    private int lastContentScrollY = 0;
     private long lastCliRefreshAt = 0L;
     private float swipeStartX = 0f;
     private float swipeStartY = 0f;
     private long lastExitSwipeAt = 0L;
     private int lastExitSwipeDirection = 0;
     private long suppressSwipeUntil = 0L;
+    private final Map<String, String> cliTimelineSignatures = new HashMap<>();
     private String pendingAndroidUpdateUrl = "";
     private String pendingAndroidUpdateVersion = "";
     private Uri downloadedAndroidUpdateUri = null;
@@ -150,6 +158,9 @@ public class MainActivity extends Activity {
     private String boundDeviceId = "";
     private String sessionId = "android-" + UUID.randomUUID();
     private boolean polling = false;
+    private final Map<String, String> selectedCliSessionIds = new HashMap<>();
+    private final Map<String, String> selectedCliProjectNames = new HashMap<>();
+    private final Map<String, String> selectedCliProjectPaths = new HashMap<>();
     private final List<String> codexModels = new ArrayList<>();
     private final List<String> claudeModels = new ArrayList<>();
     private final List<String> chatModels = new ArrayList<>();
@@ -184,6 +195,7 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_PICK_IMAGE && resultCode == RESULT_OK && data != null) {
+            persistSelectedImagePermissions(data);
             appendSelectedImages(data);
             renderAttachmentPreview();
             if (selectedAttachmentUris.isEmpty()) {
@@ -287,9 +299,15 @@ public class MainActivity extends Activity {
         contentScroll = scroll;
         scroll.setClipToPadding(false);
         scroll.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
-            if (isCliSection() && scrollY >= contentBottomScrollY(scroll) - dp(2)) {
+            scrollDockDirectionDown = scrollY >= oldScrollY;
+            lastContentScrollY = scrollY;
+            if ("chat".equals(section) || "image".equals(section) || "assistants".equals(section)) {
+                localAutoScrollEnabled = isContentNearBottom(scroll);
+            }
+            if (isCliSection() && isContentNearBottom(scroll)) {
                 refreshCliAtEdge();
             }
+            updateScrollDock();
         });
         content = vertical();
         content.setPadding(dp(18), dp(12), dp(18), dp(18));
@@ -300,6 +318,12 @@ public class MainActivity extends Activity {
         composerHost.setBackground(round(Color.argb(224, 255, 255, 255), dp(18), Color.TRANSPARENT));
         root.addView(composerHost);
         shell.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        scrollDock = vertical();
+        scrollDock.setVisibility(View.GONE);
+        scrollDock.setPadding(0, 0, 0, 0);
+        FrameLayout.LayoutParams dockLp = new FrameLayout.LayoutParams(dp(42), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        dockLp.setMargins(0, 0, dp(10), 0);
+        shell.addView(scrollDock, dockLp);
         setContentView(shell);
         refreshBottomNav();
         renderSection();
@@ -417,6 +441,7 @@ public class MainActivity extends Activity {
             return;
         }
         activeBubbleActions = null;
+        cliProjectTagView = null;
         content.removeAllViews();
         composerHost.removeAllViews();
         if ("codex".equals(section) || "claude".equals(section)) {
@@ -438,6 +463,7 @@ public class MainActivity extends Activity {
         } else {
             renderPlaceholder(label(section));
         }
+        updateScrollDock();
     }
 
     private void renderChat() {
@@ -477,12 +503,14 @@ public class MainActivity extends Activity {
                 }
                 long timestamp = item.optLong("timestamp", 0);
                 if ("image".equals(type)) {
-                    content.addView(imageResultBubble(text, timestamp, mode, i));
+                    content.addView(imageResultBubble(text, timestamp, mode, i, role));
                 } else {
                     content.addView(messageBubble(role, text, timestamp, mode, i));
                 }
             }
-            scrollToBottomOnce("local:" + mode);
+            localAutoScrollEnabled = true;
+            scrollToBottom();
+            updateScrollDock();
         }, 80);
     }
 
@@ -875,6 +903,8 @@ public class MainActivity extends Activity {
     }
 
     private void renderCliWorkspace(String client) {
+        cliTimelineSignatures.remove(client);
+        autoScrolledSections.remove("timeline:" + client);
         modelSpinner = spinner("codex".equals(client) ? codexModels : claudeModels);
         reasoningSpinner = spinner(list("关闭思考", "低", "中", "高"));
         permissionSpinner = spinner(list("受限模式", "全权限模式"));
@@ -910,6 +940,8 @@ public class MainActivity extends Activity {
         renderExtensionPreview();
         if ("chat".equals(mode) || "image".equals(mode)) {
             box.addView(currentAssistantTag(mode));
+        } else if ("codex".equals(mode) || "claude".equals(mode)) {
+            box.addView(currentCliProjectTag(mode));
         }
         activeInput = input(hint);
         if ("assistants".equals(section)) {
@@ -921,6 +953,12 @@ public class MainActivity extends Activity {
         activeInput.setOverScrollMode(View.OVER_SCROLL_NEVER);
         activeInput.setGravity(Gravity.TOP | Gravity.START);
         activeInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        activeInput.setOnTouchListener((v, event) -> {
+            if (event != null && event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                focusComposerInput();
+            }
+            return false;
+        });
         activeInput.setOnClickListener(v -> focusComposerInput());
         activeInput.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
@@ -964,11 +1002,42 @@ public class MainActivity extends Activity {
         tag.setSingleLine(true);
         tag.setEllipsize(TextUtils.TruncateAt.END);
         tag.setPadding(dp(10), dp(4), dp(10), dp(4));
-        tag.setBackground(round(Color.argb(72, 54, 104, 240), dp(12), Color.argb(88, 54, 104, 240)));
+        tag.setBackground(round(Color.rgb(255, 255, 255), dp(12), LINE));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(28));
         lp.setMargins(0, 0, 0, dp(6));
         tag.setLayoutParams(lp);
         return tag;
+    }
+
+    private View currentCliProjectTag(String client) {
+        String name = selectedCliProjectNames.get(client);
+        if (name == null || name.trim().isEmpty()) {
+            String path = selectedCliProjectPaths.get(client);
+            name = fileNameFromPath(path == null ? "" : path);
+        }
+        if (name == null || name.trim().isEmpty()) {
+            name = "未选择";
+        }
+        TextView tag = copy("项目：" + ellipsizeLabel(name, 8));
+        cliProjectTagView = tag;
+        tag.setTextColor(Color.rgb(45, 74, 124));
+        tag.setTextSize(12);
+        tag.setSingleLine(true);
+        tag.setEllipsize(TextUtils.TruncateAt.END);
+        tag.setPadding(dp(10), dp(4), dp(10), dp(4));
+        tag.setBackground(round(Color.rgb(255, 255, 255), dp(12), LINE));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(28));
+        lp.setMargins(0, 0, 0, dp(6));
+        tag.setLayoutParams(lp);
+        return tag;
+    }
+
+    private String ellipsizeLabel(String value, int maxChars) {
+        String clean = cleanDisplayText(value);
+        if (clean.length() <= maxChars) {
+            return clean;
+        }
+        return clean.substring(0, Math.max(0, maxChars)) + "...";
     }
 
     private void addComposerTools(LinearLayout left, String mode) {
@@ -1146,6 +1215,10 @@ public class MainActivity extends Activity {
         return source;
     }
 
+    private String imageSourceForBubble(Uri uri) {
+        return uri == null ? "" : uri.toString();
+    }
+
     private String imagePreviewHtml(String source) {
         String jsSource = JSONObject.quote(source == null ? "" : source);
         return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1239,15 +1312,36 @@ public class MainActivity extends Activity {
     }
 
     private void openImagePicker() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.setType("image/*");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, "chat".equals(activeComposerMode));
         try {
             startActivityForResult(Intent.createChooser(intent, "选择图片"), REQ_PICK_IMAGE);
         } catch (Exception error) {
-            Intent fallback = new Intent(Intent.ACTION_PICK);
+            Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
             fallback.setType("image/*");
+            fallback.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivityForResult(Intent.createChooser(fallback, "选择图片"), REQ_PICK_IMAGE);
+        }
+    }
+
+    private void persistSelectedImagePermissions(Intent data) {
+        int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try {
+            ClipData clipData = data.getClipData();
+            if (clipData != null) {
+                for (int i = 0; i < clipData.getItemCount(); i++) {
+                    Uri uri = clipData.getItemAt(i).getUri();
+                    if (uri != null) {
+                        getContentResolver().takePersistableUriPermission(uri, flags);
+                    }
+                }
+            } else if (data.getData() != null) {
+                getContentResolver().takePersistableUriPermission(data.getData(), flags);
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -1687,16 +1781,23 @@ public class MainActivity extends Activity {
         selectedAttachmentUris.clear();
         renderAttachmentPreview();
         saveLocalRecent("chat", selectedChatAssistant, prompt);
+        for (Uri uri : attachments) {
+            String preview = imageSourceForBubble(uri);
+            if (!preview.isEmpty()) {
+                appendLocalConversation("chat", "user", "image", preview);
+                content.addView(imageResultBubble(preview, System.currentTimeMillis(), "chat", -1, "user"));
+            }
+        }
         appendLocalConversation("chat", "user", "text", prompt);
         content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "chat", -1));
-        scrollToBottom();
         long assistantStartedAt = System.currentTimeMillis();
         LinearLayout live = addStreamingBubble("assistant", assistantStartedAt);
         updateStreamingBubble(live, "正在思考...", assistantStartedAt, false);
+        localAutoScrollEnabled = true;
         scrollToBottom();
         runNetwork(() -> {
             JSONObject body = new JSONObject();
-            body.put("model", resolveChatModel());
+            body.put("model", resolveChatModel(!attachments.isEmpty()));
             body.put("stream", true);
             String reasoning = reasoningValue(selectedReasoning);
             if (!"off".equals(reasoning)) {
@@ -1717,7 +1818,10 @@ public class MainActivity extends Activity {
                 contentParts.put(new JSONObject().put("type", "text").put("text", prompt));
                 for (Uri uri : attachments) {
                     String dataUrl = uriToDataUrl(uri);
-                    contentParts.put(new JSONObject().put("type", "image_url").put("image_url", new JSONObject().put("url", dataUrl.isEmpty() ? uri.toString() : dataUrl)));
+                    if (dataUrl.isEmpty()) {
+                        throw new ApiException(0, "", "图片读取失败，请重新选择图片后再发送。");
+                    }
+                    contentParts.put(new JSONObject().put("type", "image_url").put("image_url", new JSONObject().put("url", dataUrl)));
                 }
                 messages.put(new JSONObject().put("role", "user").put("content", contentParts));
             }
@@ -1732,7 +1836,7 @@ public class MainActivity extends Activity {
                     replaceStreamingBubble(live, text, assistantStartedAt);
                     appendLocalConversation("chat", "assistant", "text", text);
                 }
-                scrollToBottom();
+                scrollToBottomIfLocalAuto();
             });
         });
     }
@@ -1794,46 +1898,68 @@ public class MainActivity extends Activity {
         selectedAttachmentUris.clear();
         renderAttachmentPreview();
         saveLocalRecent("image", selectedImageAssistant, prompt);
+        for (Uri uri : attachments) {
+            String preview = imageSourceForBubble(uri);
+            if (!preview.isEmpty()) {
+                appendLocalConversation("image", "user", "image", preview);
+                content.addView(imageResultBubble(preview, System.currentTimeMillis(), "image", -1, "user"));
+            }
+        }
         int userIndex = appendLocalConversation("image", "user", "text", prompt);
         content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "image", userIndex));
-        scrollToBottom();
         LinearLayout progress = addImageProgressBubble();
+        localAutoScrollEnabled = true;
         scrollToBottom();
         runNetwork(() -> {
-            JSONObject body = new JSONObject();
-            body.put("model", "gpt-image-2");
-            body.put("prompt", imageAssistantPrompt(selectedImageAssistant, prompt));
-            body.put("n", 1);
-            body.put("size", selectedImageSize);
-            body.put("quality", imageQualityValue(selectedImageQuality));
-            body.put("response_format", "b64_json");
-            if (imageRandomSeed) {
-                body.put("seed", System.currentTimeMillis() % 1000000);
-            }
+            JSONObject response;
             if (!attachments.isEmpty()) {
-                String source = attachments.get(0).toString();
-                String dataUrl = source.startsWith("http://") || source.startsWith("https://") || source.startsWith("data:image/")
-                        ? source
-                        : uriToDataUrl(attachments.get(0));
-                body.put("reference_image", dataUrl.isEmpty() ? source : dataUrl);
+                response = apiImageEdit(attachments.get(0), imageAssistantPrompt(selectedImageAssistant, prompt));
+            } else {
+                JSONObject body = new JSONObject();
+                body.put("model", "gpt-image-2");
+                body.put("prompt", imageAssistantPrompt(selectedImageAssistant, prompt));
+                body.put("n", 1);
+                body.put("size", selectedImageSize);
+                body.put("quality", imageQualityValue(selectedImageQuality));
+                body.put("response_format", "b64_json");
+                if (imageRandomSeed) {
+                    body.put("seed", System.currentTimeMillis() % 1000000);
+                }
+                response = api("POST", "/pg/images/generations", body);
             }
-            JSONObject response = api("POST", "/pg/images/generations", body);
             String text = extractImageText(response);
             ui(() -> {
                 setSending(false);
                 String result = text.isEmpty() ? "模型没有返回可展示的图片。" : text;
                 int assistantIndex = appendLocalConversation("image", "assistant", result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/") ? "image" : "text", result);
                 renderImageResult(progress, result, System.currentTimeMillis(), "image", assistantIndex);
-                scrollToBottom();
+                scrollToBottomIfLocalAuto();
             });
         });
     }
 
-    private String resolveChatModel() {
+    private String resolveChatModel(boolean hasImageAttachment) {
+        if (hasImageAttachment) {
+            String selected = selectedChatModel == null ? "" : selectedChatModel.trim();
+            if (isVisionChatModel(selected)) {
+                return selected;
+            }
+            for (String model : chatModels) {
+                if (isVisionChatModel(model)) {
+                    return model;
+                }
+            }
+            return "gpt-5.4";
+        }
         if (selectedChatModel != null && !selectedChatModel.isEmpty()) {
             return selectedChatModel;
         }
         return codexModels.isEmpty() ? "gpt-5.4" : codexModels.get(0);
+    }
+
+    private boolean isVisionChatModel(String model) {
+        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
+        return n.startsWith("gpt") || n.startsWith("gemini") || n.startsWith("claude");
     }
 
     private String imageQualityValue(String label) {
@@ -2029,7 +2155,7 @@ public class MainActivity extends Activity {
                     String rendered = renderLiveChatText(thinking.toString(), answer.toString());
                     ui(() -> {
                         updateStreamingBubble(live, rendered, timestamp, false);
-                        scrollToBottom();
+                        scrollToBottomIfLocalAuto();
                     });
                 } catch (Exception ignored) {
                 }
@@ -2250,8 +2376,8 @@ public class MainActivity extends Activity {
                 foot.addView(sale, saleLp);
             }
             JSONObject selectedPlan = plan;
-            ImageButton buy = tinyAction(R.drawable.ic_bubble_buy, "订阅套餐", () -> showSubscriptionPayDialog(selectedPlan));
-            foot.addView(buy, new LinearLayout.LayoutParams(dp(88), dp(88)));
+            ImageButton buy = planBuyButton(() -> showSubscriptionPayDialog(selectedPlan));
+            foot.addView(buy, new LinearLayout.LayoutParams(dp(62), dp(62)));
             LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, -2);
             footLp.setMargins(0, dp(6), 0, 0);
             panel.addView(foot, footLp);
@@ -2270,6 +2396,17 @@ public class MainActivity extends Activity {
         lp.setMargins(0, 0, 0, dp(16));
         frame.setLayoutParams(lp);
         return frame;
+    }
+
+    private ImageButton planBuyButton(Runnable action) {
+        ImageButton b = new ImageButton(this);
+        b.setImageResource(R.drawable.ic_bubble_buy);
+        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        b.setPadding(dp(8), dp(8), dp(8), dp(8));
+        b.setBackground(round(Color.rgb(255, 255, 255), dp(18), LINE));
+        b.setContentDescription("订阅套餐");
+        b.setOnClickListener(v -> action.run());
+        return b;
     }
 
     private Set<String> recommendedPlanKeys(JSONArray records) {
@@ -2797,7 +2934,7 @@ public class MainActivity extends Activity {
             JSONObject body = new JSONObject();
             body.put("client", client);
             body.put("deviceId", boundDeviceId);
-            body.put("sessionId", sessionId);
+            body.put("sessionId", resolveCliSessionIdForJob(client));
             body.put("prompt", prompt);
             body.put("model", selectedCliModelFor(client));
             body.put("reasoningEffort", reasoningValue(selectedReasoning));
@@ -2816,6 +2953,38 @@ public class MainActivity extends Activity {
                 pollSessionsOnce();
             });
         });
+    }
+
+    private String resolveCliSessionIdForJob(String client) {
+        String selected = selectedCliSessionIds.get(client);
+        if (selected == null || selected.trim().isEmpty()) {
+            selected = prefs.getString("cli_active_session_id_" + client, "");
+        }
+        selected = selected == null ? "" : selected.trim();
+        if (!selected.isEmpty()) {
+            return selected;
+        }
+        try {
+            JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
+            JSONArray sessions = envelope.optJSONArray("data");
+            if (sessions != null) {
+                for (int i = 0; i < sessions.length(); i++) {
+                    JSONObject item = sessions.optJSONObject(i);
+                    if (item == null || !client.equals(item.optString("client"))) {
+                        continue;
+                    }
+                    String id = item.optString("sessionId", item.optString("id", "")).trim();
+                    if (!id.isEmpty() && !id.endsWith("-remote")) {
+                        selectedCliSessionIds.put(client, id);
+                        prefs.edit().putString("cli_active_session_id_" + client, id).apply();
+                        updateSelectedCliProject(client, item);
+                        return id;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return sessionId;
     }
 
     private void startPolling() {
@@ -2847,8 +3016,10 @@ public class MainActivity extends Activity {
             try {
                 JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
                 JSONArray sessions = envelope.optJSONArray("data");
-                JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, section);
-                ui(() -> renderTimeline(events));
+                String targetSection = section;
+                JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, targetSection);
+                String signature = events.toString();
+                ui(() -> renderTimelineIfChanged(targetSection, events, signature));
             } finally {
                 cliRefreshRunning = false;
             }
@@ -2867,6 +3038,13 @@ public class MainActivity extends Activity {
         return Math.max(0, child.getMeasuredHeight() - scroll.getHeight());
     }
 
+    private boolean isContentNearBottom(ScrollView scroll) {
+        if (scroll == null) {
+            return true;
+        }
+        return scroll.getScrollY() >= contentBottomScrollY(scroll) - dp(24);
+    }
+
     private void refreshCliAtEdge() {
         long now = System.currentTimeMillis();
         if (now - lastCliRefreshAt < 9000L) {
@@ -2878,14 +3056,43 @@ public class MainActivity extends Activity {
 
     private JSONArray mergedEventsForClient(JSONArray sessions, String client) throws Exception {
         List<JSONObject> rows = new ArrayList<>();
+        String selectedSessionId = selectedCliSessionIds.get(client);
+        selectedSessionId = selectedSessionId == null ? "" : selectedSessionId.trim();
+        if (selectedSessionId.startsWith("android-")) {
+            selectedSessionId = "";
+        }
+        JSONObject fallbackSession = null;
         for (int i = 0; i < sessions.length(); i++) {
             JSONObject session = sessions.optJSONObject(i);
             if (session == null || !client.equals(session.optString("client"))) {
                 continue;
             }
+            String remoteSessionId = session.optString("sessionId", session.optString("id", "")).trim();
+            if (fallbackSession == null) {
+                fallbackSession = session;
+            }
+            if (!remoteSessionId.isEmpty() && !remoteSessionId.endsWith("-remote")) {
+                String current = selectedCliSessionIds.get(client);
+                if (current == null || current.trim().isEmpty() || current.startsWith("android-")) {
+                    selectedCliSessionIds.put(client, remoteSessionId);
+                    prefs.edit().putString("cli_active_session_id_" + client, remoteSessionId).apply();
+                    selectedSessionId = remoteSessionId;
+                    updateSelectedCliProject(client, session);
+                }
+            }
+            if (!selectedSessionId.isEmpty() && !selectedSessionId.equals(remoteSessionId) && !selectedSessionId.equals(session.optString("id", ""))) {
+                continue;
+            }
+            updateSelectedCliProject(client, session);
             collectRows(rows, session.optJSONArray("messages"), "message");
             collectPurposes(rows, session);
             collectRows(rows, session.optJSONArray("logs"), "log");
+        }
+        if (rows.isEmpty() && fallbackSession != null && selectedSessionId.isEmpty()) {
+            updateSelectedCliProject(client, fallbackSession);
+            collectRows(rows, fallbackSession.optJSONArray("messages"), "message");
+            collectPurposes(rows, fallbackSession);
+            collectRows(rows, fallbackSession.optJSONArray("logs"), "log");
         }
         rows.sort(Comparator.comparingLong(o -> o.optLong("timestamp")));
         JSONArray out = new JSONArray();
@@ -2980,6 +3187,18 @@ public class MainActivity extends Activity {
             }
         }
         scrollToBottomOnce("timeline:" + section);
+    }
+
+    private void renderTimelineIfChanged(String targetSection, JSONArray events, String signature) {
+        if (!targetSection.equals(section)) {
+            return;
+        }
+        String previous = cliTimelineSignatures.get(targetSection);
+        if (signature != null && signature.equals(previous)) {
+            return;
+        }
+        cliTimelineSignatures.put(targetSection, signature == null ? "" : signature);
+        renderTimeline(events);
     }
 
     private void addLogRow(JSONObject e) {
@@ -3714,11 +3933,16 @@ public class MainActivity extends Activity {
     }
 
     private View imageResultBubble(String source, long timestamp, String mode, int messageIndex) {
+        return imageResultBubble(source, timestamp, mode, messageIndex, "assistant");
+    }
+
+    private View imageResultBubble(String source, long timestamp, String mode, int messageIndex, String role) {
+        boolean user = "user".equals(role);
         LinearLayout box = vertical();
         box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        box.setBackground(round(GLASS, dp(16), LINE));
-        box.setLayoutParams(bubbleLayoutParams(false));
-        renderImageResult(box, source, timestamp, mode, messageIndex);
+        box.setBackground(round(user ? Color.WHITE : GLASS, dp(16), LINE));
+        box.setLayoutParams(bubbleLayoutParams(user));
+        renderImageResult(box, source, timestamp, mode, messageIndex, user);
         box.setOnClickListener(v -> toggleActionRows(box));
         return box;
     }
@@ -3732,6 +3956,10 @@ public class MainActivity extends Activity {
     }
 
     private void renderImageResult(LinearLayout box, String source, long timestamp, String mode, int messageIndex) {
+        renderImageResult(box, source, timestamp, mode, messageIndex, false);
+    }
+
+    private void renderImageResult(LinearLayout box, String source, long timestamp, String mode, int messageIndex, boolean user) {
         if (box == null) {
             content.addView(messageBubble("assistant", source));
             return;
@@ -3762,7 +3990,7 @@ public class MainActivity extends Activity {
         } else {
             addPlainMessageContent(box, cleanDisplayText(source), false, () -> toggleActionRows(box));
         }
-        addTimestamp(box, timestamp, false, mode, messageIndex, source);
+        addTimestamp(box, timestamp, user, mode, messageIndex, source);
     }
 
     private void addTimestamp(LinearLayout box, long timestamp, boolean user) {
@@ -4122,6 +4350,77 @@ public class MainActivity extends Activity {
         return json;
     }
 
+    private JSONObject apiImageEdit(Uri imageUri, String prompt) throws Exception {
+        String base = prefs.getString("server", "").replaceAll("/+$", "");
+        String boundary = "----OneApiAndroid" + System.currentTimeMillis();
+        URL url = new URL(base + "/v1/images/edits");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(180000);
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        String cookie = prefs.getString("cookie", "");
+        if (!cookie.isEmpty()) {
+            conn.setRequestProperty("Cookie", cookie);
+        }
+        String userId = prefs.getString("user_id", "");
+        if (!userId.isEmpty()) {
+            conn.setRequestProperty("New-Api-User", userId);
+        }
+        conn.setDoOutput(true);
+        String mime = getContentResolver().getType(imageUri);
+        if (mime == null || mime.trim().isEmpty()) {
+            mime = "image/png";
+        }
+        String fileName = "image." + (mime.contains("jpeg") ? "jpg" : mime.contains("webp") ? "webp" : "png");
+        try (DataOutputStream out = new DataOutputStream(conn.getOutputStream())) {
+            writeMultipartField(out, boundary, "model", "gpt-image-2");
+            writeMultipartField(out, boundary, "prompt", prompt);
+            writeMultipartField(out, boundary, "size", selectedImageSize);
+            writeMultipartField(out, boundary, "quality", imageQualityValue(selectedImageQuality));
+            writeMultipartField(out, boundary, "response_format", "b64_json");
+            out.writeBytes("--" + boundary + "\r\n");
+            out.writeBytes("Content-Disposition: form-data; name=\"image\"; filename=\"" + fileName + "\"\r\n");
+            out.writeBytes("Content-Type: " + mime + "\r\n\r\n");
+            try (InputStream input = getContentResolver().openInputStream(imageUri)) {
+                if (input == null) {
+                    throw new ApiException(0, "", "图片读取失败，请重新选择图片后再发送。");
+                }
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
+            }
+            out.writeBytes("\r\n--" + boundary + "--\r\n");
+        }
+        String setCookie = conn.getHeaderField("Set-Cookie");
+        if (setCookie != null && !setCookie.isEmpty()) {
+            prefs.edit().putString("cookie", setCookie.split(";", 2)[0]).apply();
+        }
+        int code = conn.getResponseCode();
+        String raw = readStream(code >= 400 ? conn.getErrorStream() : conn.getInputStream());
+        conn.disconnect();
+        JSONObject json;
+        try {
+            json = new JSONObject(raw.isEmpty() ? "{}" : raw);
+        } catch (Exception parseError) {
+            throw new ApiException(code, raw, code >= 400 ? "图片编辑接口暂时不可用，请确认服务器已更新。" : "服务器返回内容无法识别。");
+        }
+        if (code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
+            throw new ApiException(code, raw, json.optString("message", "图片编辑接口暂时不可用，请稍后重试。"));
+        }
+        return json;
+    }
+
+    private void writeMultipartField(DataOutputStream out, String boundary, String name, String value) throws Exception {
+        out.writeBytes("--" + boundary + "\r\n");
+        out.writeBytes("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n");
+        out.write(value.getBytes(StandardCharsets.UTF_8));
+        out.writeBytes("\r\n");
+    }
+
     private String readStream(InputStream stream) throws Exception {
         if (stream == null) {
             return "";
@@ -4167,7 +4466,7 @@ public class MainActivity extends Activity {
             return "这台客户端已经绑定了另一个 Android 应用，请先解除原绑定";
         }
         if (e instanceof ApiException && ((ApiException) e).status == 404) {
-            return "服务器还没有更新设备绑定接口，请先更新服务器版本";
+            return "服务器接口不存在，请更新服务器版本或检查服务地址";
         }
         if (lower.contains("timeout") || lower.contains("refused")) {
             return "服务器暂时无响应，请稍后重试";
@@ -4434,32 +4733,73 @@ public class MainActivity extends Activity {
             JSONArray sessions = envelope.optJSONArray("data");
             Map<String, List<String>> grouped = new HashMap<>();
             List<String> tabs = new ArrayList<>();
+            Map<String, String> sessionIdByOption = new HashMap<>();
+            Map<String, JSONObject> sessionByOption = new HashMap<>();
             if (sessions != null) {
-                int projects = 0;
-                for (int i = 0; i < sessions.length() && projects < 3; i++) {
+                List<JSONObject> cliSessions = new ArrayList<>();
+                for (int i = 0; i < sessions.length(); i++) {
                     JSONObject session = sessions.optJSONObject(i);
                     if (session == null || !client.equals(session.optString("client"))) {
                         continue;
                     }
-                    String title = cliSessionProjectTitle(session, client);
-                    List<String> options = new ArrayList<>();
-                    JSONArray messages = session.optJSONArray("messages");
-                    int added = 0;
-                    if (messages != null) {
-                        for (int j = messages.length() - 1; j >= 0 && added < 2; j--) {
-                            JSONObject msg = messages.optJSONObject(j);
-                            String preview = msg == null ? "" : msg.optString("text", "");
-                            if (!preview.trim().isEmpty()) {
-                                String raw = preview.substring(0, Math.min(36, preview.length()));
-                                options.add(cliRecentAlias(client, title, raw));
-                                added++;
-                            }
-                        }
+                    cliSessions.add(session);
+                }
+                cliSessions.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
+                Map<String, List<JSONObject>> byProject = new LinkedHashMap<>();
+                List<String> projectKeys = new ArrayList<>();
+                Set<String> seenSessions = new HashSet<>();
+                for (JSONObject session : cliSessions) {
+                    String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
+                    if (sessionKey.isEmpty()) {
+                        sessionKey = session.optString("id", "").trim();
                     }
-                    if (options.isEmpty()) {
+                    if (!sessionKey.isEmpty() && !seenSessions.add(sessionKey)) {
                         continue;
                     }
-                    Set<String> pinned = pinnedRecentSessions(client);
+                    String title = cliSessionProjectTitle(session, client);
+                    String projectKey = cliSessionProjectKey(session, client);
+                    List<JSONObject> bucket = byProject.get(projectKey);
+                    if (bucket == null) {
+                        if (byProject.size() >= 3) {
+                            continue;
+                        }
+                        bucket = new ArrayList<>();
+                        byProject.put(projectKey, bucket);
+                        projectKeys.add(projectKey);
+                        tabs.add(title);
+                    }
+                    if (bucket.size() < 5) {
+                        bucket.add(session);
+                    }
+                }
+                Set<String> pinned = pinnedRecentSessions(client);
+                for (int projectIndex = 0; projectIndex < tabs.size(); projectIndex++) {
+                    String title = tabs.get(projectIndex);
+                    String projectKey = projectKeys.get(projectIndex);
+                    List<JSONObject> projectSessions = byProject.get(projectKey);
+                    List<String> options = new ArrayList<>();
+                    Set<String> seenOptions = new HashSet<>();
+                    if (projectSessions == null) {
+                        continue;
+                    }
+                    for (JSONObject session : projectSessions) {
+                        String preview = cliSessionPreview(session);
+                        if (preview.isEmpty()) {
+                            continue;
+                        }
+                        String raw = preview.substring(0, Math.min(36, preview.length()));
+                        String option = cliRecentAlias(client, title, raw);
+                        if (!seenOptions.add(option)) {
+                            continue;
+                        }
+                        options.add(option);
+                        String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
+                        if (!sessionKey.isEmpty()) {
+                            String key = title + "\n" + option;
+                            sessionIdByOption.put(key, sessionKey);
+                            sessionByOption.put(key, session);
+                        }
+                    }
                     options.sort((a, b) -> {
                         boolean ap = pinned.contains(title + "\n" + a);
                         boolean bp = pinned.contains(title + "\n" + b);
@@ -4468,9 +4808,7 @@ public class MainActivity extends Activity {
                         }
                         return 0;
                     });
-                    grouped.put(title, options);
-                    tabs.add(title);
-                    projects++;
+                    grouped.put(title, options.isEmpty() ? list("暂无会话记录") : options);
                 }
             }
             if (tabs.isEmpty()) {
@@ -4481,10 +4819,60 @@ public class MainActivity extends Activity {
             ui(() -> showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
                 selectedCliSession = value.trim();
                 if (!"暂无会话记录".equals(selectedCliSession)) {
-                    pollSessionsOnce();
+                    for (String tab : tabs) {
+                        String key = tab + "\n" + selectedCliSession;
+                        String id = sessionIdByOption.get(key);
+                        if (id != null && !id.trim().isEmpty()) {
+                            selectedCliSessionIds.put(client, id.trim());
+                            prefs.edit().putString("cli_active_session_id_" + client, id.trim()).apply();
+                            JSONObject chosen = sessionByOption.get(key);
+                            if (chosen != null) {
+                                updateSelectedCliProject(client, chosen);
+                            }
+                            break;
+                        }
+                    }
+                    renderSection();
+                    pollSessionsOnce(true);
                 }
             }, null));
         });
+    }
+
+    private String cliSessionProjectKey(JSONObject session, String client) {
+        String path = cleanDisplayText(session.optString("projectPath", "")).replace("\\", "/").toLowerCase(Locale.ROOT);
+        if (!path.isEmpty()) {
+            return path;
+        }
+        return client + ":" + cliSessionProjectTitle(session, client).toLowerCase(Locale.ROOT);
+    }
+
+    private void updateSelectedCliProject(String client, JSONObject session) {
+        String projectName = cliSessionProjectTitle(session, client);
+        String projectPath = cleanDisplayText(session.optString("projectPath", ""));
+        selectedCliProjectNames.put(client, projectName);
+        selectedCliProjectPaths.put(client, projectPath);
+        if (client.equals(section) && cliProjectTagView != null) {
+            cliProjectTagView.setText("项目：" + ellipsizeLabel(projectName, 8));
+        }
+    }
+
+    private String cliSessionPreview(JSONObject session) {
+        String preview = cleanDisplayText(session.optString("preview", ""));
+        if (!preview.isEmpty()) {
+            return preview;
+        }
+        JSONArray messages = session.optJSONArray("messages");
+        if (messages != null) {
+            for (int j = messages.length() - 1; j >= 0; j--) {
+                JSONObject msg = messages.optJSONObject(j);
+                String text = msg == null ? "" : cleanDisplayText(msg.optString("text", ""));
+                if (!text.isEmpty()) {
+                    return text;
+                }
+            }
+        }
+        return "";
     }
 
     private String cliSessionProjectTitle(JSONObject session, String client) {
@@ -5633,7 +6021,7 @@ public class MainActivity extends Activity {
     private View drawerEntry(String item) {
         LinearLayout row = horizontal();
         row.setGravity(Gravity.CENTER);
-        row.setPadding(dp(4), 0, dp(2), 0);
+        row.setPadding(dp(6), 0, dp(6), 0);
         row.setBackground(round(Color.argb(120, 255, 255, 255), dp(16), LINE));
         LinearLayout group = horizontal();
         group.setGravity(Gravity.CENTER);
@@ -5641,10 +6029,13 @@ public class MainActivity extends Activity {
         icon.setImageResource(drawerIconRes(item));
         icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
         icon.setPadding(dp(5), dp(5), dp(5), dp(5));
-        group.addView(icon, new LinearLayout.LayoutParams(dp(30), -1));
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(30), -1);
+        iconLp.setMargins(0, 0, dp(8), 0);
+        group.addView(icon, iconLp);
         TextView text = bold(label(item));
         text.setTextSize(16);
         text.setGravity(Gravity.CENTER_VERTICAL);
+        text.setIncludeFontPadding(true);
         text.setSingleLine(true);
         text.setEllipsize(TextUtils.TruncateAt.END);
         group.addView(text, new LinearLayout.LayoutParams(-2, -1));
@@ -5980,14 +6371,12 @@ public class MainActivity extends Activity {
                     lp.bottomMargin = keyboard;
                     composerHost.setLayoutParams(lp);
                 }
-                scrollToBottom();
             } else {
                 composerHost.setTranslationY(0);
                 composerHost.setPadding(0, 0, 0, dp(12));
                 if (lp != null && lp.bottomMargin != 0) {
                     lp.bottomMargin = 0;
                     composerHost.setLayoutParams(lp);
-                    scrollToBottom();
                 }
             }
         });
@@ -6123,7 +6512,94 @@ public class MainActivity extends Activity {
         if (contentScroll == null) {
             return;
         }
-        contentScroll.post(() -> contentScroll.fullScroll(View.FOCUS_DOWN));
+        contentScroll.post(() -> {
+            contentScroll.scrollTo(0, contentBottomScrollY(contentScroll));
+            updateScrollDock();
+        });
+    }
+
+    private void scrollToBottomIfLocalAuto() {
+        if (!localAutoScrollEnabled) {
+            return;
+        }
+        scrollToBottom();
+    }
+
+    private void updateScrollDock() {
+        if (scrollDock == null || contentScroll == null || content == null) {
+            return;
+        }
+        if (!isScrollableConversationSection() || contentBottomScrollY(contentScroll) <= dp(16)) {
+            scrollDock.setVisibility(View.GONE);
+            return;
+        }
+        scrollDock.removeAllViews();
+        if (scrollDockDirectionDown) {
+            scrollDock.addView(scrollDockButton("⇩", "最新聊天记录", () -> {
+                localAutoScrollEnabled = true;
+                scrollToBottom();
+            }));
+            scrollDock.addView(scrollDockButton("⌄", "当前气泡底部", () -> scrollCurrentContentChild(false)));
+        } else {
+            scrollDock.addView(scrollDockButton("⇧", "聊天记录顶部", () -> {
+                localAutoScrollEnabled = false;
+                if (contentScroll != null) {
+                    contentScroll.smoothScrollTo(0, 0);
+                }
+            }));
+            scrollDock.addView(scrollDockButton("⌃", "当前气泡顶部", () -> scrollCurrentContentChild(true)));
+        }
+        scrollDock.setVisibility(View.VISIBLE);
+    }
+
+    private boolean isScrollableConversationSection() {
+        return "chat".equals(section)
+                || "image".equals(section)
+                || "assistants".equals(section)
+                || "codex".equals(section)
+                || "claude".equals(section);
+    }
+
+    private Button scrollDockButton(String text, String description, Runnable action) {
+        Button b = iconButton(text);
+        b.setContentDescription(description);
+        b.setTextSize(18);
+        b.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(36), dp(36));
+        lp.setMargins(0, dp(5), 0, dp(5));
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private void scrollCurrentContentChild(boolean top) {
+        if (contentScroll == null || content == null || content.getChildCount() == 0) {
+            return;
+        }
+        int center = contentScroll.getScrollY() + contentScroll.getHeight() / 2;
+        View target = null;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < content.getChildCount(); i++) {
+            View child = content.getChildAt(i);
+            int childTop = child.getTop();
+            int childBottom = child.getBottom();
+            if (childTop <= center && childBottom >= center) {
+                target = child;
+                break;
+            }
+            int childCenter = childTop + Math.max(0, child.getHeight()) / 2;
+            int distance = Math.abs(childCenter - center);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                target = child;
+            }
+        }
+        if (target == null) {
+            return;
+        }
+        int nextY = top
+                ? Math.max(0, target.getTop() - dp(8))
+                : Math.max(0, target.getBottom() - contentScroll.getHeight() + dp(8));
+        contentScroll.smoothScrollTo(0, nextY);
     }
 
     private void scrollToBottomOnce(String key) {
