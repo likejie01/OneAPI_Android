@@ -14,19 +14,19 @@ import androidx.room.RoomDatabase;
         version = 1,
         exportSchema = false
 )
-public abstract class OneApiRoomDatabase extends RoomDatabase {
-    private static volatile OneApiRoomDatabase instance;
+public abstract class OneApiDatabase extends RoomDatabase {
+    private static volatile OneApiDatabase instance;
 
     public abstract ConversationDao conversationDao();
 
-    public static OneApiRoomDatabase get(Context context) {
+    public static OneApiDatabase get(Context context) {
         if (instance == null) {
-            synchronized (OneApiRoomDatabase.class) {
+            synchronized (OneApiDatabase.class) {
                 if (instance == null) {
                     instance = Room.databaseBuilder(
                                     context.getApplicationContext(),
-                                    OneApiRoomDatabase.class,
-                                    "oneapi-mobile.db")
+                                    OneApiDatabase.class,
+                                    "oneapi-native.db")
                             .build();
                 }
             }

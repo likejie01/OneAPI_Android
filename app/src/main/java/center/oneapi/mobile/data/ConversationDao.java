@@ -28,8 +28,11 @@ public abstract class ConversationDao {
     @Query("SELECT COUNT(*) FROM conversation_messages WHERE session_id = :sessionId")
     public abstract int messageCount(String sessionId);
 
-    @Query("SELECT * FROM (SELECT * FROM conversation_messages WHERE session_id = :sessionId ORDER BY sort_index DESC LIMIT :limit OFFSET :offset) ORDER BY sort_index ASC")
-    public abstract List<ConversationMessageEntity> messagePageFromEnd(String sessionId, int limit, int offset);
+    @Query("SELECT * FROM conversation_messages WHERE session_id = :sessionId AND sort_index < :beforeSort ORDER BY sort_index DESC LIMIT :limit")
+    public abstract List<ConversationMessageEntity> earlierMessagesDesc(String sessionId, int beforeSort, int limit);
+
+    @Query("SELECT * FROM (SELECT * FROM conversation_messages WHERE session_id = :sessionId ORDER BY sort_index DESC LIMIT :limit) ORDER BY sort_index ASC")
+    public abstract List<ConversationMessageEntity> latestMessages(String sessionId, int limit);
 
     @Query("DELETE FROM conversation_messages WHERE session_id = :sessionId")
     public abstract void deleteMessagesForSession(String sessionId);

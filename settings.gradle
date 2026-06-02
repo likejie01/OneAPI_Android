@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = 'OneAPIAndroidRebuild'
+rootProject.name = 'OneAPI_Android'
 include ':app'

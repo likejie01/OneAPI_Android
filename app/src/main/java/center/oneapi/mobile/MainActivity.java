@@ -1,480 +1,984 @@
 package center.oneapi.mobile;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
+import android.Manifest;
 import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.ContentValues;
-import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.LinearGradient;
-import android.graphics.Paint;
 import android.graphics.Rect;
-import android.graphics.Shader;
-import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
-import android.os.Build;
-import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
+import android.os.Bundle;
+import android.os.Build;
 import android.os.Looper;
-import android.provider.MediaStore;
-import android.text.Spannable;
-import android.text.SpannableString;
-import android.text.InputType;
+import android.os.ParcelFileDescriptor;
+import android.graphics.pdf.PdfRenderer;
+import android.provider.OpenableColumns;
 import android.text.TextUtils;
-import android.text.style.StyleSpan;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
-import android.webkit.JavascriptInterface;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ProgressBar;
+import android.widget.PopupWindow;
+import android.widget.SeekBar;
 import android.widget.ScrollView;
-import android.widget.Spinner;
-import android.widget.TableLayout;
-import android.widget.TableRow;
+import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+import androidx.core.content.FileProvider;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import center.oneapi.mobile.data.ConversationRepository;
-import center.oneapi.mobile.data.ConversationSessionEntity;
-import center.oneapi.mobile.data.ConversationMessageEntity;
-import center.oneapi.mobile.data.OneApiRoomDatabase;
-
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.io.DataOutputStream;
 import java.net.HttpURLConnection;
-import java.net.URLEncoder;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
+import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import center.oneapi.mobile.core.ApiClient;
+import center.oneapi.mobile.core.AppPrefs;
+import center.oneapi.mobile.data.ConversationMessageEntity;
+import center.oneapi.mobile.data.ConversationRepository;
+import center.oneapi.mobile.data.ConversationSessionEntity;
+import center.oneapi.mobile.features.audio.AudioTranscriptionController;
+import center.oneapi.mobile.features.billing.BillingController;
+import center.oneapi.mobile.features.chat.ChatController;
+import center.oneapi.mobile.features.desktop.DesktopController;
+import center.oneapi.mobile.features.desktop.DesktopRepository;
+import center.oneapi.mobile.features.image.ImageController;
+import center.oneapi.mobile.features.image.ImageAssistantCatalog;
+import center.oneapi.mobile.features.status.StatusController;
+import center.oneapi.mobile.navigation.AppSection;
+import center.oneapi.mobile.ui.FlowBackgroundView;
+import center.oneapi.mobile.ui.FrostedOverlayView;
+import center.oneapi.mobile.ui.UiKit;
+import center.oneapi.mobile.ui.composer.FlowTagLayout;
+import center.oneapi.mobile.ui.composer.ComposerState;
+import center.oneapi.mobile.ui.composer.ComposerView;
+import center.oneapi.mobile.ui.conversation.ConversationAdapter;
+import center.oneapi.mobile.ui.conversation.ConversationDisplayItem;
+import center.oneapi.mobile.ui.conversation.ScrollDock;
 
 public class MainActivity extends Activity {
-    private static final int REQ_PICK_IMAGE = 701;
-    private static final int BLUE = Color.rgb(54, 104, 240);
-    private static final int INDIGO = Color.rgb(91, 77, 215);
-    private static final int CYAN = Color.rgb(54, 177, 220);
-    private static final int MINT = Color.rgb(73, 190, 143);
-    private static final int INK = Color.rgb(23, 31, 48);
-    private static final int MUTED = Color.rgb(91, 103, 123);
-    private static final int LINE = Color.argb(88, 145, 160, 184);
-    private static final int GLASS = Color.argb(205, 255, 255, 255);
-    private static final int GLASS_SOFT = Color.argb(158, 255, 255, 255);
-    private static final int INITIAL_RENDER_ITEM_COUNT = 24;
-    private static final int RENDER_PAGE_INCREMENT = 24;
-    private static final int RENDER_CHUNK_SIZE = 6;
-
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private SharedPreferences prefs;
-
-    private FrameLayout shell;
-    private LinearLayout root;
+    private static final int REQ_IMAGE = 42;
+    private static final int REQ_RECORD_AUDIO = 43;
+    private final Map<AppSection, SectionState> states = new EnumMap<>(AppSection.class);
+    private final List<Uri> selectedAttachments = new ArrayList<>();
+    private final Map<AppSection, LinearLayout> navButtons = new EnumMap<>(AppSection.class);
+    private final Map<String, String> chatAssistantPrompts = new HashMap<>();
+    private final Map<String, String> imageAssistantPrompts = new HashMap<>();
+    private AppSection currentSection = AppSection.CHAT;
+    private RecyclerView recyclerView;
+    private ConversationAdapter adapter;
+    private ComposerView composerView;
+    private ScrollDock scrollDock;
+    private TextView titleView;
     private FrameLayout contentFrame;
-    private LinearLayout content;
-    private LinearLayout composerHost;
-    private LinearLayout scrollDock;
-    private RecyclerView conversationList;
-    private ConversationAdapter conversationAdapter;
-    private View loadingOverlay;
-    private LinearLayout topNav;
-    private TextView navMenuSeparator;
-    private LinearLayout timeline;
-    private LinearLayout interactionBar;
-    private ScrollView contentScroll;
-    private TextView statusText;
-    private TextView cliProjectTagView;
-    private EditText activeInput;
-    private Spinner modelSpinner;
-    private Spinner reasoningSpinner;
-    private Spinner permissionSpinner;
-    private ImageButton activeSendButton;
-    private LinearLayout attachmentPreviewHost;
-    private FlowLayout extensionPreviewHost;
-    private View extensionPrimaryTag;
-    private LinearLayout logDetailHost;
-    private String activeComposerMode = "";
-    private String selectedCliModel = "";
-    private String selectedReasoning = "关闭思考";
-    private String selectedPermission = "受限模式";
-    private String selectedChatModel = "";
-    private String selectedChatAssistant = "默认助手";
-    private String selectedImageAssistant = "通用绘图";
-    private String selectedImageSize = "1024x1024";
-    private String selectedImageQuality = "标准";
-    private String selectedContextWindow = "自动";
-    private String selectedCliSession = "会话记录";
-    private String selectedSkillPlugin = "默认";
-    private String selectedRecentJobId = "";
-    private String activeChatSessionId = "";
-    private String activeImageSessionId = "";
-    private String selectedCodexModel = "";
-    private String selectedClaudeModel = "";
-    private boolean imageRandomSeed = false;
-    private boolean requestRunning = false;
-    private final Set<String> cliRefreshRunningClients = Collections.synchronizedSet(new HashSet<>());
-    private boolean desktopSessionsRefreshRunning = false;
-    private boolean localAutoScrollEnabled = true;
-    private boolean scrollDockDirectionDown = true;
-    private int currentKeyboardHeight = 0;
-    private int lastContentScrollY = 0;
-    private long lastCliRefreshAt = 0L;
-    private float swipeStartX = 0f;
-    private float swipeStartY = 0f;
-    private long lastExitSwipeAt = 0L;
-    private int lastExitSwipeDirection = 0;
-    private long suppressSwipeUntil = 0L;
-    private final Map<String, String> cliTimelineSignatures = new HashMap<>();
-    private final Map<String, JSONArray> cliTimelineCache = new HashMap<>();
-    private final Map<String, Integer> localVisibleMessageCounts = new HashMap<>();
-    private final Map<String, Integer> timelineVisibleItemCounts = new HashMap<>();
-    private final Map<String, String> localConversationRawCache = new HashMap<>();
-    private final Map<String, JSONObject> localConversationRootCache = new HashMap<>();
-    private JSONArray cachedDesktopSessions = new JSONArray();
-    private String pendingAndroidUpdateUrl = "";
-    private String pendingAndroidUpdateVersion = "";
-    private Uri downloadedAndroidUpdateUri = null;
-    private boolean updateDownloading = false;
-    private Runnable pendingComposerKeyboardRunnable = null;
-    private final Set<String> autoScrolledSections = new HashSet<>();
-    private final Set<String> expandedLogIds = new HashSet<>();
-    private final List<Uri> selectedAttachmentUris = new ArrayList<>();
-    private final Map<String, List<JSONObject>> selectedExtensionRefsByClient = new HashMap<>();
-    private final Map<String, String> markdownHtmlCache = new LinkedHashMap<>();
-    private View activeBubbleActions;
-    private int renderGeneration = 0;
-    private final List<ConversationUiItem> currentConversationItems = new ArrayList<>();
-    private int currentConversationGeneration = 0;
-
-    private String section = "chat";
-    private String boundDeviceId = "";
-    private String sessionId = "android-" + UUID.randomUUID();
-    private boolean polling = false;
-    private final Map<String, String> selectedCliSessionIds = new HashMap<>();
-    private final Map<String, String> selectedCliProjectNames = new HashMap<>();
-    private final Map<String, String> selectedCliProjectPaths = new HashMap<>();
-    private final List<String> codexModels = new ArrayList<>();
-    private final List<String> claudeModels = new ArrayList<>();
-    private final List<String> chatModels = new ArrayList<>();
-    private final List<JSONObject> chatAssistants = new ArrayList<>();
-    private final List<JSONObject> imageAssistants = new ArrayList<>();
+    private ScrollView pageScroll;
+    private LinearLayout pageContent;
+    private LinearLayout aiChatHeader;
+    private LinearLayout aiChatTopNav;
+    private AppPrefs prefs;
+    private ApiClient apiClient;
+    private ChatController chatController;
+    private ImageController imageController;
+    private AudioTranscriptionController audioTranscriptionController;
+    private DesktopController desktopController;
+    private DesktopRepository desktopRepository;
+    private StatusController statusController;
+    private BillingController billingController;
+    private ConversationRepository conversationRepository;
+    private final Runnable desktopPoll = new Runnable() {
+        @Override
+        public void run() {
+            if (currentSection.isDesktop()) {
+                refreshDesktopSessions(currentSection);
+            }
+            mainHandler.postDelayed(this, 8000);
+        }
+    };
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private boolean keyboardOpen;
+    private static final Pattern MARKDOWN_IMAGE = Pattern.compile("!\\[[^\\]]*\\]\\(([^)]+)\\)");
+    private boolean voiceListening;
+    private boolean voiceAutoSubmitted;
 
     @Override
-    protected void onCreate(Bundle bundle) {
-        super.onCreate(bundle);
-        prefs = getSharedPreferences("oneapi_mobile", MODE_PRIVATE);
-        if (prefs.getString("app_id", "").isEmpty()) {
-            prefs.edit().putString("app_id", "android-" + UUID.randomUUID()).apply();
-        }
-        boundDeviceId = prefs.getString("bound_device_id", "");
-        seedModels();
-        loadSelections();
-        loadDesktopSessionCache();
-        if (prefs.getString("cookie", "").isEmpty()) {
-            showLogin();
-        } else {
-            showMain();
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        prefs = new AppPrefs(this);
+        apiClient = new ApiClient(prefs);
+        chatController = new ChatController(apiClient);
+        imageController = new ImageController(apiClient);
+        audioTranscriptionController = new AudioTranscriptionController(apiClient);
+        desktopController = new DesktopController(apiClient);
+        desktopRepository = new DesktopRepository(apiClient);
+        statusController = new StatusController(apiClient);
+        billingController = new BillingController(apiClient);
+        conversationRepository = new ConversationRepository(this);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        seedState();
+        buildShell();
+        loadStoredLocalSessions(AppSection.CHAT);
+        loadStoredLocalSessions(AppSection.IMAGE);
+        switchSection(AppSection.CHAT);
+        refreshModels();
+        refreshAssistants();
+        mainHandler.postDelayed(desktopPoll, 8000);
+        if (!prefs.isLoggedIn()) {
+            mainHandler.postDelayed(() -> showLoginDialog(false), 300);
         }
     }
 
     @Override
     protected void onDestroy() {
-        polling = false;
-        executor.shutdownNow();
+        network.shutdownNow();
+        mainHandler.removeCallbacks(desktopPoll);
+        stopVoiceRecognition();
         super.onDestroy();
+    }
+
+    private void buildShell() {
+        FrameLayout root = new FrameLayout(this);
+        root.addView(new FlowBackgroundView(this), new FrameLayout.LayoutParams(-1, -1));
+        root.addView(new FrostedOverlayView(this), new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout main = UiKit.vertical(this);
+        main.setClipToPadding(false);
+        main.setClipChildren(false);
+        main.setPadding(0, 0, 0, 0);
+        root.addView(main, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout header = UiKit.horizontal(this);
+        aiChatHeader = header;
+        header.setPadding(UiKit.dp(this, 18), UiKit.dp(this, 10), UiKit.dp(this, 18), UiKit.dp(this, 6));
+        header.setBackground(UiKit.glass(this, 0, Color.TRANSPARENT));
+        LinearLayout topNav = UiKit.horizontal(this);
+        aiChatTopNav = topNav;
+        addNav(topNav, AppSection.CHAT, R.drawable.nav_chat);
+        addHeaderDot(topNav);
+        addNav(topNav, AppSection.IMAGE, R.drawable.nav_image);
+        addHeaderDot(topNav);
+        addNav(topNav, AppSection.CODEX, R.drawable.nav_codex);
+        addHeaderDot(topNav);
+        addNav(topNav, AppSection.CLAUDE, R.drawable.nav_claude);
+        addHeaderDot(topNav);
+        header.addView(topNav, new LinearLayout.LayoutParams(0, UiKit.dp(this, 42), 1f));
+        Button menu = UiKit.ghostButton(this, "☰");
+        menu.setContentDescription("打开菜单");
+        menu.setTextSize(20);
+        menu.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        menu.setOnClickListener(v -> openDrawer());
+        LinearLayout.LayoutParams menuLp = new LinearLayout.LayoutParams(UiKit.dp(this, 42), UiKit.dp(this, 42));
+        menuLp.setMargins(UiKit.dp(this, 8), 0, 0, 0);
+        header.addView(menu, menuLp);
+        titleView = UiKit.text(this, "", UiKit.MUTED, 1);
+        titleView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams headerLp = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
+        headerLp.topMargin = UiKit.dp(this, 34);
+        root.addView(header, headerLp);
+
+        contentFrame = new FrameLayout(this);
+        contentFrame.setClipToPadding(false);
+        contentFrame.setClipChildren(false);
+        main.addView(contentFrame, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        pageScroll = new ScrollView(this);
+        pageScroll.setClipToPadding(false);
+        pageContent = UiKit.vertical(this);
+        pageContent.setPadding(UiKit.dp(this, 18), UiKit.dp(this, 92), UiKit.dp(this, 18), UiKit.dp(this, 18));
+        pageScroll.addView(pageContent, new ScrollView.LayoutParams(-1, -2));
+        contentFrame.addView(pageScroll, new FrameLayout.LayoutParams(-1, -1));
+
+        recyclerView = new RecyclerView(this);
+        recyclerView.setClipToPadding(true);
+        recyclerView.setClipChildren(true);
+        recyclerView.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 92), UiKit.dp(this, 26), UiKit.dp(this, 8));
+        recyclerView.setItemAnimator(null);
+        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        adapter = new ConversationAdapter(this, new ConversationAdapter.Listener() {
+            @Override
+            public void onEdit(ConversationDisplayItem item) {
+                editMessage(item);
+            }
+
+            @Override
+            public void onDelete(ConversationDisplayItem item) {
+                deleteMessage(item);
+            }
+        });
+        recyclerView.setAdapter(adapter);
+        contentFrame.addView(recyclerView, new FrameLayout.LayoutParams(-1, -1));
+
+        scrollDock = new ScrollDock(this);
+        FrameLayout.LayoutParams dockLp = new FrameLayout.LayoutParams(UiKit.dp(this, 24), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        dockLp.rightMargin = UiKit.dp(this, 3);
+        contentFrame.addView(scrollDock, dockLp);
+        scrollDock.bind(recyclerView, contentFrame);
+
+        composerView = new ComposerView(this);
+        composerView.setListener(new ComposerView.Listener() {
+            @Override
+            public void onSend(String text) {
+                sendMessage(text);
+            }
+
+            @Override
+            public void onHistory() {
+                showSessionDialog();
+            }
+
+            @Override
+            public void onModel() {
+                showModelDialog();
+            }
+
+            @Override
+            public void onAssistant() {
+                showAssistantDialog();
+            }
+
+            @Override
+            public void onImageSize() {
+                showImageSizeDialog();
+            }
+
+            @Override
+            public void onImageQuality() {
+                showImageQualityDialog();
+            }
+
+            @Override
+            public void onReasoning() {
+                showReasoningDialog();
+            }
+
+            @Override
+            public void onContext() {
+                showContextDialog();
+            }
+
+            @Override
+            public void onAttach() {
+                pickImage();
+            }
+
+            @Override
+            public void onSkill() {
+                showSkillDialog();
+            }
+
+            @Override
+            public void onPermissionToggle() {
+                togglePermission();
+            }
+
+            @Override
+            public void onRemoveSkill(String skill) {
+                SectionState state = state();
+                if (state != null) {
+                    state.selectedSkills.remove(skill);
+                    composerView.updateState(composerStateFor(state.current(), state));
+                }
+            }
+
+            @Override
+            public void onPreviewAttachment(Uri uri) {
+                previewAttachment(uri);
+            }
+
+            @Override
+            public void onRemoveAttachment(Uri uri) {
+                selectedAttachments.remove(uri);
+                updateAttachmentPreview();
+            }
+
+            @Override
+            public void onVoiceModeChanged(boolean voiceMode) {
+                if (voiceMode) {
+                    hideKeyboard();
+                } else {
+                    stopVoiceRecognition();
+                }
+            }
+
+            @Override
+            public void onVoiceMic() {
+                toggleVoiceRecognition();
+            }
+        });
+        main.addView(composerView, new LinearLayout.LayoutParams(-1, -2));
+
+        setContentView(root);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(() -> adjustForKeyboard(root));
+        recyclerView.setOnTouchListener((v, event) -> {
+            hideKeyboard();
+            return false;
+        });
+        recyclerView.addOnItemTouchListener(new RecyclerView.SimpleOnItemTouchListener() {
+            @Override
+            public boolean onInterceptTouchEvent(RecyclerView rv, android.view.MotionEvent event) {
+                if (keyboardOpen && event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                    hideKeyboard();
+                }
+                return false;
+            }
+        });
+        pageScroll.setOnTouchListener((v, event) -> {
+            hideKeyboard();
+            return false;
+        });
+    }
+
+    private void hideKeyboard() {
+        try {
+            InputMethodManager manager = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            View focus = getCurrentFocus();
+            if (manager != null && focus != null) {
+                manager.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+                focus.clearFocus();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void toggleVoiceRecognition() {
+        if (voiceListening || (audioTranscriptionController != null && audioTranscriptionController.isRunning())) {
+            stopVoiceRecognition();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_RECORD_AUDIO);
+            return;
+        }
+        startVoiceRecognition();
+    }
+
+    private void startVoiceRecognition() {
+        hideKeyboard();
+        composerView.setInputText("");
+        composerView.setVoiceListening(true);
+        voiceAutoSubmitted = false;
+        network.execute(() -> {
+            try {
+                audioTranscriptionController.start(this, new AudioTranscriptionController.Callback() {
+                    @Override
+                    public void onStatus(String status) {
+                        mainHandler.post(() -> Toast.makeText(MainActivity.this, status, Toast.LENGTH_SHORT).show());
+                    }
+
+                    @Override
+                    public void onReady() {
+                        mainHandler.post(() -> {
+                            voiceListening = true;
+                            composerView.setVoiceListening(true);
+                        });
+                    }
+
+                    @Override
+                    public void onText(String text, boolean fin) {
+                        mainHandler.post(() -> composerView.setInputText(text));
+                    }
+
+                    @Override
+                    public void onLevel(float level) {
+                        mainHandler.post(() -> composerView.setVoiceLevel(level));
+                    }
+
+                    @Override
+                    public void onError(String errorMessage) {
+                        mainHandler.post(() -> Toast.makeText(MainActivity.this, "语音识别失败：" + errorMessage, Toast.LENGTH_LONG).show());
+                    }
+
+                    @Override
+                    public void onAutoSubmit(String text) {
+                        mainHandler.post(() -> {
+                            String clean = text == null ? "" : text.trim();
+                            if (clean.isEmpty()) return;
+                            voiceAutoSubmitted = true;
+                            composerView.setInputText(clean);
+                            if (currentSection.isConversation()) {
+                                sendMessage(clean);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onClosed() {
+                        mainHandler.post(() -> {
+                            voiceListening = false;
+                            composerView.setVoiceListening(false);
+                        });
+                    }
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> {
+                    voiceListening = false;
+                    composerView.setVoiceListening(false);
+                    Toast.makeText(this, "无法开始语音识别：" + message(error), Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void stopVoiceRecognition() {
+        String text = audioTranscriptionController == null ? "" : audioTranscriptionController.stop();
+        voiceListening = false;
+        if (composerView != null) composerView.setVoiceListening(false);
+        if (!voiceAutoSubmitted && composerView != null && text != null && !text.trim().isEmpty()) composerView.setInputText(text.trim());
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_RECORD_AUDIO) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startVoiceRecognition();
+            } else {
+                Toast.makeText(this, "未授予录音权限，无法使用语音输入", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private void adjustForKeyboard(View root) {
+        Rect visible = new Rect();
+        root.getWindowVisibleDisplayFrame(visible);
+        int[] pos = new int[2];
+        root.getLocationOnScreen(pos);
+        int visibleBottom = visible.bottom - pos[1];
+        int keyboard = Math.max(0, root.getHeight() - visibleBottom);
+        if (keyboard > UiKit.dp(this, 120)) {
+            if (!keyboardOpen) {
+                keyboardOpen = true;
+            }
+            composerView.setTranslationY(-keyboard);
+            composerView.setKeyboardOpen(true);
+            contentFrame.setPadding(0, 0, 0, keyboard);
+            recyclerView.post(this::scrollToBottomNow);
+            recyclerView.postDelayed(this::scrollToBottomNow, 120);
+            recyclerView.postDelayed(this::scrollToBottomNow, 260);
+        } else {
+            keyboardOpen = false;
+            composerView.setTranslationY(0);
+            composerView.setKeyboardOpen(false);
+            contentFrame.setPadding(0, 0, 0, 0);
+        }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_PICK_IMAGE && resultCode == RESULT_OK && data != null) {
-            persistSelectedImagePermissions(data);
-            appendSelectedImages(data);
-            renderAttachmentPreview();
-            if (selectedAttachmentUris.isEmpty()) {
-                toast("未选择图片");
-            }
-        }
-    }
-
-    private void seedModels() {
-        codexModels.clear();
-        claudeModels.clear();
-        chatModels.clear();
-        Collections.addAll(codexModels, "gpt-5.4", "gpt-5.3-codex", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "mimo-v2.5-pro");
-        Collections.addAll(claudeModels, "claude-sonnet-4-6", "claude-opus-4-6", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5-pro");
-        Collections.addAll(chatModels, "gpt-5.4", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "mimo-v2.5-pro", "claude-sonnet-4-6");
-    }
-
-    private void loadSelections() {
-        selectedChatModel = prefs.getString("selected_chat_model", chatModels.isEmpty() ? "" : chatModels.get(0));
-        selectedCodexModel = prefs.getString("selected_codex_model", codexModels.isEmpty() ? "" : codexModels.get(0));
-        selectedClaudeModel = prefs.getString("selected_claude_model", claudeModels.isEmpty() ? "" : claudeModels.get(0));
-        selectedChatAssistant = prefs.getString("selected_chat_assistant", selectedChatAssistant);
-        selectedImageAssistant = prefs.getString("selected_image_assistant", selectedImageAssistant);
-        selectedImageSize = prefs.getString("selected_image_size", selectedImageSize);
-        selectedImageQuality = prefs.getString("selected_image_quality", selectedImageQuality);
-        if (!"标准".equals(selectedImageQuality) && !"高清".equals(selectedImageQuality)) {
-            selectedImageQuality = "高清".equals(selectedImageQuality) || "极致".equals(selectedImageQuality) ? "高清" : "标准";
-            prefs.edit().putString("selected_image_quality", selectedImageQuality).apply();
-        }
-        selectedContextWindow = prefs.getString("selected_context_window", selectedContextWindow);
-        selectedReasoning = prefs.getString("selected_reasoning", selectedReasoning);
-        selectedPermission = prefs.getString("selected_permission", selectedPermission);
-        if ("默认模型".equals(selectedChatModel)) {
-            selectedChatModel = chatModels.isEmpty() ? "" : chatModels.get(0);
-        }
-        if ("默认模型".equals(selectedCodexModel)) {
-            selectedCodexModel = codexModels.isEmpty() ? "" : codexModels.get(0);
-        }
-        if ("默认模型".equals(selectedClaudeModel)) {
-            selectedClaudeModel = claudeModels.isEmpty() ? "" : claudeModels.get(0);
-        }
-    }
-
-    private void showLogin() {
-        polling = false;
-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        shell = new FrameLayout(this);
-        shell.addView(new FlowBackgroundView(this), new FrameLayout.LayoutParams(-1, -1));
-        shell.addView(new FrostedOverlayView(this), new FrameLayout.LayoutParams(-1, -1));
-        prefs.edit().putString("server", "https://ai.oneapi.center").apply();
-        LinearLayout page = vertical();
-        page.setPadding(dp(24), dp(62), dp(24), dp(24));
-        page.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout card = glassPanel();
-        card.setPadding(dp(22), dp(30), dp(22), dp(28));
-        card.addView(title("OneAPI"));
-        card.addView(gap(12));
-        card.addView(copy("登录后绑定 PC/Mac 客户端，手机端发送 Codex/Claude 指令，桌面端执行并同步日志。"));
-        card.addView(gap(18));
-        EditText username = input("账号");
-        EditText password = input("密码");
-        password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        Button login = primary("登录");
-        login.setOnClickListener(v -> {
-            hideKeyboard(password);
-            prefs.edit().putString("server", "https://ai.oneapi.center").apply();
-            runNetwork(() -> {
-                JSONObject body = new JSONObject();
-                body.put("username", trim(username));
-                body.put("password", trim(password));
-                JSONObject envelope = api("POST", "/api/user/login", body);
-                JSONObject data = envelope.optJSONObject("data");
-                if (data != null) {
-                    prefs.edit().putString("user_id", String.valueOf(data.optInt("id"))).apply();
+        if (requestCode == REQ_IMAGE && resultCode == RESULT_OK && data != null) {
+            List<Uri> picked = new ArrayList<>();
+            ClipData clipData = data.getClipData();
+            if (clipData != null) {
+                for (int i = 0; i < clipData.getItemCount(); i++) {
+                    Uri uri = clipData.getItemAt(i).getUri();
+                    if (uri != null) picked.add(uri);
                 }
-                ui(() -> {
-                    showMain();
-                });
-            });
-        });
-        card.addView(username);
-        card.addView(gap(8));
-        card.addView(password);
-        card.addView(gap(18));
-        card.addView(login, new LinearLayout.LayoutParams(-1, dp(44)));
-        page.addView(card);
-        shell.addView(page, new FrameLayout.LayoutParams(-1, -1));
-        setContentView(shell);
+            } else if (data.getData() != null) {
+                picked.add(data.getData());
+            }
+            int limit = currentSection == AppSection.CHAT ? 5 : 1;
+            if (currentSection == AppSection.IMAGE) selectedAttachments.clear();
+            for (Uri uri : picked) {
+                if (selectedAttachments.size() >= limit) break;
+                try {
+                    getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Exception ignored) {
+                }
+                selectedAttachments.add(uri);
+            }
+            updateAttachmentPreview();
+            Toast.makeText(this, "已选择 " + selectedAttachments.size() + " 个附件", Toast.LENGTH_SHORT).show();
+        }
     }
 
-    private void showMain() {
-        polling = true;
-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        shell = new FrameLayout(this);
-        shell.addView(new FlowBackgroundView(this), new FrameLayout.LayoutParams(-1, -1));
-        shell.addView(new FrostedOverlayView(this), new FrameLayout.LayoutParams(-1, -1));
-        root = vertical();
-        root.setPadding(0, dp(34), 0, 0);
-        root.addView(header());
+    private void pickImage() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, currentSection == AppSection.CHAT);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(intent, REQ_IMAGE);
+    }
+
+    private void previewAttachment(Uri uri) {
+        String type = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        if (type != null && type.startsWith("image/")) {
+            showImageAttachmentPreview(uri);
+            return;
+        }
+        if (name.endsWith(".pdf") || "application/pdf".equals(type)) {
+            if (showPdfAttachmentPreview(uri)) return;
+        }
+        if (name.endsWith(".xlsx") || name.endsWith(".xlsm") || name.endsWith(".xls")) {
+            String sheet = readXlsxAttachment(uri, 200);
+            if (sheet != null && !sheet.trim().isEmpty()) {
+                showTextAttachmentPreview(displayName(uri), sheet, false);
+                return;
+            }
+        }
+        String text = readTextAttachment(uri, 60000);
+        if (text != null) {
+            showTextAttachmentPreview(displayName(uri), text, name.endsWith(".md") || name.endsWith(".markdown"));
+            return;
+        }
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, type == null ? "*/*" : type);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(intent, "打开附件"));
+        } catch (Exception error) {
+            Toast.makeText(this, "无法预览附件：" + message(error), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void showImageAttachmentPreview(Uri uri) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, displayName(uri)), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        ImageView image = new ImageView(this);
+        image.setImageURI(uri);
+        image.setAdjustViewBounds(true);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        panel.addView(image, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 420)));
+        overlay.addView(panel, plainCenteredModalLp());
+        overlay.setTag("plain_modal");
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void showTextAttachmentPreview(String title, String text, boolean markdown) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, title), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
         ScrollView scroll = new ScrollView(this);
-        contentScroll = scroll;
-        scroll.setClipToPadding(false);
-        scroll.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
-            scrollDockDirectionDown = scrollY >= oldScrollY;
-            lastContentScrollY = scrollY;
-            if ("chat".equals(section) || "image".equals(section) || "assistants".equals(section) || isCliSection()) {
-                localAutoScrollEnabled = isContentNearBottom(scroll);
+        if (markdown) {
+            LinearLayout body = UiKit.vertical(this);
+            new center.oneapi.mobile.ui.markdown.MarkdownViews(this).renderInto(body, text, null);
+            scroll.addView(body, new ScrollView.LayoutParams(-1, -2));
+        } else {
+            TextView body = UiKit.text(this, text, UiKit.INK, 13);
+            body.setTextIsSelectable(true);
+            scroll.addView(body, new ScrollView.LayoutParams(-1, -2));
+        }
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 420)));
+        overlay.addView(panel, plainCenteredModalLp());
+        overlay.setTag("plain_modal");
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private boolean showPdfAttachmentPreview(Uri uri) {
+        try {
+            ParcelFileDescriptor fd = getContentResolver().openFileDescriptor(uri, "r");
+            if (fd == null) return false;
+            PdfRenderer renderer = new PdfRenderer(fd);
+            if (renderer.getPageCount() <= 0) {
+                renderer.close();
+                fd.close();
+                return false;
             }
-            updateScrollDock();
+            PdfRenderer.Page page = renderer.openPage(0);
+            int maxWidth = Math.max(UiKit.dp(this, 260), getResources().getDisplayMetrics().widthPixels - UiKit.dp(this, 64));
+            float ratio = page.getWidth() / (float) Math.max(1, page.getHeight());
+            int width = maxWidth;
+            int height = Math.max(UiKit.dp(this, 240), (int) (width / Math.max(0.35f, ratio)));
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            bitmap.eraseColor(Color.WHITE);
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+            page.close();
+            renderer.close();
+            fd.close();
+            showBitmapAttachmentPreview(displayName(uri), bitmap);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void showBitmapAttachmentPreview(String title, Bitmap bitmap) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, title), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        ImageView image = new ImageView(this);
+        image.setImageBitmap(bitmap);
+        image.setAdjustViewBounds(true);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        panel.addView(image, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 420)));
+        overlay.addView(panel, plainCenteredModalLp());
+        overlay.setTag("plain_modal");
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void updateAttachmentPreview() {
+        if (composerView != null) {
+            composerView.updateAttachments(new ArrayList<>(selectedAttachments));
+        }
+    }
+
+    private String displayName(Uri uri) {
+        String fallback = uri == null ? "附件" : String.valueOf(uri.getLastPathSegment());
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String value = cursor.getString(0);
+                if (value != null && !value.trim().isEmpty()) return value.trim();
+            }
+        } catch (Exception ignored) {
+        }
+        return fallback == null || fallback.trim().isEmpty() ? "附件" : fallback;
+    }
+
+    private String readTextAttachment(Uri uri, int limit) {
+        String type = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        boolean textLike = (type != null && (type.startsWith("text/") || type.contains("json") || type.contains("xml")))
+                || name.endsWith(".txt") || name.endsWith(".json") || name.endsWith(".md") || name.endsWith(".markdown")
+                || name.endsWith(".csv") || name.endsWith(".log") || name.endsWith(".xml") || name.endsWith(".yaml") || name.endsWith(".yml");
+        if (!textLike) return null;
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            if (input == null) return null;
+            byte[] buffer = new byte[4096];
+            int read;
+            int total = 0;
+            while ((read = input.read(buffer)) != -1 && total < limit) {
+                int allowed = Math.min(read, limit - total);
+                output.write(buffer, 0, allowed);
+                total += allowed;
+            }
+            return output.toString(java.nio.charset.StandardCharsets.UTF_8.name());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String readXlsxAttachment(Uri uri, int maxRows) {
+        List<String> shared = new ArrayList<>();
+        Map<String, String> entries = new LinkedHashMap<>();
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ZipInputStream zip = new ZipInputStream(input)) {
+            if (input == null) return null;
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName();
+                if ("xl/sharedStrings.xml".equals(name) || name.startsWith("xl/worksheets/sheet")) {
+                    java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+                    byte[] buffer = new byte[4096];
+                    int read;
+                    while ((read = zip.read(buffer)) != -1 && output.size() < 800000) {
+                        output.write(buffer, 0, read);
+                    }
+                    entries.put(name, output.toString(java.nio.charset.StandardCharsets.UTF_8.name()));
+                }
+                zip.closeEntry();
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        String sharedXml = entries.get("xl/sharedStrings.xml");
+        if (sharedXml != null) {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("<t[^>]*>(.*?)</t>", java.util.regex.Pattern.DOTALL).matcher(sharedXml);
+            while (matcher.find()) {
+                shared.add(xmlText(matcher.group(1)));
+            }
+        }
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, String> entry : entries.entrySet()) {
+            if (!entry.getKey().startsWith("xl/worksheets/sheet")) continue;
+            out.append("## ").append(entry.getKey().replace("xl/worksheets/", "")).append('\n');
+            java.util.regex.Matcher rowMatcher = java.util.regex.Pattern.compile("<row[^>]*>(.*?)</row>", java.util.regex.Pattern.DOTALL).matcher(entry.getValue());
+            int rows = 0;
+            while (rowMatcher.find() && rows < maxRows) {
+                List<String> cells = new ArrayList<>();
+                java.util.regex.Matcher cellMatcher = java.util.regex.Pattern.compile("<c([^>]*)>(.*?)</c>", java.util.regex.Pattern.DOTALL).matcher(rowMatcher.group(1));
+                while (cellMatcher.find()) {
+                    String attrs = cellMatcher.group(1);
+                    String body = cellMatcher.group(2);
+                    java.util.regex.Matcher valueMatcher = java.util.regex.Pattern.compile("<v>(.*?)</v>", java.util.regex.Pattern.DOTALL).matcher(body);
+                    String value = "";
+                    if (valueMatcher.find()) value = xmlText(valueMatcher.group(1));
+                    if (attrs != null && attrs.contains("t=\"s\"")) {
+                        try {
+                            int index = Integer.parseInt(value.trim());
+                            value = index >= 0 && index < shared.size() ? shared.get(index) : value;
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    cells.add(value);
+                }
+                if (!cells.isEmpty()) {
+                    out.append("| ").append(TextUtils.join(" | ", cells)).append(" |\n");
+                    rows++;
+                }
+            }
+            if (rows >= maxRows) out.append("\n... 已截断预览\n");
+            break;
+        }
+        return out.length() == 0 ? null : out.toString();
+    }
+
+    private String xmlText(String value) {
+        return (value == null ? "" : value)
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+                .replaceAll("<[^>]+>", "")
+                .trim();
+    }
+
+    private void addNav(LinearLayout nav, AppSection section, int icon) {
+        LinearLayout wrapper = UiKit.vertical(this);
+        wrapper.setGravity(Gravity.CENTER);
+        ImageButton button = UiKit.imageButton(this, icon, section.label);
+        button.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        button.setOnClickListener(v -> switchSection(section));
+        wrapper.setOnClickListener(v -> switchSection(section));
+        wrapper.addView(button, new LinearLayout.LayoutParams(-1, 0, 1f));
+        View line = new View(this);
+        line.setBackground(UiKit.round(Color.TRANSPARENT, UiKit.dp(this, 2), Color.TRANSPARENT));
+        wrapper.addView(line, new LinearLayout.LayoutParams(UiKit.dp(this, 24), UiKit.dp(this, 3)));
+        navButtons.put(section, wrapper);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f);
+        lp.setMargins(UiKit.dp(this, 3), 0, UiKit.dp(this, 3), 0);
+        nav.addView(wrapper, lp);
+    }
+
+    private void addHeaderDot(LinearLayout nav) {
+        TextView dot = UiKit.text(this, "·", UiKit.MUTED, 18);
+        dot.setGravity(Gravity.CENTER);
+        nav.addView(dot, new LinearLayout.LayoutParams(UiKit.dp(this, 12), UiKit.dp(this, 38)));
+    }
+
+    private void switchSection(AppSection section) {
+        if (currentSection != section) {
+            selectedAttachments.clear();
+            updateAttachmentPreview();
+        }
+        currentSection = section;
+        for (Map.Entry<AppSection, LinearLayout> entry : navButtons.entrySet()) {
+            boolean selected = entry.getKey() == section;
+            LinearLayout wrapper = entry.getValue();
+            ImageButton icon = (ImageButton) wrapper.getChildAt(0);
+            View line = wrapper.getChildAt(1);
+            wrapper.setBackground(new ColorDrawable(Color.TRANSPARENT));
+            icon.setBackground(new ColorDrawable(Color.TRANSPARENT));
+            icon.setColorFilter(null);
+            line.setBackground(UiKit.round(selected ? UiKit.BLUE : Color.TRANSPARENT, UiKit.dp(this, 2), Color.TRANSPARENT));
+        }
+        boolean conversation = section.isConversation();
+        if (aiChatTopNav != null) aiChatTopNav.setVisibility(conversation ? View.VISIBLE : View.INVISIBLE);
+        if (aiChatHeader != null) aiChatHeader.setBackground(conversation ? UiKit.glass(this, 0, Color.TRANSPARENT) : new ColorDrawable(Color.TRANSPARENT));
+        recyclerView.setVisibility(conversation ? View.VISIBLE : View.GONE);
+        pageScroll.setVisibility(conversation ? View.GONE : View.VISIBLE);
+        composerView.setVisibility(conversation ? View.VISIBLE : View.GONE);
+        scrollDock.setVisibility(conversation ? View.VISIBLE : View.GONE);
+        renderCurrent(true);
+        if (section.isDesktop()) {
+            refreshDesktopSessions(section);
+        }
+    }
+
+    private void renderCurrent(boolean forceBottom) {
+        if (!currentSection.isConversation()) {
+            renderPage(currentSection);
+            return;
+        }
+        SectionState state = state();
+        ChatSession session = state.current();
+        composerView.updateState(composerStateFor(session, state));
+        List<ConversationDisplayItem> items = new ArrayList<>();
+        if (currentSection.isDesktop() && prefs.boundDeviceId().isEmpty()) {
+            items.add(ConversationDisplayItem.empty("未连接客户端。请先在系统设置中绑定 PC/Mac 客户端，绑定后才能同步会话并发送任务。"));
+        } else {
+            for (int i = 0; i < session.messages.size(); i++) {
+                ChatMessage message = session.messages.get(i);
+                if (message.log) {
+                    items.add(ConversationDisplayItem.log(message.text, message.timestamp, i));
+                } else {
+                    String text = currentSection.isDesktop() && "assistant".equals(message.role) ? desktopAttachmentTags(message.text) : message.text;
+                    items.add(ConversationDisplayItem.message(message.role, text, message.timestamp, i));
+                }
+            }
+        }
+        if (items.isEmpty()) {
+            items.add(ConversationDisplayItem.empty("暂无消息"));
+        }
+        adapter.submitList(items, () -> {
+            if (forceBottom) {
+                scrollToBottomNow();
+            }
         });
-        content = vertical();
-        content.setPadding(dp(18), dp(12), dp(18), dp(18));
-        scroll.addView(content);
-        contentFrame = new FrameLayout(this);
-        contentFrame.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
-        conversationList = new RecyclerView(this);
-        conversationList.setClipToPadding(false);
-        conversationList.setClipChildren(false);
-        conversationList.setPadding(dp(18), dp(12), dp(18), dp(18));
-        LinearLayoutManager conversationLayout = new LinearLayoutManager(this);
-        conversationLayout.setStackFromEnd(false);
-        conversationList.setLayoutManager(conversationLayout);
-        conversationList.setItemAnimator(null);
-        conversationList.setHasFixedSize(false);
-        conversationAdapter = new ConversationAdapter();
-        conversationList.setAdapter(conversationAdapter);
-        conversationList.setVisibility(View.GONE);
-        contentFrame.addView(conversationList, new FrameLayout.LayoutParams(-1, -1));
-        root.addView(contentFrame, new LinearLayout.LayoutParams(-1, 0, 1));
-        composerHost = vertical();
-        composerHost.setPadding(0, 0, 0, dp(12));
-        composerHost.setBackground(round(Color.argb(224, 255, 255, 255), dp(18), Color.TRANSPARENT));
-        root.addView(composerHost);
-        shell.addView(root, new FrameLayout.LayoutParams(-1, -1));
-        scrollDock = vertical();
-        scrollDock.setVisibility(View.GONE);
-        scrollDock.setPadding(0, 0, 0, 0);
-        FrameLayout.LayoutParams dockLp = new FrameLayout.LayoutParams(dp(24), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        dockLp.setMargins(0, 0, dp(5), 0);
-        shell.addView(scrollDock, dockLp);
-        setContentView(shell);
-        syncLocalConversationStoresToRoom();
-        refreshBottomNav();
-        renderSection();
-        refreshModels();
-        refreshAssistants(false);
-        refreshDevices(false);
-        refreshDesktopSessionsCache(true);
-        startPolling();
-        installKeyboardLift();
-        installSwipeNavigation();
     }
 
-    private View header() {
-        LinearLayout bar = horizontal();
-        bar.setPadding(dp(18), dp(10), dp(18), dp(6));
-        topNav = horizontal();
-        bar.addView(topNav, new LinearLayout.LayoutParams(0, dp(42), 1));
-        navMenuSeparator = copy("·");
-        navMenuSeparator.setTextColor(Color.rgb(112, 124, 146));
-        navMenuSeparator.setTextSize(18);
-        navMenuSeparator.setGravity(Gravity.CENTER);
-        bar.addView(navMenuSeparator, new LinearLayout.LayoutParams(dp(12), dp(42)));
-        Button menu = iconButton("☰");
-        menu.setContentDescription("打开菜单");
-        menu.setOnClickListener(v -> openDrawer());
-        LinearLayout.LayoutParams menuLp = new LinearLayout.LayoutParams(dp(42), dp(42));
-        menuLp.setMargins(dp(8), 0, 0, 0);
-        bar.addView(menu, menuLp);
-        statusText = copy(boundDeviceId.isEmpty() ? "未绑定设备" : "绑定设备 " + shortId(boundDeviceId));
-        return bar;
-    }
-
-    private void refreshBottomNav() {
-        if (topNav == null) {
-            return;
-        }
-        topNav.removeAllViews();
-        boolean mainSection = "chat".equals(section) || "image".equals(section) || "codex".equals(section) || "claude".equals(section) || "assistants".equals(section);
-        topNav.setVisibility(mainSection ? View.VISIBLE : View.INVISIBLE);
-        if (navMenuSeparator != null) {
-            navMenuSeparator.setVisibility(mainSection ? View.VISIBLE : View.INVISIBLE);
-        }
-        if (!mainSection) {
-            return;
-        }
-        String[] navItems = new String[]{"chat", "image", "codex", "claude"};
-        for (int i = 0; i < navItems.length; i++) {
-            String item = navItems[i];
-            View b = navImageButton(navDrawable(item), item.equals(section) || ("assistants".equals(section) && "chat".equals(item)));
-            b.setContentDescription(label(item));
-            b.setOnClickListener(v -> {
-                section = item;
-                localAutoScrollEnabled = true;
-                refreshBottomNav();
-                renderSection();
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1);
-            lp.setMargins(dp(3), 0, dp(3), 0);
-            topNav.addView(b, lp);
-            if (i < navItems.length - 1) {
-                TextView separator = copy("·");
-                separator.setGravity(Gravity.CENTER);
-                separator.setTextColor(Color.rgb(112, 124, 146));
-                separator.setTextSize(18);
-                topNav.addView(separator, new LinearLayout.LayoutParams(dp(12), dp(38)));
+    private void loadStoredLocalSessions(AppSection section) {
+        if (section != AppSection.CHAT && section != AppSection.IMAGE) return;
+        network.execute(() -> {
+            try {
+                List<ConversationSessionEntity> rows = conversationRepository.sessionsForMode(section.id);
+                if (rows.isEmpty()) return;
+                List<ChatSession> sessions = new ArrayList<>();
+                for (ConversationSessionEntity row : rows) {
+                    List<ChatMessage> messages = new ArrayList<>();
+                    List<ConversationMessageEntity> storedMessages = conversationRepository.latestMessages(row.sessionId, 80);
+                    for (ConversationMessageEntity item : storedMessages) {
+                        messages.add(new ChatMessage(item.role, item.text, item.timestamp));
+                    }
+                    sessions.add(new ChatSession(
+                            row.sessionId,
+                            row.title.isEmpty() ? row.groupName : row.title,
+                            row.groupName,
+                            row.projectName,
+                            messages
+                    ));
+                }
+                SectionState target = states.get(section);
+                mainHandler.post(() -> {
+                    if (target == null) return;
+                    target.sessions.clear();
+                    target.sessions.addAll(sessions);
+                    target.selectedIndex = 0;
+                    target.selectedSessionId = sessions.isEmpty() ? "" : sessions.get(0).id;
+                    if (currentSection == section) {
+                        renderCurrent(false);
+                    }
+                });
+            } catch (Exception ignored) {
             }
-        }
+        });
+    }
+
+    private void persistSession(AppSection section, ChatSession session) {
+        if (section != AppSection.CHAT && section != AppSection.IMAGE) return;
+        network.execute(() -> {
+            try {
+                ConversationSessionEntity entity = new ConversationSessionEntity();
+                entity.sessionId = session.id;
+                entity.mode = section.id;
+                entity.groupName = session.assistantLabel;
+                entity.title = session.title;
+                entity.projectName = session.projectLabel;
+                entity.projectPath = session.projectLabel;
+                entity.updatedAt = System.currentTimeMillis();
+                entity.preview = session.messages.isEmpty() ? "" : session.messages.get(session.messages.size() - 1).text;
+                List<ConversationMessageEntity> messages = new ArrayList<>();
+                for (int i = 0; i < session.messages.size(); i++) {
+                    ChatMessage source = session.messages.get(i);
+                    ConversationMessageEntity message = new ConversationMessageEntity();
+                    message.messageId = session.id + "-" + i + "-" + source.timestamp;
+                    message.sessionId = session.id;
+                    message.mode = section.id;
+                    message.kind = "message";
+                    message.role = source.role;
+                    message.contentType = "text";
+                    message.text = source.text;
+                    message.timestamp = source.timestamp;
+                    message.sortIndex = i;
+                    messages.add(message);
+                }
+                conversationRepository.replaceSessionMessages(entity, messages);
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private void openDrawer() {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(72, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setBackground(round(Color.rgb(247, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(20), dp(12), dp(20), dp(12));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold("菜单"), new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = iconButton("×");
-        close.setContentDescription("关闭菜单");
+        overlay.setBackgroundColor(Color.argb(96, 255, 255, 255));
+        LinearLayout panel = UiKit.vertical(this);
+        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.LINE));
+        panel.setPadding(UiKit.dp(this, 20), UiKit.dp(this, 12), UiKit.dp(this, 20), UiKit.dp(this, 12));
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "菜单"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
         close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 34), UiKit.dp(this, 34)));
         panel.addView(titleRow);
-        panel.addView(gap(8));
-        for (String item : new String[]{"assistants", "subscriptions", "service", "wallet", "settings"}) {
-            View entry = drawerEntry(item);
-            entry.setOnClickListener(v -> {
-                section = item;
-                localAutoScrollEnabled = true;
-                refreshBottomNav();
-                renderSection();
-                dialog.dismiss();
-            });
-            panel.addView(entry);
-        }
-        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(dp(236), -2);
-        panelLp.gravity = Gravity.END | Gravity.TOP;
-        panelLp.setMargins(0, dp(70), dp(14), 0);
+        panel.addView(UiKit.gap(this, 8));
+        addDrawerEntry(panel, "AI Chat", AppSection.CHAT, dialog);
+        addDrawerEntry(panel, "套餐订阅", AppSection.SUBSCRIPTIONS, dialog);
+        addDrawerEntry(panel, "服务状态", AppSection.SERVICE, dialog);
+        addDrawerEntry(panel, "我的钱包", AppSection.WALLET, dialog);
+        addDrawerEntry(panel, "系统设置", AppSection.SETTINGS, dialog);
+        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(UiKit.dp(this, 236), -2, Gravity.RIGHT | Gravity.TOP);
+        panelLp.setMargins(0, UiKit.dp(this, 70), UiKit.dp(this, 14), 0);
         overlay.addView(panel, panelLp);
         overlay.setOnClickListener(v -> dialog.dismiss());
         panel.setOnClickListener(v -> { });
@@ -488,2475 +992,780 @@ public class MainActivity extends Activity {
         Window shown = dialog.getWindow();
         if (shown != null) {
             shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+            applyWindowBlur(shown);
         }
     }
 
-    private void renderSection() {
-        if (content == null || composerHost == null) {
-            return;
+    private void adjustAnchoredDialog(FrameLayout overlay) {
+        View anchor = composerView == null ? null : composerView.lastActionAnchor();
+        if (anchor == null || !anchor.isShown() || overlay.getChildCount() == 0) return;
+        View panel = overlay.getChildAt(0);
+        if (!(panel.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        int[] pos = new int[2];
+        anchor.getLocationOnScreen(pos);
+        int maxHeight = Math.max(UiKit.dp(this, 180), overlay.getHeight() - UiKit.dp(this, 36));
+        panel.measure(
+                View.MeasureSpec.makeMeasureSpec(Math.max(1, overlay.getWidth() - UiKit.dp(this, 32)), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST));
+        shrinkScrollContentIfNeeded(panel, maxHeight);
+        panel.measure(
+                View.MeasureSpec.makeMeasureSpec(Math.max(1, overlay.getWidth() - UiKit.dp(this, 32)), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST));
+        int panelHeight = Math.max(panel.getMeasuredHeight(), UiKit.dp(this, 120));
+        int gap = Math.max(UiKit.dp(this, 44), anchor.getHeight()) + UiKit.dp(this, 12);
+        int top = pos[1] - panelHeight - gap;
+        if (top < UiKit.dp(this, 18)) top = pos[1] + anchor.getHeight() + gap;
+        int maxTop = Math.max(UiKit.dp(this, 18), overlay.getHeight() - panelHeight - UiKit.dp(this, 18));
+        top = Math.min(top, maxTop);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) panel.getLayoutParams();
+        lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        lp.topMargin = top;
+        lp.height = panelHeight > maxHeight ? maxHeight : -2;
+        panel.setLayoutParams(lp);
+        panel.setAlpha(1f);
+    }
+
+    private void shrinkScrollContentIfNeeded(View panel, int maxHeight) {
+        if (panel.getMeasuredHeight() <= maxHeight || !(panel instanceof ViewGroup)) return;
+        int overflow = panel.getMeasuredHeight() - maxHeight + UiKit.dp(this, 12);
+        ScrollView scroll = firstScrollView((ViewGroup) panel);
+        if (scroll == null || !(scroll.getLayoutParams() instanceof ViewGroup.LayoutParams)) return;
+        ViewGroup.LayoutParams lp = scroll.getLayoutParams();
+        if (lp.height <= 0) return;
+        lp.height = Math.max(UiKit.dp(this, 120), lp.height - overflow);
+        scroll.setLayoutParams(lp);
+    }
+
+    private ScrollView firstScrollView(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child instanceof ScrollView) return (ScrollView) child;
+            if (child instanceof ViewGroup) {
+                ScrollView nested = firstScrollView((ViewGroup) child);
+                if (nested != null) return nested;
+            }
         }
-        int generation = ++renderGeneration;
-        String targetSection = section;
-        hidePageLoading();
-        resetContentScrollPosition();
-        activeBubbleActions = null;
-        cliProjectTagView = null;
-        prepareSectionHost(targetSection);
-        clearContainer(content);
-        clearContainer(composerHost);
-        if (isConversationSection(targetSection)) {
-            showConversationLoading("正在加载" + label(targetSection) + "...");
+        return null;
+    }
+
+    private void addDrawerEntry(LinearLayout panel, String label, AppSection section, Dialog dialog) {
+        LinearLayout row = UiKit.horizontal(this);
+        row.setGravity(Gravity.CENTER);
+        row.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
+        row.setBackground(UiKit.round(Color.argb(120, 255, 255, 255), UiKit.dp(this, 16), UiKit.LINE));
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(drawerIconRes(section));
+        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        icon.setPadding(UiKit.dp(this, 5), UiKit.dp(this, 5), UiKit.dp(this, 5), UiKit.dp(this, 5));
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(UiKit.dp(this, 30), -1);
+        iconLp.setMargins(0, 0, UiKit.dp(this, 14), 0);
+        row.addView(icon, iconLp);
+        TextView text = UiKit.bold(this, label);
+        text.setTextSize(16);
+        text.setGravity(Gravity.CENTER_VERTICAL | Gravity.CENTER_HORIZONTAL);
+        row.addView(text, new LinearLayout.LayoutParams(-2, -1));
+        row.setOnClickListener(v -> {
+            dialog.dismiss();
+            switchSection(section);
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46));
+        lp.setMargins(0, UiKit.dp(this, 10), 0, 0);
+        panel.addView(row, lp);
+    }
+
+    private int drawerIconRes(AppSection section) {
+        if (section == AppSection.SUBSCRIPTIONS) return R.drawable.drawer_shop;
+        if (section == AppSection.SERVICE) return R.drawable.drawer_cloud;
+        if (section == AppSection.WALLET) return R.drawable.drawer_wallet;
+        if (section == AppSection.SETTINGS) return R.drawable.drawer_setting;
+        return R.drawable.drawer_aichat;
+    }
+
+    private void renderPage(AppSection section) {
+        pageContent.removeAllViews();
+        pageContent.addView(sectionTitle(section.label));
+        if (section == AppSection.SETTINGS) {
+            renderSettingsPage();
+        } else if (section == AppSection.WALLET) {
+            renderWalletPage();
+        } else if (section == AppSection.SERVICE) {
+            renderServicePage();
+        } else if (section == AppSection.SUBSCRIPTIONS) {
+            renderSubscriptionsPage();
         } else {
-            content.addView(centerLoadingView("正在加载" + label(targetSection) + "..."));
+            pageContent.addView(card("OneAPI", section.label));
         }
-        updateScrollDock();
-        renderSectionBody(targetSection, generation);
+        pageScroll.scrollTo(0, 0);
     }
 
-    private boolean isConversationSection(String value) {
-        return "chat".equals(value)
-                || "image".equals(value)
-                || "assistants".equals(value)
-                || "codex".equals(value)
-                || "claude".equals(value);
+    private void renderSettingsPage() {
+        LinearLayout announcements = cardPanel();
+        announcements.addView(UiKit.bold(this, "系统公告"));
+        announcements.addView(loadingRow("正在读取系统公告"));
+        pageContent.addView(announcements);
+        fetchInto(announcements, () -> statusController.announcements(), "系统公告");
+
+        LinearLayout devices = cardPanel();
+        devices.addView(UiKit.bold(this, "设备绑定"));
+        devices.setTag("devices_card");
+        if (!prefs.boundDeviceId().isEmpty()) {
+            Button unbind = UiKit.ghostButton(this, "解除绑定");
+            unbind.setTextColor(Color.rgb(216, 71, 86));
+            unbind.setOnClickListener(v -> unbindDevice(prefs.boundDeviceId()));
+            devices.addView(unbind, centeredButtonLp());
+        }
+        devices.addView(UiKit.text(this,
+                prefs.boundDeviceId().isEmpty() ? "未绑定设备" : "正在读取当前绑定设备：" + prefs.boundDeviceId(),
+                UiKit.MUTED,
+                14));
+        Button refresh = UiKit.ghostButton(this, "刷新设备");
+        refresh.setOnClickListener(v -> refreshDevices(devices));
+        devices.addView(refresh, centeredButtonLp());
+        pageContent.addView(devices);
+        refreshDevices(devices);
+
+        renderEffectsModule();
+
+        LinearLayout version = cardPanel();
+        version.addView(UiKit.bold(this, "版本信息"));
+        version.addView(UiKit.text(this, "当前版本：" + versionName(), UiKit.MUTED, 14));
+        Button update = UiKit.ghostButton(this, "检查更新");
+        update.setOnClickListener(v -> showUpdateDialog());
+        version.addView(update, centeredButtonLp());
+        pageContent.addView(version);
+
+        LinearLayout account = cardPanel();
+        account.addView(UiKit.bold(this, "账户"));
+        account.addView(UiKit.text(this,
+                prefs.username().isEmpty() ? "当前未记录登录账号" : "当前账号：" + prefs.username(),
+                UiKit.MUTED,
+                14));
+        Button logout = UiKit.ghostButton(this, "退出登录");
+        logout.setTextColor(Color.rgb(216, 71, 86));
+        logout.setOnClickListener(v -> {
+            prefs.setCookie("");
+            prefs.setUserId("");
+            prefs.setToken("");
+            prefs.setUsername("");
+            prefs.setBoundDeviceId("");
+            Toast.makeText(this, "已退出登录", Toast.LENGTH_SHORT).show();
+            renderCurrent(false);
+            showLoginDialog(false);
+        });
+        account.addView(logout, centeredButtonLp());
+        pageContent.addView(account);
     }
 
-    private void prepareSectionHost(String targetSection) {
-        boolean conversation = isConversationSection(targetSection);
-        if (contentScroll != null) {
-            contentScroll.setVisibility(conversation ? View.GONE : View.VISIBLE);
-        }
-        if (conversationList != null) {
-            conversationList.setVisibility(conversation ? View.VISIBLE : View.GONE);
-        }
-        if (!conversation) {
-            submitConversationItems(new ArrayList<>(), false);
-        }
+    private void applyWindowBlur(Window window) {
+        if (window == null || Build.VERSION.SDK_INT < 31) return;
+        window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
     }
 
-    private void renderSectionBody(String targetSection, int generation) {
-        if (generation != renderGeneration || !targetSection.equals(section) || content == null || composerHost == null) {
-            return;
-        }
-        activeBubbleActions = null;
-        cliProjectTagView = null;
-        clearContainer(content);
-        clearContainer(composerHost);
-        try {
-            if ("codex".equals(targetSection) || "claude".equals(targetSection)) {
-                renderCliWorkspace(targetSection);
-            } else if ("settings".equals(targetSection)) {
-                renderMe();
-            } else if ("assistants".equals(targetSection)) {
-                renderAiChat();
-            } else if ("subscriptions".equals(targetSection)) {
-                renderSubscriptions();
-            } else if ("service".equals(targetSection)) {
-                renderServiceStatus();
-            } else if ("wallet".equals(targetSection)) {
-                renderWallet();
-            } else if ("chat".equals(targetSection)) {
-                renderChat();
-            } else if ("image".equals(targetSection)) {
-                renderImage();
-            } else {
-                renderPlaceholder(label(targetSection));
-            }
-        } catch (Exception error) {
-            clearContainer(content);
-            clearContainer(composerHost);
-            if (isConversationSection(targetSection)) {
-                submitConversationItems(listConversationItem(ConversationUiItem.empty("页面渲染失败，请切换标签后重试。")), false);
-                if ("codex".equals(targetSection) || "claude".equals(targetSection)) {
-                    renderCliComposerOnly(targetSection);
-                } else if ("chat".equals(targetSection)) {
-                    composerHost.addView(composer("输入消息", "chat", this::sendChatMessage));
-                } else if ("image".equals(targetSection)) {
-                    composerHost.addView(composer("描述要生成或编辑的图片", "image", this::sendImageMessage));
-                }
-            } else {
-                content.addView(messageBubble("assistant", "页面渲染失败，请切换标签后重试。"));
-            }
-        }
-        updateScrollDock();
+    private void renderEffectsModule() {
+        LinearLayout panel = cardPanel();
+        panel.addView(UiKit.bold(this, "视效设置"));
+        Switch enabled = new Switch(this);
+        enabled.setText("启用毛玻璃特效");
+        enabled.setTextColor(UiKit.INK);
+        enabled.setTextSize(14);
+        enabled.setChecked(UiKit.effectsEnabled(this));
+        panel.addView(enabled, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 42)));
+        TextView blurValue = UiKit.text(this, String.valueOf(UiKit.blurStrength(this)), UiKit.MUTED, 13);
+        SeekBar blur = new SeekBar(this);
+        blur.setMax(50);
+        blur.setProgress(UiKit.blurStrength(this));
+        TextView alphaValue = UiKit.text(this, String.valueOf(UiKit.glassAlpha(this)), UiKit.MUTED, 13);
+        SeekBar alpha = new SeekBar(this);
+        alpha.setMax(255);
+        alpha.setProgress(UiKit.glassAlpha(this));
+        panel.addView(settingSliderRow("模糊强度", blur, blurValue));
+        panel.addView(settingSliderRow("透明度", alpha, alphaValue));
+        Runnable syncEnabled = () -> {
+            boolean on = enabled.isChecked();
+            blur.setEnabled(on);
+            alpha.setEnabled(on);
+        };
+        enabled.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putBoolean("effects_enabled", isChecked).apply();
+            syncEnabled.run();
+        });
+        blur.setOnSeekBarChangeListener(new SimpleSeekListener(progress -> {
+            getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putInt("blur_strength", progress).apply();
+            blurValue.setText(String.valueOf(progress));
+        }));
+        alpha.setOnSeekBarChangeListener(new SimpleSeekListener(progress -> {
+            getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putInt("glass_alpha", progress).apply();
+            alphaValue.setText(String.valueOf(progress));
+        }));
+        syncEnabled.run();
+        pageContent.addView(panel);
     }
 
-    private void renderChat() {
-        renderLocalConversation("chat");
-        composerHost.addView(composer("输入消息", "chat", this::sendChatMessage));
+    private View settingSliderRow(String label, SeekBar seekBar, TextView value) {
+        LinearLayout row = UiKit.horizontal(this);
+        row.setPadding(0, UiKit.dp(this, 6), 0, UiKit.dp(this, 6));
+        row.addView(UiKit.text(this, label, UiKit.MUTED, 13), new LinearLayout.LayoutParams(UiKit.dp(this, 70), -2));
+        row.addView(seekBar, new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f));
+        value.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        row.addView(value, new LinearLayout.LayoutParams(UiKit.dp(this, 42), UiKit.dp(this, 38)));
+        return row;
     }
 
-    private void renderImage() {
-        renderLocalConversation("image");
-        composerHost.addView(composer("描述要生成或编辑的图片", "image", this::sendImageMessage));
+    private void renderWalletPage() {
+        LinearLayout panel = cardPanel();
+        panel.addView(UiKit.bold(this, "钱包与消耗"));
+        panel.addView(loadingRow("正在同步钱包、账单和消耗记录"));
+        pageContent.addView(panel);
+        fetchInto(panel, () -> {
+            JSONObject root = new JSONObject();
+            root.put("profile", billingController.profile().opt("data"));
+            root.put("topups", billingController.topups().opt("data"));
+            root.put("usage", billingController.usage().opt("data"));
+            root.put("plans", billingController.plans().opt("data"));
+            root.put("subscriptions", billingController.subscriptions().opt("data"));
+            return root;
+        }, "钱包与消耗");
     }
 
-    private void renderAiChat() {
-        renderLocalConversation("chat");
-        composerHost.addView(composer("输入 AIChat 消息", "chat", this::sendChatMessage));
+    private void renderServicePage() {
+        LinearLayout panel = cardPanel();
+        panel.addView(UiKit.bold(this, "服务状态"));
+        panel.addView(loadingRow("正在读取服务状态"));
+        pageContent.addView(panel);
+        fetchInto(panel, () -> statusController.serviceStatus(), "服务状态");
     }
 
-    private void renderLocalConversation(String mode) {
-        renderLocalConversationNow(mode, true);
+    private void renderSubscriptionsPage() {
+        LinearLayout panel = cardPanel();
+        panel.addView(UiKit.bold(this, "套餐订阅"));
+        panel.addView(loadingRow("正在读取套餐列表"));
+        pageContent.addView(panel);
+        fetchInto(panel, () -> billingController.plans(), "套餐订阅");
     }
 
-    private void renderLocalConversationNow(String mode, boolean scrollLatest) {
-        if (content == null) {
-            return;
-        }
-        int generation = ++renderGeneration;
-        showPageLoading("正在加载聊天记录...");
-        resetContentScrollPosition();
-        clearContainer(content);
-        JSONArray messages = localConversationMessages(mode);
-        int visibleCount = localVisibleMessageCounts.getOrDefault(mode, INITIAL_RENDER_ITEM_COUNT);
-        int startIndex = Math.max(0, messages.length() - visibleCount);
-        if (messages.length() == 0) {
-            hidePageLoading();
-            submitConversationItems(listConversationItem(ConversationUiItem.empty("暂无聊天记录。点击会话记录可切换历史会话，或直接输入开始新会话。")), false);
-            updateScrollDock();
-            return;
-        }
-        List<ConversationUiItem> items = new ArrayList<>();
-        if (startIndex > 0) {
-            items.add(ConversationUiItem.loadEarlier("加载更早聊天记录（剩余 " + startIndex + " 条）", () -> {
-                localVisibleMessageCounts.put(mode, visibleCount + RENDER_PAGE_INCREMENT);
-                renderLocalConversationNow(mode, false);
-            }));
-        }
-        for (int i = startIndex; i < messages.length(); i++) {
-            JSONObject item = messages.optJSONObject(i);
-            if (item == null) {
-                continue;
-            }
-            String type = item.optString("type", "text");
-            String role = item.optString("role", "assistant");
-            String text = cleanDisplayText(item.optString("text", ""));
-            if (text.isEmpty()) {
-                continue;
-            }
-            long timestamp = item.optLong("timestamp", 0);
-            if ("image".equals(type)) {
-                items.add(ConversationUiItem.image(mode, role, text, timestamp, i));
-            } else {
-                String renderMode = (!"user".equals(role) && i < messages.length() - 3) ? mode + ":plain" : mode;
-                items.add(ConversationUiItem.message(renderMode, role, text, timestamp, i));
-            }
-        }
-        if (generation != renderGeneration) {
-            return;
-        }
-        hidePageLoading();
-        if (scrollLatest) {
-            localAutoScrollEnabled = true;
-        }
-        submitConversationItems(items, scrollLatest);
+    private TextView sectionTitle(String text) {
+        TextView view = UiKit.bold(this, text);
+        view.setTextSize(22);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, UiKit.dp(this, 4), 0, UiKit.dp(this, 14));
+        view.setLayoutParams(lp);
+        return view;
     }
 
-    private List<ConversationUiItem> listConversationItem(ConversationUiItem item) {
-        List<ConversationUiItem> items = new ArrayList<>();
-        items.add(item);
-        return items;
+    private LinearLayout cardPanel() {
+        LinearLayout panel = UiKit.vertical(this);
+        panel.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14), UiKit.dp(this, 16), UiKit.dp(this, 14));
+        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.LINE));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, 0, 0, UiKit.dp(this, 12));
+        panel.setLayoutParams(lp);
+        return panel;
     }
 
-    private void renderLocalConversationChunk(String mode, JSONArray messages, int startIndex, int index, int generation, boolean scrollLatest) {
-        if (generation != renderGeneration || content == null) {
-            return;
-        }
-        int end = Math.min(messages.length(), index + RENDER_CHUNK_SIZE);
-        for (int i = index; i < end; i++) {
-            JSONObject item = messages.optJSONObject(i);
-            if (item == null) {
-                continue;
-            }
-            String type = item.optString("type", "text");
-            String role = item.optString("role", "assistant");
-            String text = cleanDisplayText(item.optString("text", ""));
-            if (text.isEmpty()) {
-                continue;
-            }
-            long timestamp = item.optLong("timestamp", 0);
-            if ("image".equals(type)) {
-                content.addView(imageResultBubble(text, timestamp, mode, i, role));
-            } else {
-                String renderMode = (!"user".equals(role) && i < messages.length() - 3) ? mode + ":plain" : mode;
-                content.addView(messageBubble(role, text, timestamp, renderMode, i));
-            }
-        }
-        if (end < messages.length()) {
-            handler.post(() -> renderLocalConversationChunk(mode, messages, startIndex, end, generation, scrollLatest));
-            return;
-        }
-        hidePageLoading();
-        if (scrollLatest) {
-            localAutoScrollEnabled = true;
-            scrollToBottom();
-        }
-        updateScrollDock();
+    private LinearLayout card(String title, String desc) {
+        LinearLayout panel = cardPanel();
+        panel.addView(UiKit.bold(this, title));
+        panel.addView(UiKit.text(this, desc, UiKit.MUTED, 14));
+        return panel;
     }
 
     private View loadingRow(String text) {
-        LinearLayout row = vertical();
-        row.setGravity(Gravity.CENTER);
-        row.addView(new DrawingProgressView(this), new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout row = UiKit.horizontal(this);
+        ProgressBar progress = new ProgressBar(this);
+        progress.setIndeterminate(true);
+        row.addView(progress, new LinearLayout.LayoutParams(UiKit.dp(this, 28), UiKit.dp(this, 28)));
+        TextView label = UiKit.text(this, text, UiKit.MUTED, 14);
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        labelLp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
+        row.addView(label, labelLp);
+        return row;
+    }
+
+    private EditText input(String hint) {
+        EditText view = new EditText(this);
+        view.setTextSize(14);
+        view.setSingleLine(true);
+        view.setHint(hint);
+        view.setTextColor(UiKit.INK);
+        view.setHintTextColor(UiKit.MUTED);
+        view.setBackground(UiKit.round(Color.rgb(245, 248, 252), UiKit.dp(this, 14), UiKit.LINE));
+        view.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
+        return view;
+    }
+
+    private EditText searchInput(String hint) {
+        EditText view = input(hint);
+        view.setTextSize(13);
+        view.setSingleLine(true);
+        view.setMaxLines(1);
+        view.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        view.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
+        return view;
+    }
+
+    private void onSearchChanged(EditText input, Runnable change) {
+        input.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (change != null) change.run();
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+    }
+
+    private boolean matchesSearch(String text, String query) {
+        String clean = text == null ? "" : text.toLowerCase(Locale.ROOT);
+        String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        return needle.isEmpty() || clean.contains(needle);
+    }
+
+    private View labelRow(String label, View value) {
+        return labelRow(label, value, UiKit.dp(this, 42));
+    }
+
+    private View labelRow(String label, View value, int heightPx) {
+        LinearLayout row = UiKit.horizontal(this);
+        TextView text = UiKit.text(this, label, UiKit.MUTED, 13);
+        text.setGravity(Gravity.TOP | Gravity.LEFT);
+        row.addView(text, new LinearLayout.LayoutParams(UiKit.dp(this, 58), heightPx));
+        row.addView(value, new LinearLayout.LayoutParams(0, heightPx, 1f));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(18), 0, dp(18));
+        lp.setMargins(0, UiKit.dp(this, 5), 0, UiKit.dp(this, 5));
         row.setLayoutParams(lp);
         return row;
     }
 
-    private void clearContainer(LinearLayout group) {
-        if (group == null) {
-            return;
-        }
-        destroyWebViews(group);
-        group.removeAllViews();
+    private LinearLayout.LayoutParams centeredButtonLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 38));
+        lp.setMargins(0, UiKit.dp(this, 8), 0, 0);
+        return lp;
     }
 
-    private void destroyWebViews(View rootView) {
-        if (rootView == null) {
-            return;
-        }
-        if (rootView instanceof WebView) {
-            WebView web = (WebView) rootView;
+    private Button iconGlyphButton(String glyph) {
+        Button button = UiKit.ghostButton(this, glyph);
+        button.setTextSize(18);
+        button.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        return button;
+    }
+
+    private void doLogin(String username, String password) {
+        doLogin(username, password, null);
+    }
+
+    private void doLogin(String username, String password, Runnable onSuccess) {
+        network.execute(() -> {
             try {
-                web.stopLoading();
-                web.loadUrl("about:blank");
-                web.removeAllViews();
-                web.destroy();
-            } catch (Exception ignored) {
-            }
-            return;
-        }
-        if (rootView instanceof LinearLayout) {
-            LinearLayout group = (LinearLayout) rootView;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                destroyWebViews(group.getChildAt(i));
-            }
-        } else if (rootView instanceof FrameLayout) {
-            FrameLayout group = (FrameLayout) rootView;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                destroyWebViews(group.getChildAt(i));
-            }
-        } else if (rootView instanceof ScrollView) {
-            ScrollView group = (ScrollView) rootView;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                destroyWebViews(group.getChildAt(i));
-            }
-        }
-    }
-
-    private View centerLoadingView(String text) {
-        LinearLayout wrap = vertical();
-        wrap.setGravity(Gravity.CENTER);
-        wrap.setMinimumHeight(Math.max(dp(360), getResources().getDisplayMetrics().heightPixels - dp(260)));
-        ProgressBar progress = new ProgressBar(this);
-        progress.setIndeterminate(true);
-        wrap.addView(progress, new LinearLayout.LayoutParams(dp(46), dp(46)));
-        TextView label = copy(text);
-        label.setTextColor(MUTED);
-        label.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(-2, -2);
-        labelLp.setMargins(0, dp(10), 0, 0);
-        wrap.addView(label, labelLp);
-        return wrap;
-    }
-
-    private void showPageLoading(String text) {
-        if (shell == null) {
-            return;
-        }
-        if (loadingOverlay == null) {
-            FrameLayout overlay = new FrameLayout(this);
-            overlay.setClickable(true);
-            overlay.setBackgroundColor(Color.argb(18, 255, 255, 255));
-            LinearLayout card = vertical();
-            card.setGravity(Gravity.CENTER);
-            card.setPadding(dp(18), dp(16), dp(18), dp(16));
-            card.setBackground(round(Color.argb(236, 255, 255, 255), dp(18), Color.argb(96, 145, 160, 184)));
-            ProgressBar progress = new ProgressBar(this);
-            progress.setIndeterminate(true);
-            card.addView(progress, new LinearLayout.LayoutParams(dp(42), dp(42)));
-            TextView label = copy(text);
-            label.setTag("page_loading_text");
-            label.setTextColor(MUTED);
-            label.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(-2, -2);
-            labelLp.setMargins(0, dp(8), 0, 0);
-            card.addView(label, labelLp);
-            overlay.addView(card, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
-            loadingOverlay = overlay;
-        }
-        TextView label = taggedTextView(loadingOverlay, "page_loading_text");
-        if (label != null) {
-            label.setText(text);
-        }
-        if (loadingOverlay.getParent() == null) {
-            shell.addView(loadingOverlay, new FrameLayout.LayoutParams(-1, -1));
-        }
-        loadingOverlay.bringToFront();
-    }
-
-    private void hidePageLoading() {
-        if (loadingOverlay != null && loadingOverlay.getParent() instanceof FrameLayout) {
-            ((FrameLayout) loadingOverlay.getParent()).removeView(loadingOverlay);
-        }
-    }
-
-    private void showConversationLoading(String text) {
-        List<ConversationUiItem> items = new ArrayList<>();
-        items.add(ConversationUiItem.loading(text));
-        submitConversationItems(items, false);
-    }
-
-    private void submitConversationItems(List<ConversationUiItem> items, boolean scrollLatest) {
-        currentConversationItems.clear();
-        if (items != null) {
-            currentConversationItems.addAll(items);
-        }
-        if (conversationAdapter != null) {
-            conversationAdapter.setItems(currentConversationItems);
-        }
-        if (conversationList != null) {
-            conversationList.requestLayout();
-            conversationList.invalidate();
-            conversationList.post(() -> {
-                conversationList.requestLayout();
-                conversationList.invalidate();
-                updateScrollDock();
-            });
-        }
-        if (scrollLatest) {
-            scrollConversationToBottom();
-        }
-        updateScrollDock();
-    }
-
-    private void appendConversationItem(ConversationUiItem item, boolean scrollLatest) {
-        if (item == null) {
-            return;
-        }
-        currentConversationItems.add(item);
-        if (conversationAdapter != null) {
-            conversationAdapter.setItems(currentConversationItems);
-        }
-        if (conversationList != null) {
-            conversationList.requestLayout();
-            conversationList.invalidate();
-        }
-        if (scrollLatest) {
-            scrollConversationToBottom();
-        }
-    }
-
-    private void scrollConversationToBottom() {
-        if (conversationList == null || conversationAdapter == null || conversationAdapter.getItemCount() == 0) {
-            return;
-        }
-        int position = conversationAdapter.getItemCount() - 1;
-        conversationList.post(() -> {
-            conversationList.scrollToPosition(position);
-            conversationList.postDelayed(() -> conversationList.scrollToPosition(position), 40L);
-            conversationList.postDelayed(() -> conversationList.scrollToPosition(position), 120L);
-            conversationList.postDelayed(() -> conversationList.scrollToPosition(position), 280L);
-            conversationList.postDelayed(() -> {
-                conversationList.scrollToPosition(position);
-                updateScrollDock();
-            }, 520L);
-        });
-    }
-
-    private void renderPlaceholder(String name) {
-        content.addView(card(name, "暂无内容"));
-    }
-
-    private void renderSubscriptions() {
-        content.addView(sectionTitle("套餐订阅"));
-        LinearLayout list = vertical();
-        list.setTag("subscription_list");
-        content.addView(list);
-        list.addView(card("正在读取", "正在同步客户端套餐订阅内容。"));
-        refreshSubscriptions();
-    }
-
-    private void renderServiceStatus() {
-        content.addView(sectionTitle("服务状态"));
-        LinearLayout list = vertical();
-        list.setTag("service_status_list");
-        content.addView(list);
-        list.addView(card("正在读取", "正在同步客户端服务状态内容。"));
-        refreshServiceStatus();
-    }
-
-    private void renderWallet() {
-        content.addView(sectionTitle("我的钱包"));
-        LinearLayout list = vertical();
-        list.setTag("wallet_list");
-        content.addView(list);
-        list.addView(card("正在读取", "正在同步客户端钱包总览和最近账单。"));
-        refreshWallet();
-    }
-
-    private void renderMe() {
-        content.addView(sectionTitle("系统设置"));
-        renderAnnouncementsModule();
-
-        LinearLayout list = vertical();
-        list.setTag("device_list");
-        content.addView(list);
-        renderDeviceList(list, new JSONArray());
-        refreshDevices(true);
-
-        renderVersionModule();
-
-        LinearLayout account = cardPanel();
-        account.addView(bold("账户"));
-        account.addView(copy("服务器：" + prefs.getString("server", "")));
-        Button logout = danger("退出登录");
-        logout.setOnClickListener(v -> {
-            prefs.edit().remove("cookie").remove("user_id").remove("bound_device_id").apply();
-            boundDeviceId = "";
-            showLogin();
-        });
-        account.addView(gap(10));
-        account.addView(logout, compactCenteredButtonLp());
-        content.addView(account);
-    }
-
-    private void renderAnnouncementsModule() {
-        LinearLayout panel = cardPanel();
-        panel.setTag("announcements_panel");
-        panel.addView(bold("系统公告"));
-        panel.addView(copy("正在读取系统公告。"));
-        content.addView(panel);
-        refreshAnnouncements();
-    }
-
-    private void refreshAnnouncements() {
-        runNetworkQuiet(() -> {
-            JSONObject envelope = api("GET", "/api/status", null);
-            JSONObject data = envelope.optJSONObject("data");
-            JSONArray announcements = data == null ? null : data.optJSONArray("announcements");
-            JSONArray finalAnnouncements = announcements == null ? new JSONArray() : announcements;
-            ui(() -> {
-                View maybe = content == null ? null : content.findViewWithTag("announcements_panel");
-                if (maybe instanceof LinearLayout) {
-                    renderAnnouncementsList((LinearLayout) maybe, finalAnnouncements);
+                JSONObject body = new JSONObject();
+                body.put("username", username == null ? "" : username.trim());
+                body.put("password", password == null ? "" : password.trim());
+                JSONObject envelope = new ApiClient(prefs).post("/api/user/login", body);
+                JSONObject data = envelope.optJSONObject("data");
+                if (data != null) {
+                    prefs.setUserId(String.valueOf(data.optInt("id")));
                 }
-            });
+                prefs.setUsername(username);
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "登录成功", Toast.LENGTH_SHORT).show();
+                    if (onSuccess != null) onSuccess.run();
+                    refreshModels();
+                    refreshAssistants();
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> Toast.makeText(this, "登录失败：" + message(error), Toast.LENGTH_LONG).show());
+            }
         });
     }
 
-    private void renderAnnouncementsList(LinearLayout panel, JSONArray announcements) {
+    private void showLoginDialog(boolean cancelable) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setCancelable(cancelable);
+        FrameLayout overlay = modalOverlay();
+        overlay.setOnClickListener(v -> {
+            if (cancelable) dialog.dismiss();
+        });
+        LinearLayout panel = modalPanel();
+        panel.addView(UiKit.bold(this, "登录"));
+        prefs.setServer(AppPrefs.DEFAULT_SERVER);
+        EditText username = input("账号");
+        EditText password = input("密码");
+        password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        panel.addView(labelRow("账号", username));
+        panel.addView(labelRow("密码", password));
+        Button login = UiKit.ghostButton(this, "登录");
+        login.setOnClickListener(v -> {
+            prefs.setServer(AppPrefs.DEFAULT_SERVER);
+            doLogin(username.getText().toString(), password.getText().toString(), dialog::dismiss);
+        });
+        panel.addView(login, centeredButtonLp());
+        overlay.addView(panel, centeredModalLp());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void refreshDevices(LinearLayout panel) {
+        fetchInto(panel, () -> {
+            JSONObject out = new JSONObject();
+            out.put("boundDeviceId", prefs.boundDeviceId());
+            out.put("devices", desktopRepository.devices());
+            return out;
+        }, "设备绑定");
+    }
+
+    private void fetchInto(LinearLayout panel, JsonRequest request, String title) {
+        network.execute(() -> {
+            JSONObject result;
+            try {
+                result = request.run();
+            } catch (Exception error) {
+                result = new JSONObject();
+                try {
+                    result.put("error", message(error));
+                } catch (Exception ignored) {
+                }
+            }
+            JSONObject finalResult = result;
+            mainHandler.post(() -> renderJsonPanel(panel, title, finalResult));
+        });
+    }
+
+    private void renderJsonPanel(LinearLayout panel, String title, JSONObject result) {
         panel.removeAllViews();
-        panel.addView(bold("系统公告"));
-        if (announcements.length() == 0) {
-            panel.addView(copy("暂无系统公告。"));
+        panel.addView(UiKit.bold(this, title));
+        if (result.has("error")) {
+            panel.addView(UiKit.text(this, result.optString("error"), Color.rgb(176, 55, 55), 14));
             return;
         }
-        for (int i = 0; i < announcements.length(); i++) {
-            JSONObject item = announcements.optJSONObject(i);
-            if (item == null) {
-                continue;
-            }
-            Button entry = drawerButton(announcementPreview(item));
-            entry.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-            entry.setOnClickListener(v -> showAnnouncementDialog(item));
-            panel.addView(entry);
-        }
-    }
-
-    private String announcementPreview(JSONObject item) {
-        String content = item.optString("content", "").replace('\n', ' ').trim();
-        if (content.isEmpty()) {
-            content = item.optString("extra", "系统公告").replace('\n', ' ').trim();
-        }
-        if (content.length() > 26) {
-            content = content.substring(0, 26) + "...";
-        }
-        return content.isEmpty() ? "系统公告" : content;
-    }
-
-    private void showAnnouncementDialog(JSONObject item) {
-        StringBuilder text = new StringBuilder();
-        String content = item.optString("content", "").trim();
-        String extra = item.optString("extra", "").trim();
-        String publishDate = item.optString("publishDate", "").trim();
-        if (!content.isEmpty()) {
-            text.append(content);
-        }
-        if (!extra.isEmpty()) {
-            if (text.length() > 0) {
-                text.append("\n\n");
-            }
-            text.append(extra);
-        }
-        if (!publishDate.isEmpty()) {
-            if (text.length() > 0) {
-                text.append("\n\n");
-            }
-            text.append("发布时间：").append(publishDate);
-        }
-        showTextDialog("系统公告", text.length() == 0 ? "暂无公告详情。" : text.toString());
-    }
-
-    private void renderVersionModule() {
-        LinearLayout panel = cardPanel();
-        panel.addView(bold("版本信息"));
-        panel.addView(copy("当前版本：" + currentVersionName()));
-        TextView progress = copy("");
-        progress.setGravity(Gravity.CENTER);
-        progress.setVisibility(View.GONE);
-        panel.addView(progress);
-        Button check = primary("检查更新");
-        check.setOnClickListener(v -> handleAndroidUpdateAction(check, progress));
-        panel.addView(check, compactCenteredButtonLp());
-        content.addView(panel);
-    }
-
-    private String currentVersionName() {
-        try {
-            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-        } catch (Exception ignored) {
-            return "1.0.0";
-        }
-    }
-
-    private void handleAndroidUpdateAction(Button action, TextView progress) {
-        if (downloadedAndroidUpdateUri != null) {
-            installDownloadedApk(downloadedAndroidUpdateUri);
+        if (result.has("devices")) {
+            renderDevices(panel, result.optJSONArray("devices"));
             return;
         }
-        if (!pendingAndroidUpdateUrl.isEmpty()) {
-            downloadAndroidUpdate(action, progress, pendingAndroidUpdateUrl, pendingAndroidUpdateVersion);
+        if ("套餐订阅".equals(title)) {
+            renderPlans(panel, result);
             return;
         }
-        checkAndroidUpdate(action, progress);
+        if ("服务状态".equals(title)) {
+            renderServiceStatus(panel, result);
+            return;
+        }
+        if ("钱包与消耗".equals(title)) {
+            renderWalletData(panel, result);
+            return;
+        }
+        if ("版本信息".equals(title)) {
+            renderVersionInfo(panel, result);
+            return;
+        }
+        if ("系统公告".equals(title)) {
+            renderAnnouncements(panel, result);
+            return;
+        }
+        panel.addView(UiKit.text(this, jsonPreview(result), UiKit.MUTED, 13));
     }
 
-    private void checkAndroidUpdate(Button action, TextView progress) {
-        action.setText("正在检查");
-        runNetwork(() -> {
-            JSONObject envelope = api("GET", "/api/download/packages", null);
-            JSONObject data = envelope.optJSONObject("data");
-            JSONObject android = data == null ? null : data.optJSONObject("android");
-            String latest = android == null ? "" : android.optString("version", "");
-            String url = android == null ? "" : android.optString("url", "");
-            if (url.isEmpty()) {
-                url = "/api/download/package/android";
+    private void renderAnnouncements(LinearLayout panel, JSONObject result) {
+        JSONObject data = result.optJSONObject("data");
+        JSONArray rows = data == null ? null : data.optJSONArray("announcements");
+        if (rows == null) rows = result.optJSONArray("announcements");
+        if (rows == null || rows.length() == 0) {
+            panel.addView(UiKit.text(this, "暂无系统公告。", UiKit.MUTED, 14));
+            return;
+        }
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            if (item == null) continue;
+            LinearLayout card = cardPanel();
+            card.addView(UiKit.bold(this, first(item, "title", "name")));
+            card.addView(UiKit.text(this, first(item, "content", "message", "body"), UiKit.MUTED, 13));
+            panel.addView(card);
+        }
+    }
+
+    private void renderWalletData(LinearLayout panel, JSONObject result) {
+        JSONObject profile = result.optJSONObject("profile");
+        if (profile == null) profile = new JSONObject();
+        LinearLayout overview = cardPanel();
+        overview.addView(UiKit.bold(this, "钱包总览"));
+        overview.addView(UiKit.text(this, "剩余额度 " + formatQuotaAsUsd(profile.optDouble("quota", 0), 500000), UiKit.MUTED, 14));
+        overview.addView(UiKit.text(this, "已用额度 " + formatQuotaAsUsd(profile.optDouble("used_quota", 0), 500000) + " · 请求数 " + profile.optLong("request_count", 0), UiKit.MUTED, 14));
+        panel.addView(overview);
+        JSONObject usage = result.optJSONObject("usage");
+        JSONArray usageItems = usage == null ? null : usage.optJSONArray("items");
+        if (usageItems == null && usage != null) usageItems = usage.optJSONArray("data");
+        JSONObject topups = result.optJSONObject("topups");
+        LinearLayout bills = cardPanel();
+        bills.addView(UiKit.bold(this, "最近账单"));
+        JSONArray billItems = topups == null ? null : topups.optJSONArray("items");
+        if (billItems == null && topups != null) billItems = topups.optJSONArray("data");
+        if (billItems == null || billItems.length() == 0) {
+            bills.addView(UiKit.text(this, "暂无最近账单。", UiKit.MUTED, 14));
+        } else {
+            JSONObject subscriptions = result.optJSONObject("subscriptions");
+            JSONArray plans = result.optJSONArray("plans");
+            for (int i = 0; i < Math.min(billItems.length(), 3); i++) {
+                JSONObject item = billItems.optJSONObject(i);
+                if (item == null) continue;
+                double amount = Math.abs(item.optDouble("amount", item.optDouble("money", 0)));
+                bills.addView(billingRow(formatBillingLabel(item) + " · " + formatPlainPrice(item.optDouble("money", amount)) + " 元", resolveBillingUsageRatio(item, plans, subscriptions)));
             }
-            String finalUrl = resolveServerUrl(url);
-            boolean hasUpdate = !latest.isEmpty() && compareVersion(latest, currentVersionName()) > 0;
-            ui(() -> {
-                if (hasUpdate) {
-                    pendingAndroidUpdateUrl = finalUrl;
-                    pendingAndroidUpdateVersion = latest;
-                    downloadedAndroidUpdateUri = null;
-                    action.setText("下载更新");
-                    toast("发现新版本 " + latest);
-                } else {
-                    pendingAndroidUpdateUrl = "";
-                    pendingAndroidUpdateVersion = "";
-                    downloadedAndroidUpdateUri = null;
-                    action.setText("检查更新");
-                    progress.setVisibility(View.GONE);
-                    showTextDialog("检查更新", "已是最新版");
-                }
-            });
-        });
+        }
+        panel.addView(bills);
+        LinearLayout distribution = cardPanel();
+        distribution.addView(UiKit.bold(this, "消耗分布"));
+        renderUsageDistribution(distribution, usageItems);
+        panel.addView(distribution);
     }
 
-    private void downloadAndroidUpdate(Button action, TextView progress, String url, String version) {
-        if (updateDownloading) {
+    private void renderVersionInfo(LinearLayout panel, JSONObject result) {
+        JSONObject data = result.optJSONObject("data");
+        JSONObject android = data == null ? null : data.optJSONObject("android");
+        if (android == null) {
+            panel.addView(UiKit.text(this, jsonPreview(result), UiKit.MUTED, 13));
             return;
         }
-        updateDownloading = true;
-        action.setEnabled(false);
-        action.setText("更新中");
-        progress.setVisibility(View.VISIBLE);
-        progress.setText("下载进度 0%");
-        executor.execute(() -> {
+        String latest = first(android, "version", "versionName", "name");
+        String url = first(android, "url", "downloadUrl");
+        if (url.isEmpty()) url = "/api/download/package/android";
+        String resolved = resolveServerUrl(url);
+        panel.addView(UiKit.text(this, "当前版本：" + versionName() + "\n最新版本：" + (latest.isEmpty() ? "未知" : latest), UiKit.MUTED, 14));
+        Button open = UiKit.ghostButton(this, "下载更新");
+        open.setOnClickListener(v -> openExternalUrl(resolved));
+        panel.addView(open, centeredButtonLp());
+    }
+
+    private void showUpdateDialog() {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "检查更新"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(UiKit.gap(this, 18));
+        TextView body = UiKit.text(this, "正在检查...", UiKit.INK, 16);
+        panel.addView(body);
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+        network.execute(() -> {
             try {
-                Uri uri = downloadApk(url, version, percent -> ui(() -> progress.setText("下载进度 " + percent + "%")));
-                ui(() -> {
-                    updateDownloading = false;
-                    downloadedAndroidUpdateUri = uri;
-                    action.setEnabled(true);
-                    action.setText("现在安装");
-                    progress.setText("下载完成");
+                JSONObject result = statusController.downloadPackages();
+                JSONObject data = result.optJSONObject("data");
+                JSONObject android = data == null ? null : data.optJSONObject("android");
+                String latest = android == null ? "" : first(android, "version", "versionName", "name");
+                String url = android == null ? "" : first(android, "url", "downloadUrl");
+                String message = latest.isEmpty() || latest.equals(versionName()) ? "已是最新版" : "发现新版本 " + latest;
+                String finalUrl = url.isEmpty() ? "" : resolveServerUrl(url);
+                mainHandler.post(() -> {
+                    body.setText(message);
+                    if (!finalUrl.isEmpty() && !"已是最新版".equals(message)) {
+                        Button download = UiKit.ghostButton(this, "下载更新");
+                        download.setOnClickListener(v -> downloadAndInstallApk(finalUrl, latest, body));
+                        panel.addView(download, centeredButtonLp());
+                    }
                 });
-            } catch (Exception e) {
-                ui(() -> {
-                    updateDownloading = false;
-                    downloadedAndroidUpdateUri = null;
-                    action.setEnabled(true);
-                    action.setText("下载更新");
-                    progress.setVisibility(View.GONE);
-                    toast(userMessage(e));
-                });
+            } catch (Exception error) {
+                mainHandler.post(() -> body.setText("检查失败：" + message(error)));
             }
         });
     }
 
     private String resolveServerUrl(String value) {
         String trimmed = value == null ? "" : value.trim();
-        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            return trimmed;
-        }
-        String base = prefs.getString("server", "").replaceAll("/+$", "");
-        if (trimmed.startsWith("/")) {
-            return base + trimmed;
-        }
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
+        String base = prefs.server();
+        while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        if (trimmed.startsWith("/")) return base + trimmed;
         return base + "/" + trimmed;
     }
 
     private void openExternalUrl(String url) {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (Exception e) {
-            toast("无法打开下载链接");
+        } catch (Exception error) {
+            Toast.makeText(this, "无法打开链接：" + message(error), Toast.LENGTH_LONG).show();
         }
     }
 
-    private Uri downloadApk(String url, String version, ProgressHandler progress) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(180000);
-        String cookie = prefs.getString("cookie", "");
-        if (!cookie.isEmpty()) {
-            conn.setRequestProperty("Cookie", cookie);
+    private void shareText(String text) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("text/plain");
+            intent.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
+            startActivity(Intent.createChooser(intent, "分享"));
+        } catch (Exception error) {
+            Toast.makeText(this, "无法分享：" + message(error), Toast.LENGTH_LONG).show();
         }
-        int code = conn.getResponseCode();
-        if (code >= 400) {
-            String raw = readStream(conn.getErrorStream());
-            conn.disconnect();
-            throw new ApiException(code, raw, "安装包下载失败，请稍后重试");
-        }
-        int total = conn.getContentLength();
-        Uri target = createApkTargetUri(version);
-        try (InputStream input = conn.getInputStream(); OutputStream output = openApkOutputStream(target)) {
-            byte[] buffer = new byte[16 * 1024];
-            long read = 0;
-            int lastPercent = -1;
-            int len;
-            while ((len = input.read(buffer)) >= 0) {
-                output.write(buffer, 0, len);
-                read += len;
-                if (total > 0) {
-                    int percent = Math.max(0, Math.min(100, (int) (read * 100 / total)));
-                    if (percent != lastPercent) {
-                        lastPercent = percent;
-                        progress.onProgress(percent);
+    }
+
+    private void downloadAndInstallApk(String url, String version, TextView status) {
+        status.setText("下载进度 0%");
+        network.execute(() -> {
+            try {
+                File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                if (dir == null) dir = getCacheDir();
+                if (!dir.exists()) dir.mkdirs();
+                File apk = new File(dir, "oneapi-" + (version == null || version.isEmpty() ? "update" : version.replaceAll("[^0-9A-Za-z._-]", "_")) + ".apk");
+                HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(180000);
+                int total = Math.max(1, connection.getContentLength());
+                try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(apk)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    long done = 0;
+                    while ((read = input.read(buffer)) != -1) {
+                        output.write(buffer, 0, read);
+                        done += read;
+                        int percent = (int) Math.min(99, done * 100 / total);
+                        mainHandler.post(() -> status.setText("下载进度 " + percent + "%"));
                     }
                 }
+                mainHandler.post(() -> {
+                    status.setText("下载完成，正在打开安装器");
+                    installApk(apk);
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> status.setText("下载失败：" + message(error)));
             }
-        } catch (Exception e) {
-            getContentResolver().delete(target, null, null);
-            throw e;
-        } finally {
-            conn.disconnect();
-        }
-        publishApkTarget(target);
-        progress.onProgress(100);
-        return target;
+        });
     }
 
-    private Uri createApkTargetUri(String version) throws Exception {
-        String safeVersion = (version == null || version.trim().isEmpty() ? currentVersionName() : version).replaceAll("[^0-9A-Za-z._-]", "_");
-        String name = "OneAPI-" + safeVersion + ".apk";
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
-            values.put(MediaStore.MediaColumns.MIME_TYPE, "application/vnd.android.package-archive");
-            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
-            Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) {
-                throw new Exception("安装包保存失败");
-            }
-            return uri;
-        }
-        File file = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), name);
-        return Uri.fromFile(file);
-    }
-
-    private OutputStream openApkOutputStream(Uri uri) throws Exception {
-        if ("file".equals(uri.getScheme())) {
-            File file = new File(uri.getPath());
-            File parent = file.getParentFile();
-            if (parent != null && !parent.exists()) {
-                parent.mkdirs();
-            }
-            return new FileOutputStream(file);
-        }
-        OutputStream output = getContentResolver().openOutputStream(uri);
-        if (output == null) {
-            throw new Exception("安装包保存失败");
-        }
-        return output;
-    }
-
-    private void publishApkTarget(Uri uri) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !"file".equals(uri.getScheme())) {
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
-            getContentResolver().update(uri, values, null, null);
-        }
-    }
-
-    private void installDownloadedApk(Uri uri) {
+    private void installApk(File apk) {
         try {
-            if ("file".equals(uri.getScheme())) {
-                try {
-                    Class.forName("android.os.StrictMode").getMethod("disableDeathOnFileUriExposure").invoke(null);
-                } catch (Exception ignored) {
-                }
-            }
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", apk);
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(uri, "application/vnd.android.package-archive");
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
-        } catch (Exception e) {
-            toast("无法启动安装，请检查系统安装权限");
-        }
-    }
-
-    private int compareVersion(String left, String right) {
-        String[] a = left == null ? new String[0] : left.split("\\.");
-        String[] b = right == null ? new String[0] : right.split("\\.");
-        int len = Math.max(a.length, b.length);
-        for (int i = 0; i < len; i++) {
-            int av = i < a.length ? parseVersionPart(a[i]) : 0;
-            int bv = i < b.length ? parseVersionPart(b[i]) : 0;
-            if (av != bv) {
-                return av - bv;
-            }
-        }
-        return 0;
-    }
-
-    private int parseVersionPart(String value) {
-        try {
-            String digits = value == null ? "" : value.replaceAll("[^0-9].*$", "");
-            return digits.isEmpty() ? 0 : Integer.parseInt(digits);
-        } catch (Exception ignored) {
-            return 0;
-        }
-    }
-
-    private void renderCliWorkspace(String client) {
-        modelSpinner = spinner("codex".equals(client) ? codexModels : claudeModels);
-        reasoningSpinner = spinner(list("关闭思考", "低", "中", "高"));
-        permissionSpinner = spinner(list("受限模式", "全权限模式"));
-        if (selectedCliModel.isEmpty()) {
-            selectedCliModel = selected(modelSpinner);
-        }
-
-        interactionBar = vertical();
-        timeline = vertical();
-        JSONArray cached = cliTimelineCache.get(client);
-        if (cached == null || cached.length() == 0) {
-            showConversationLoading("正在同步客户端会话记录...");
-            cliTimelineSignatures.put(client, "loading:" + System.currentTimeMillis());
-        } else {
-            renderTimeline(cached, true);
-        }
-        composerHost.addView(composer("输入要执行的任务", client, () -> sendCliJob(client)));
-        pollSessionsOnce(false);
-    }
-
-    private void renderCliComposerOnly(String client) {
-        if (composerHost == null || !"codex".equals(client) && !"claude".equals(client)) {
-            return;
-        }
-        clearContainer(composerHost);
-        composerHost.addView(composer("输入要执行的任务", client, () -> sendCliJob(client)));
-    }
-
-    private View composer(String hint, String mode, Runnable sendAction) {
-        LinearLayout box = vertical();
-        activeComposerMode = mode;
-        if (!"chat".equals(mode) && selectedAttachmentUris.size() > 1) {
-            while (selectedAttachmentUris.size() > 1) {
-                selectedAttachmentUris.remove(selectedAttachmentUris.size() - 1);
-            }
-        }
-        box.setBackground(round(Color.argb(20, 255, 255, 255), dp(18), LINE));
-        box.setPadding(dp(12), dp(8), dp(12), dp(8));
-        attachmentPreviewHost = horizontal();
-        attachmentPreviewHost.setPadding(0, 0, 0, dp(8));
-        box.addView(attachmentPreviewHost);
-        renderAttachmentPreview();
-        extensionPreviewHost = new FlowLayout(this);
-        extensionPreviewHost.setPadding(0, 0, 0, dp(6));
-        extensionPrimaryTag = null;
-        if ("chat".equals(mode) || "image".equals(mode)) {
-            extensionPrimaryTag = currentAssistantTag(mode);
-        } else if ("codex".equals(mode) || "claude".equals(mode)) {
-            extensionPrimaryTag = currentCliProjectTag(mode);
-        }
-        if (extensionPrimaryTag != null) {
-            extensionPreviewHost.addView(extensionPrimaryTag);
-        }
-        box.addView(extensionPreviewHost, new LinearLayout.LayoutParams(-1, -2));
-        renderExtensionPreview();
-        activeInput = input(hint);
-        if ("assistants".equals(section)) {
-            activeInput.setBackground(round(Color.argb(18, 255, 255, 255), dp(14), LINE));
-        }
-        activeInput.setMinLines(2);
-        activeInput.setMaxLines(5);
-        activeInput.setVerticalScrollBarEnabled(false);
-        activeInput.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        activeInput.setGravity(Gravity.TOP | Gravity.START);
-        activeInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        activeInput.setOnTouchListener((v, event) -> {
-            if (event != null && event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
-                focusComposerInput();
-            }
-            return false;
-        });
-        activeInput.setOnClickListener(v -> focusComposerInput());
-        activeInput.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
-                cancelComposerKeyboardRequest();
-            }
-        });
-        box.addView(activeInput);
-
-        LinearLayout row = horizontal();
-        row.setPadding(dp(4), dp(8), dp(4), 0);
-        LinearLayout left = horizontal();
-        addComposerTools(left, mode);
-        LinearLayout right = horizontal();
-        ImageButton send = new ImageButton(this);
-        send.setContentDescription("发送");
-        send.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        send.setPadding(dp(6), dp(6), dp(6), dp(6));
-        send.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        activeSendButton = send;
-        syncSendButton();
-        send.setOnClickListener(v -> {
-            if (requestRunning) {
-                setSending(false);
-                return;
-            }
-            sendAction.run();
-        });
-        right.addView(send, new LinearLayout.LayoutParams(dp(40), dp(40)));
-        row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(-2, -2);
-        rightLp.setMargins(dp(8), 0, 0, 0);
-        row.addView(right, rightLp);
-        box.addView(row);
-        return box;
-    }
-
-    private View currentAssistantTag(String mode) {
-        TextView tag = copy("助手：" + ("image".equals(mode) ? selectedImageAssistant : selectedChatAssistant));
-        tag.setTextColor(Color.rgb(45, 74, 124));
-        tag.setTextSize(12);
-        tag.setSingleLine(true);
-        tag.setEllipsize(TextUtils.TruncateAt.END);
-        tag.setPadding(dp(10), dp(4), dp(10), dp(4));
-        tag.setBackground(round(Color.rgb(255, 255, 255), dp(12), LINE));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(28));
-        lp.setMargins(0, 0, 0, dp(6));
-        tag.setLayoutParams(lp);
-        return tag;
-    }
-
-    private View currentCliProjectTag(String client) {
-        String name = selectedCliProjectNames.get(client);
-        if (name == null || name.trim().isEmpty()) {
-            String path = selectedCliProjectPaths.get(client);
-            name = fileNameFromPath(path == null ? "" : path);
-        }
-        if (name == null || name.trim().isEmpty()) {
-            name = "未选择";
-        }
-        TextView tag = copy("项目：" + ellipsizeLabel(name, 8));
-        cliProjectTagView = tag;
-        tag.setTextColor(Color.rgb(45, 74, 124));
-        tag.setTextSize(12);
-        tag.setSingleLine(true);
-        tag.setEllipsize(TextUtils.TruncateAt.END);
-        tag.setPadding(dp(10), dp(4), dp(10), dp(4));
-        tag.setBackground(round(Color.rgb(255, 255, 255), dp(12), LINE));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(28));
-        lp.setMargins(0, 0, 0, dp(6));
-        tag.setLayoutParams(lp);
-        return tag;
-    }
-
-    private String ellipsizeLabel(String value, int maxChars) {
-        String clean = cleanDisplayText(value);
-        if (clean.length() <= maxChars) {
-            return clean;
-        }
-        return clean.substring(0, Math.max(0, maxChars)) + "...";
-    }
-
-    private void addComposerTools(LinearLayout left, String mode) {
-        if ("chat".equals(mode)) {
-            addToolButton(left, R.drawable.tool_add, "上传附件", this::openImagePicker);
-            addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
-            addToolButton(left, R.drawable.tool_module, "模型选择", () -> showModelChoice("模型选择", chatModelOptions(), selectedChatModel, "chat", value -> {
-                selectedChatModel = value;
-                prefs.edit().putString("selected_chat_model", value).apply();
-            }));
-            addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", chatAssistantOptions(), selectedChatAssistant, value -> {
-                if (value.equals(selectedChatAssistant)) {
-                    return;
-                }
-                selectedChatAssistant = value;
-                prefs.edit().putString("selected_chat_assistant", value).apply();
-                createLocalConversation("chat");
-                renderSection();
-            }));
-            addToolButton(left, R.drawable.tool_think, "Thinking", () -> showChoice("Thinking", list("关闭思考", "低", "中", "高"), selectedReasoning, value -> {
-                selectedReasoning = value;
-                prefs.edit().putString("selected_reasoning", value).apply();
-            }));
-            addToolButton(left, R.drawable.tool_text, "上下文", () -> showChoice("上下文", list("自动", "短上下文", "长上下文"), selectedContextWindow, value -> {
-                selectedContextWindow = value;
-                prefs.edit().putString("selected_context_window", value).apply();
-            }));
-            return;
-        }
-        if ("image".equals(mode)) {
-            addToolButton(left, R.drawable.tool_add, "上传附件", this::openImagePicker);
-            addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
-            addToolButton(left, R.drawable.tool_helper, "助手", () -> showChoice("助手", imageAssistantOptions(), selectedImageAssistant, value -> {
-                if (value.equals(selectedImageAssistant)) {
-                    return;
-                }
-                selectedImageAssistant = value;
-                prefs.edit().putString("selected_image_assistant", value).apply();
-                createLocalConversation("image");
-                renderSection();
-            }));
-            addToolButton(left, R.drawable.tool_size, "尺寸", () -> showChoice("尺寸", list("1024x1024", "1024x1536", "1536x1024"), selectedImageSize, value -> {
-                selectedImageSize = value;
-                prefs.edit().putString("selected_image_size", value).apply();
-            }));
-            addToolButton(left, R.drawable.tool_ratio, "质量", () -> showChoice("质量", list("标准", "高清"), selectedImageQuality, value -> {
-                selectedImageQuality = value;
-                prefs.edit().putString("selected_image_quality", value).apply();
-            }));
-            return;
-        }
-        if ("codex".equals(mode) || "claude".equals(mode)) {
-            addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
-            final ImageButton[] permissionButton = new ImageButton[1];
-            permissionButton[0] = addToolButton(left, selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority, "权限模式", () -> {
-                selectedPermission = selectedPermission.contains("全权限") ? "受限模式" : "全权限模式";
-                prefs.edit().putString("selected_permission", selectedPermission).apply();
-                if (permissionButton[0] != null) {
-                    permissionButton[0].setImageResource(selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority);
-                }
-            });
-            addToolButton(left, R.drawable.tool_module, "模型选择", () -> showModelChoice("模型选择", "codex".equals(mode) ? codexModels : claudeModels, selectedCliModelFor(mode), mode, value -> {
-                if ("codex".equals(mode)) {
-                    selectedCodexModel = value;
-                    prefs.edit().putString("selected_codex_model", value).apply();
-                } else {
-                    selectedClaudeModel = value;
-                    prefs.edit().putString("selected_claude_model", value).apply();
-                }
-            }));
-            addToolButton(left, R.drawable.tool_think, "Thinking", () -> showChoice("Thinking", list("关闭思考", "低", "中", "高"), selectedReasoning, value -> {
-                selectedReasoning = value;
-                prefs.edit().putString("selected_reasoning", value).apply();
-            }));
-            addToolButton(left, R.drawable.tool_skill, "Skill/Plugin", () -> showExtensionsChoice(mode));
-        }
-    }
-
-    private ImageButton addToolButton(LinearLayout row, int iconRes, String description, Runnable action) {
-        ImageButton button = new ImageButton(this);
-        button.setImageResource(iconRes);
-        button.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        button.setPadding(dp(6), dp(6), dp(6), dp(6));
-        button.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        button.setColorFilter(INK);
-        button.setContentDescription(description);
-        button.setOnClickListener(v -> action.run());
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(34), dp(34));
-        lp.setMargins(0, 0, dp(8), 0);
-        row.addView(button, lp);
-        return button;
-    }
-
-    private void renderAttachmentPreview() {
-        if (attachmentPreviewHost == null) {
-            return;
-        }
-        attachmentPreviewHost.removeAllViews();
-        if (selectedAttachmentUris.isEmpty()) {
-            attachmentPreviewHost.setVisibility(View.GONE);
-            return;
-        }
-        attachmentPreviewHost.setVisibility(View.VISIBLE);
-        for (int i = 0; i < selectedAttachmentUris.size(); i++) {
-            Uri uri = selectedAttachmentUris.get(i);
-            FrameLayout thumbBox = new FrameLayout(this);
-            ImageView thumb = new ImageView(this);
-            setImageSource(thumb, uri.toString());
-            thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            thumb.setBackground(round(Color.WHITE, dp(12), LINE));
-            thumb.setContentDescription("已选择图片预览");
-            thumb.setOnClickListener(v -> showImagePreview(uri));
-            thumbBox.addView(thumb, new FrameLayout.LayoutParams(dp(58), dp(58), Gravity.CENTER));
-            Button remove = iconButton("×");
-            remove.setTextSize(13);
-            remove.setTextColor(Color.WHITE);
-            remove.setBackground(round(Color.argb(180, 23, 31, 48), dp(10), Color.TRANSPARENT));
-            remove.setContentDescription("移除图片");
-            final int index = i;
-            remove.setOnClickListener(v -> {
-                if (index >= 0 && index < selectedAttachmentUris.size()) {
-                    selectedAttachmentUris.remove(index);
-                    renderAttachmentPreview();
-                }
-            });
-            FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP | Gravity.END);
-            thumbBox.addView(remove, closeLp);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(62), dp(62));
-            lp.setMargins(0, 0, dp(8), 0);
-            attachmentPreviewHost.addView(thumbBox, lp);
-        }
-    }
-
-    private void showImagePreview(Uri uri) {
-        if (uri == null) {
-            return;
-        }
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(180, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(12), dp(12), dp(12), dp(12));
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold("图片预览"), new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = iconButton("×");
-        close.setContentDescription("关闭预览");
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-        WebView preview = new WebView(this);
-        configureContentWebView(preview);
-        preview.loadDataWithBaseURL("https://ai.oneapi.center/", imagePreviewHtml(imageSourceForPreview(uri)), "text/html", "utf-8", null);
-        LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(-1, dp(420));
-        previewLp.setMargins(0, dp(10), 0, 0);
-        panel.addView(preview, previewLp);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2);
-        lp.gravity = Gravity.CENTER;
-        lp.setMargins(dp(18), 0, dp(18), 0);
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private String imageSourceForPreview(Uri uri) {
-        String source = uri == null ? "" : uri.toString();
-        if (source.startsWith("content:") || source.startsWith("file:")) {
-            String dataUrl = uriToDataUrl(uri);
-            return dataUrl.isEmpty() ? source : dataUrl;
-        }
-        return source;
-    }
-
-    private String imageSourceForBubble(Uri uri) {
-        if (uri == null) {
-            return "";
-        }
-        String cached = cacheImageForBubble(uri);
-        return cached.isEmpty() ? uri.toString() : cached;
-    }
-
-    private String cacheImageForBubble(Uri uri) {
-        try {
-            File dir = new File(getFilesDir(), "chat-images");
-            if (!dir.exists() && !dir.mkdirs()) {
-                return "";
-            }
-            String mime = getContentResolver().getType(uri);
-            String ext = mime != null && mime.toLowerCase(Locale.ROOT).contains("webp") ? ".webp"
-                    : mime != null && mime.toLowerCase(Locale.ROOT).contains("jpeg") ? ".jpg"
-                    : ".png";
-            File target = new File(dir, UUID.randomUUID().toString() + ext);
-            try (InputStream input = getContentResolver().openInputStream(uri);
-                 OutputStream output = new FileOutputStream(target)) {
-                if (input == null) {
-                    return "";
-                }
-                byte[] buffer = new byte[8192];
-                int read;
-                while ((read = input.read(buffer)) != -1) {
-                    output.write(buffer, 0, read);
-                }
-            }
-            return Uri.fromFile(target).toString();
-        } catch (Exception ignored) {
-            return "";
-        }
-    }
-
-    private String imagePreviewHtml(String source) {
-        String jsSource = JSONObject.quote(source == null ? "" : source);
-        return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                + "<style>html,body,#frame{height:100%;margin:0;background:#0f172a;overflow:hidden}#frame{display:flex;align-items:center;justify-content:center}img{max-width:100%;max-height:100%;object-fit:contain;touch-action:none;user-select:none;transform-origin:center center;will-change:transform}</style>"
-                + "</head><body><div id='frame'><img id='img'></div><script>const img=document.getElementById('img');img.src=" + jsSource + ";let scale=1,x=0,y=0,drag=false,lx=0,ly=0;"
-                + "function apply(){img.style.transform='translate('+x+'px,'+y+'px) scale('+scale+')'}"
-                + "img.ondblclick=(e)=>{e.preventDefault();scale=scale>1?1:2.4;x=0;y=0;apply()};"
-                + "img.onpointerdown=(e)=>{if(scale<=1)return;drag=true;lx=e.clientX;ly=e.clientY;img.setPointerCapture&&img.setPointerCapture(e.pointerId)};"
-                + "img.onpointermove=(e)=>{if(!drag)return;x+=e.clientX-lx;y+=e.clientY-ly;lx=e.clientX;ly=e.clientY;apply();e.preventDefault()};"
-                + "img.onpointerup=img.onpointercancel=()=>{drag=false};</script></body></html>";
-    }
-
-    private void renderExtensionPreview() {
-        if (extensionPreviewHost == null) {
-            return;
-        }
-        extensionPreviewHost.removeAllViews();
-        if (extensionPrimaryTag != null) {
-            extensionPreviewHost.addView(extensionPrimaryTag);
-        }
-        if (!"codex".equals(activeComposerMode) && !"claude".equals(activeComposerMode)) {
-            extensionPreviewHost.setVisibility(extensionPrimaryTag == null ? View.GONE : View.VISIBLE);
-            return;
-        }
-        List<JSONObject> refs = extensionRefsFor(activeComposerMode);
-        if (refs.isEmpty()) {
-            extensionPreviewHost.setVisibility(extensionPrimaryTag == null ? View.GONE : View.VISIBLE);
-            return;
-        }
-        extensionPreviewHost.setVisibility(View.VISIBLE);
-        for (int i = 0; i < refs.size(); i++) {
-            JSONObject ref = refs.get(i);
-            LinearLayout tag = horizontal();
-            tag.setGravity(Gravity.CENTER_VERTICAL);
-            tag.setPadding(dp(9), 0, dp(5), 0);
-            tag.setBackground(round(Color.argb(76, 54, 104, 240), dp(14), Color.argb(110, 54, 104, 240)));
-            TextView name = copy(ref.optString("name", ""));
-            name.setTextColor(BLUE);
-            name.setTextSize(12);
-            tag.addView(name);
-            Button remove = iconButton("×");
-            remove.setTextSize(13);
-            final int index = i;
-            final String client = activeComposerMode;
-            remove.setOnClickListener(v -> {
-                List<JSONObject> activeRefs = extensionRefsFor(client);
-                if (index >= 0 && index < activeRefs.size()) {
-                    activeRefs.remove(index);
-                    renderExtensionPreview();
-                }
-            });
-            tag.addView(remove, new LinearLayout.LayoutParams(dp(24), dp(24)));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(32));
-            lp.setMargins(0, 0, dp(8), 0);
-            extensionPreviewHost.addView(tag, lp);
-        }
-    }
-
-    private List<JSONObject> extensionRefsFor(String client) {
-        String key = "claude".equals(client) ? "claude" : "codex";
-        List<JSONObject> refs = selectedExtensionRefsByClient.get(key);
-        if (refs == null) {
-            refs = new ArrayList<>();
-            selectedExtensionRefsByClient.put(key, refs);
-        }
-        return refs;
-    }
-
-    private void addExtensionRef(String client, String kind, String name) {
-        String normalized = name == null ? "" : name.trim();
-        if (normalized.isEmpty() || "默认".equals(normalized)) {
-            return;
-        }
-        List<JSONObject> refs = extensionRefsFor(client);
-        for (JSONObject ref : refs) {
-            if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
-                renderExtensionPreview();
-                return;
-            }
-        }
-        try {
-            refs.add(new JSONObject().put("kind", kind).put("id", normalized).put("name", normalized));
-            renderExtensionPreview();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void appendSelectedImages(Intent data) {
-        int limit = "chat".equals(activeComposerMode) ? 5 : 1;
-        if (!"chat".equals(activeComposerMode)) {
-            selectedAttachmentUris.clear();
-        }
-        ClipData clipData = data.getClipData();
-        if (clipData != null) {
-            for (int i = 0; i < clipData.getItemCount() && selectedAttachmentUris.size() < limit; i++) {
-                Uri uri = clipData.getItemAt(i).getUri();
-                if (uri != null && !selectedAttachmentUris.contains(uri)) {
-                    selectedAttachmentUris.add(uri);
-                }
-            }
-        } else if (data.getData() != null && selectedAttachmentUris.size() < limit) {
-            Uri uri = data.getData();
-            if (!selectedAttachmentUris.contains(uri)) {
-                selectedAttachmentUris.add(uri);
-            }
-        }
-        if (selectedAttachmentUris.size() > limit) {
-            while (selectedAttachmentUris.size() > limit) {
-                selectedAttachmentUris.remove(selectedAttachmentUris.size() - 1);
-            }
-        }
-    }
-
-    private void openImagePicker() {
-        int limit = "chat".equals(activeComposerMode) ? 5 : 1;
-        Intent intent;
-        if (Build.VERSION.SDK_INT >= 33) {
-            intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
-            intent.setType("image/*");
-            if (limit > 1) {
-                intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, limit);
-            }
-        } else {
-            intent = new Intent(Intent.ACTION_GET_CONTENT);
-            intent.setType("image/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit > 1);
-        }
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        try {
-            startActivityForResult(Intent.createChooser(intent, "选择图片"), REQ_PICK_IMAGE);
         } catch (Exception error) {
-            Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
-            fallback.setType("image/*");
-            fallback.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivityForResult(Intent.createChooser(fallback, "选择图片"), REQ_PICK_IMAGE);
+            Toast.makeText(this, "无法打开安装器：" + message(error), Toast.LENGTH_LONG).show();
         }
     }
 
-    private void persistSelectedImagePermissions(Intent data) {
-        int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-        try {
-            ClipData clipData = data.getClipData();
-            if (clipData != null) {
-                for (int i = 0; i < clipData.getItemCount(); i++) {
-                    Uri uri = clipData.getItemAt(i).getUri();
-                    if (uri != null) {
-                        getContentResolver().takePersistableUriPermission(uri, flags);
-                    }
-                }
-            } else if (data.getData() != null) {
-                getContentResolver().takePersistableUriPermission(data.getData(), flags);
-            }
-        } catch (Exception ignored) {
+    private void renderPlans(LinearLayout panel, JSONObject result) {
+        JSONArray plans = result.optJSONArray("data");
+        if (plans == null && result.optJSONObject("data") != null) {
+            plans = result.optJSONObject("data").optJSONArray("plans");
         }
-    }
-
-    private List<String> chatModelOptions() {
-        List<String> models = new ArrayList<>();
-        for (String model : chatModels) {
-            if (!models.contains(model)) {
-                models.add(model);
-            }
-        }
-        return models;
-    }
-
-    private List<String> chatAssistantOptions() {
-        List<String> names = new ArrayList<>();
-        for (JSONObject assistant : chatAssistants) {
-            String name = assistant.optString("name", "");
-            if (!name.isEmpty() && !names.contains(name)) {
-                names.add(name);
-            }
-        }
-        appendCustomAssistantNames("chat", names);
-        if (names.isEmpty()) {
-            names.addAll(list("默认助手", "流程图专家（Mermaid）", "产品经理", "项目管理", "前端工程师", "开发工程师", "网页生成", "运维工程师", "网络安全专家", "UX/UI开发者", "法务", "律师", "市场营销"));
-        }
-        return names;
-    }
-
-    private List<String> imageAssistantOptions() {
-        List<String> names = new ArrayList<>();
-        for (JSONObject assistant : imageAssistants) {
-            String name = assistant.optString("name", "");
-            if (!name.isEmpty() && !names.contains(name)) {
-                names.add(name);
-            }
-        }
-        appendCustomAssistantNames("image", names);
-        if (names.isEmpty()) {
-            names.addAll(list("通用绘图", "图片编辑", "动画与漫画", "游戏", "复古与赛博朋克", "电影与动画", "角色设计", "字体设计和海报", "插图", "水彩画", "水墨与中国风", "像素艺术", "等距视角", "产品与食品", "品牌系统与标识", "摄影", "信息图表和实地指南", "数字艺术创作助手"));
-        }
-        return names;
-    }
-
-    private void appendCustomAssistantNames(String scope, List<String> names) {
-        JSONArray rows = customAssistants(scope);
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject item = rows.optJSONObject(i);
-            String name = item == null ? "" : item.optString("name", "");
-            if (!name.isEmpty() && !names.contains(name)) {
-                names.add(name);
-            }
-        }
-    }
-
-    private String assistantPrompt(String name) {
-        String custom = customAssistantPrompt("chat", name);
-        if (!custom.trim().isEmpty()) {
-            return custom;
-        }
-        for (JSONObject assistant : chatAssistants) {
-            if (name.equals(assistant.optString("name"))) {
-                String prompt = assistant.optString("prompt", "");
-                if (!prompt.trim().isEmpty()) {
-                    return prompt;
-                }
-            }
-        }
-        switch (name) {
-            case "流程图专家（Mermaid）": return "你是一名 Mermaid 流程图专家，优先输出可直接渲染的 Mermaid 代码块。";
-            case "产品经理": return "你是一名经验丰富的产品经理，请提供务实、清晰、可执行的产品建议。";
-            case "项目管理": return "你是一名资深项目经理，请从规划、执行、风险和协作角度回答。";
-            case "前端工程师": return "你是一名专业前端工程师，请关注用户体验、性能和实现细节。";
-            case "开发工程师": return "你是一名资深软件工程师，请用工程化方式解决问题。";
-            case "网页生成": return "你精通 HTML/JS/CSS/TailwindCSS，请按用户要求生成可用网页代码。";
-            case "运维工程师": return "你是一名运维工程师，请关注部署、监控、故障处理和安全。";
-            case "网络安全专家": return "你是一名网络安全专家，请给出安全分析与防护策略。";
-            case "UX/UI开发者": return "你是一名 UX/UI 开发者，请关注界面结构、交互体验和视觉质量。";
-            case "法务": return "你是一名法务专家，请从合同、合规和风险角度分析。";
-            case "律师": return "你是一名通用法律咨询律师，请保持专业严谨。";
-            case "市场营销": return "你是一名市场营销专家，请给出品牌推广和营销策略建议。";
-            default: return "你是 OneAPI 客户端中的默认助手。请准确理解用户需求，保持回答简洁、直接、可执行。";
-        }
-    }
-
-    private String imageAssistantPrompt(String name, String prompt) {
-        String custom = customAssistantPrompt("image", name);
-        if (!custom.trim().isEmpty()) {
-            return custom + "\n\n用户图片需求：" + prompt;
-        }
-        for (JSONObject assistant : imageAssistants) {
-            if (name.equals(assistant.optString("name"))) {
-                String assistantPrompt = assistant.optString("prompt", "");
-                if (!assistantPrompt.trim().isEmpty()) {
-                    return assistantPrompt + "\n\n用户图片需求：" + prompt;
-                }
-            }
-        }
-        if ("图片编辑".equals(name)) {
-            return "图片编辑：" + prompt;
-        }
-        if ("动画与漫画".equals(name)) {
-            return "动画漫画风格，干净赛璐璐线稿，表情鲜明，动态构图，原创角色，" + prompt;
-        }
-        if ("游戏".equals(name)) {
-            return "现代游戏截图或游戏主视觉风格，场景可读，光影精致，具备可玩空间逻辑，" + prompt;
-        }
-        if ("复古与赛博朋克".equals(name)) {
-            return "复古未来赛博朋克风格，霓虹、铬金属、CRT 光效和清晰网格构图，" + prompt;
-        }
-        if ("电影与动画".equals(name)) {
-            return "电影级动画定格画面，强镜头感、关键光、情绪明确、叙事清晰，" + prompt;
-        }
-        if ("角色设计".equals(name)) {
-            return "角色设计设定图，包含清晰轮廓、服装材质、表情和生产级设计板效果，" + prompt;
-        }
-        if ("字体设计和海报".equals(name)) {
-            return "海报版式与字体层级优先，文字清晰可读，负空间和画面节奏专业，" + prompt;
-        }
-        if ("水彩画".equals(name)) {
-            return "水彩插画风格，纸张肌理、晕染、透明叠色和柔和边缘，" + prompt;
-        }
-        if ("水墨与中国风".equals(name)) {
-            return "水墨中国风，笔触、墨色扩散、宣纸肌理、留白和雅致构图，" + prompt;
-        }
-        if ("像素艺术".equals(name)) {
-            return "像素艺术风格，清晰栅格、有限色盘、游戏素材感、边缘锐利，" + prompt;
-        }
-        if ("等距视角".equals(name)) {
-            return "等距视角场景，网格逻辑精准、层高关系清楚、模块化道具，" + prompt;
-        }
-        if ("品牌系统与标识".equals(name)) {
-            return "品牌系统展示板，原创标识、配色、字体层级、包装或社媒延展，" + prompt;
-        }
-        if ("商业海报".equals(name)) {
-            return "商业海报风格，高级排版，清晰主体，" + prompt;
-        }
-        if ("产品摄影".equals(name) || "产品与食品".equals(name)) {
-            return "产品摄影风格，真实光影，干净背景，" + prompt;
-        }
-        if ("头像生成".equals(name)) {
-            return "高质量头像，细节清晰，" + prompt;
-        }
-        if ("插画创作".equals(name) || "插图".equals(name) || "数字艺术创作助手".equals(name)) {
-            return "数字插画艺术风格，构图完整，" + prompt;
-        }
-        if ("摄影".equals(name)) {
-            return "真实摄影风格，明确拍摄语境、可信镜头、自然瑕疵和场景光线，" + prompt;
-        }
-        if ("信息图表和实地指南".equals(name)) {
-            return "信息图表和实地指南风格，结构清晰、标签可读、图文层级明确，" + prompt;
-        }
-        return prompt;
-    }
-
-    private JSONArray customAssistants(String scope) {
-        try {
-            return new JSONArray(prefs.getString(scope + "_custom_assistants", "[]"));
-        } catch (Exception ignored) {
-            return new JSONArray();
-        }
-    }
-
-    private void saveCustomAssistants(String scope, JSONArray rows) {
-        prefs.edit().putString(scope + "_custom_assistants", rows.toString()).apply();
-    }
-
-    private JSONObject findCustomAssistant(String scope, String name) {
-        JSONArray rows = customAssistants(scope);
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject item = rows.optJSONObject(i);
-            if (item != null && name.equals(item.optString("name"))) {
-                return item;
-            }
-        }
-        return null;
-    }
-
-    private String customAssistantPrompt(String scope, String name) {
-        JSONObject item = findCustomAssistant(scope, name);
-        return item == null ? "" : item.optString("prompt", "");
-    }
-
-    private String assistantShareText(String scope, String name) {
-        String prompt = "image".equals(scope) ? imageAssistantPrompt(name, "") : assistantPrompt(name);
-        return name + (prompt.trim().isEmpty() ? "" : "\n\n" + prompt.trim());
-    }
-
-    private void saveCustomAssistant(String scope, String oldName, String name, String prompt) {
-        String cleanName = cleanDisplayText(name);
-        if (cleanName.isEmpty()) {
-            toast("助手名称不能为空");
+        if (plans == null || plans.length() == 0) {
+            panel.addView(UiKit.text(this, "暂无可购买套餐。", UiKit.MUTED, 14));
             return;
         }
-        JSONArray rows = customAssistants(scope);
-        JSONArray next = new JSONArray();
-        try {
-            boolean saved = false;
-            for (int i = 0; i < rows.length(); i++) {
-                JSONObject item = rows.optJSONObject(i);
-                if (item == null) {
-                    continue;
-                }
-                if (oldName.equals(item.optString("name")) || cleanName.equals(item.optString("name"))) {
-                    if (!saved) {
-                        next.put(new JSONObject().put("name", cleanName).put("prompt", prompt == null ? "" : prompt.trim()));
-                        saved = true;
-                    }
-                } else {
-                    next.put(item);
-                }
-            }
-            if (!saved) {
-                next.put(new JSONObject().put("name", cleanName).put("prompt", prompt == null ? "" : prompt.trim()));
-            }
-            saveCustomAssistants(scope, next);
-            if ("image".equals(scope)) {
-                selectedImageAssistant = cleanName;
-                prefs.edit().putString("selected_image_assistant", cleanName).apply();
-            } else {
-                selectedChatAssistant = cleanName;
-                prefs.edit().putString("selected_chat_assistant", cleanName).apply();
-            }
-            renderSection();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void deleteCustomAssistant(String scope, String name) {
-        JSONArray rows = customAssistants(scope);
-        boolean removed = false;
-        JSONArray next = new JSONArray();
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject item = rows.optJSONObject(i);
-            if (item != null && name.equals(item.optString("name"))) {
-                removed = true;
-                continue;
-            }
-            if (item != null) {
-                next.put(item);
-            }
-        }
-        if (!removed) {
-            toast("内置助手不能删除");
-            return;
-        }
-        saveCustomAssistants(scope, next);
-        renderSection();
-    }
-
-    private String localConversationGroup(String mode) {
-        if ("image".equals(mode)) {
-            return selectedImageAssistant == null || selectedImageAssistant.trim().isEmpty() ? "通用绘图" : selectedImageAssistant.trim();
-        }
-        return selectedChatAssistant == null || selectedChatAssistant.trim().isEmpty() ? "默认助手" : selectedChatAssistant.trim();
-    }
-
-    private String activeLocalSessionId(String mode) {
-        String value = "image".equals(mode) ? activeImageSessionId : activeChatSessionId;
-        if (value == null || value.trim().isEmpty()) {
-            value = prefs.getString(mode + "_active_session_id", "");
-            if ("image".equals(mode)) {
-                activeImageSessionId = value;
-            } else {
-                activeChatSessionId = value;
-            }
-        }
-        return value == null ? "" : value;
-    }
-
-    private void setActiveLocalSessionId(String mode, String id) {
-        if ("image".equals(mode)) {
-            activeImageSessionId = id;
-        } else {
-            activeChatSessionId = id;
-        }
-        localVisibleMessageCounts.put(mode, INITIAL_RENDER_ITEM_COUNT);
-        prefs.edit().putString(mode + "_active_session_id", id == null ? "" : id).apply();
-    }
-
-    private JSONObject localConversationStore(String mode) {
-        String key = mode + "_conversation_store";
-        String raw = prefs.getString(key, "{}");
-        JSONObject cached = localConversationRootCache.get(mode);
-        if (cached != null && raw.equals(localConversationRawCache.get(mode))) {
-            return cached;
-        }
-        try {
-            JSONObject root = new JSONObject(raw);
-            if (root.optJSONArray("sessions") == null) {
-                root.put("sessions", new JSONArray());
-            }
-            localConversationRawCache.put(mode, raw);
-            localConversationRootCache.put(mode, root);
-            return root;
-        } catch (Exception ignored) {
-            try {
-                JSONObject root = new JSONObject().put("sessions", new JSONArray());
-                localConversationRawCache.put(mode, root.toString());
-                localConversationRootCache.put(mode, root);
-                return root;
-            } catch (Exception impossible) {
-                return new JSONObject();
-            }
-        }
-    }
-
-    private void saveLocalConversationStore(String mode, JSONObject root) {
-        String raw = root == null ? "{}" : root.toString();
-        localConversationRawCache.put(mode, raw);
-        if (root != null) {
-            localConversationRootCache.put(mode, root);
-        } else {
-            localConversationRootCache.remove(mode);
-        }
-        prefs.edit().putString(mode + "_conversation_store", raw).apply();
-        syncLocalConversationStoreToRoom(mode, root);
-    }
-
-    private void syncLocalConversationStoresToRoom() {
-        syncLocalConversationStoreToRoom("chat", localConversationStore("chat"));
-        syncLocalConversationStoreToRoom("image", localConversationStore("image"));
-    }
-
-    private void syncLocalConversationStoreToRoom(String mode, JSONObject root) {
-        if (mode == null || root == null) {
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                JSONArray sessions = root.optJSONArray("sessions");
-                if (sessions == null) {
-                    return;
-                }
-                for (int i = 0; i < sessions.length(); i++) {
-                    JSONObject source = sessions.optJSONObject(i);
-                    if (source == null) {
-                        continue;
-                    }
-                    String sessionId = source.optString("id", "").trim();
-                    if (sessionId.isEmpty()) {
-                        continue;
-                    }
-                    ConversationSessionEntity session = new ConversationSessionEntity();
-                    session.sessionId = sessionId;
-                    session.mode = mode;
-                    session.groupName = cleanDisplayText(source.optString("group", localConversationGroup(mode)));
-                    session.title = cleanDisplayText(source.optString("title", "新会话"));
-                    session.updatedAt = source.optLong("updatedAt", 0);
-                    session.preview = localSessionPreview(source);
-                    JSONArray messages = source.optJSONArray("messages");
-                    List<ConversationMessageEntity> rows = new ArrayList<>();
-                    if (messages != null) {
-                        for (int j = 0; j < messages.length(); j++) {
-                            JSONObject item = messages.optJSONObject(j);
-                            if (item == null) {
-                                continue;
-                            }
-                            ConversationMessageEntity row = new ConversationMessageEntity();
-                            row.messageId = sessionId + ":" + j + ":" + item.optLong("timestamp", 0);
-                            row.sessionId = sessionId;
-                            row.mode = mode;
-                            row.kind = "message";
-                            row.role = item.optString("role", "");
-                            row.contentType = item.optString("type", "text");
-                            row.text = cleanDisplayText(item.optString("text", ""));
-                            row.timestamp = item.optLong("timestamp", 0);
-                            row.sortIndex = j;
-                            row.rawJson = item.toString();
-                            rows.add(row);
-                        }
-                    }
-                    OneApiRoomDatabase.get(this).conversationDao().replaceSessionMessages(session, rows);
-                }
-            } catch (Exception ignored) {
-            }
-        });
-    }
-
-    private String localSessionPreview(JSONObject session) {
-        JSONArray messages = session == null ? null : session.optJSONArray("messages");
-        if (messages == null) {
-            return "";
-        }
-        for (int i = messages.length() - 1; i >= 0; i--) {
-            JSONObject item = messages.optJSONObject(i);
-            String text = item == null ? "" : cleanDisplayText(item.optString("text", ""));
-            if (!text.isEmpty()) {
-                return text.substring(0, Math.min(120, text.length()));
-            }
-        }
-        return "";
-    }
-
-    private JSONObject findLocalSession(JSONObject root, String id) {
-        JSONArray sessions = root.optJSONArray("sessions");
-        if (sessions == null || id == null || id.trim().isEmpty()) {
-            return null;
-        }
-        for (int i = 0; i < sessions.length(); i++) {
-            JSONObject session = sessions.optJSONObject(i);
-            if (session != null && id.equals(session.optString("id"))) {
-                return session;
-            }
-        }
-        return null;
-    }
-
-    private JSONObject ensureLocalSession(String mode, JSONObject root, String firstPrompt) throws Exception {
-        String id = activeLocalSessionId(mode);
-        JSONObject session = findLocalSession(root, id);
-        if (session != null && !localConversationGroup(mode).equals(session.optString("group"))) {
-            session = null;
-        }
-        if (session == null) {
-            JSONArray sessions = root.optJSONArray("sessions");
-            id = mode + "-" + System.currentTimeMillis();
-            session = new JSONObject()
-                    .put("id", id)
-                    .put("group", localConversationGroup(mode))
-                    .put("title", cleanSessionTitle(firstPrompt))
-                    .put("updatedAt", System.currentTimeMillis())
-                    .put("messages", new JSONArray());
-            sessions.put(session);
-            setActiveLocalSessionId(mode, id);
-        }
-        return session;
-    }
-
-    private void createLocalConversation(String mode) {
-        try {
-            JSONObject root = localConversationStore(mode);
-            JSONArray sessions = root.optJSONArray("sessions");
-            if (sessions == null) {
-                sessions = new JSONArray();
-                root.put("sessions", sessions);
-            }
-            String id = mode + "-" + System.currentTimeMillis();
-            JSONObject session = new JSONObject()
-                    .put("id", id)
-                    .put("group", localConversationGroup(mode))
-                    .put("title", "新会话")
-                    .put("updatedAt", System.currentTimeMillis())
-                    .put("messages", new JSONArray());
-            sessions.put(session);
-            setActiveLocalSessionId(mode, id);
-            trimLocalSessions(root);
-            saveLocalConversationStore(mode, root);
-        } catch (Exception ignored) {
-        }
-    }
-
-    private String cleanSessionTitle(String prompt) {
-        String title = cleanDisplayText(prompt);
-        if (title.isEmpty()) {
-            return "新会话";
-        }
-        return title.substring(0, Math.min(28, title.length()));
-    }
-
-    private JSONArray localConversationMessages(String mode) {
-        JSONObject root = localConversationStore(mode);
-        JSONObject session = resolveActiveLocalSession(mode, root);
-        JSONArray messages = session == null ? null : session.optJSONArray("messages");
-        return messages == null ? new JSONArray() : messages;
-    }
-
-    private JSONObject resolveActiveLocalSession(String mode, JSONObject root) {
-        String group = localConversationGroup(mode);
-        JSONObject session = findLocalSession(root, activeLocalSessionId(mode));
-        if (session != null && group.equals(session.optString("group"))) {
-            return session;
-        }
-        JSONArray sessions = root.optJSONArray("sessions");
-        JSONObject best = null;
-        if (sessions != null) {
-            for (int i = 0; i < sessions.length(); i++) {
-                JSONObject item = sessions.optJSONObject(i);
-                if (item == null || !group.equals(item.optString("group"))) {
-                    continue;
-                }
-                if (best == null || item.optLong("updatedAt") > best.optLong("updatedAt")) {
-                    best = item;
-                }
-            }
-        }
-        if (best != null) {
-            setActiveLocalSessionId(mode, best.optString("id"));
-        }
-        return best;
-    }
-
-    private int appendLocalConversation(String mode, String role, String type, String text) {
-        String clean = cleanDisplayText(text);
-        if (clean.isEmpty()) {
-            return -1;
-        }
-        try {
-            JSONObject root = localConversationStore(mode);
-            JSONObject session = ensureLocalSession(mode, root, clean);
-            JSONArray messages = session.optJSONArray("messages");
-            if (messages == null) {
-                messages = new JSONArray();
-                session.put("messages", messages);
-            }
-            int index = messages.length();
-            messages.put(new JSONObject()
-                    .put("role", role)
-                    .put("type", type)
-                    .put("text", clean)
-                    .put("timestamp", System.currentTimeMillis()));
-            session.put("updatedAt", System.currentTimeMillis());
-            if ("user".equals(role)) {
-                session.put("title", cleanSessionTitle(clean));
-            }
-            trimLocalSessions(root);
-            saveLocalConversationStore(mode, root);
-            return index;
-        } catch (Exception ignored) {
-            return -1;
-        }
-    }
-
-    private void trimLocalSessions(JSONObject root) throws Exception {
-        JSONArray sessions = root.optJSONArray("sessions");
-        if (sessions == null || sessions.length() <= 20) {
-            return;
-        }
-        List<JSONObject> rows = new ArrayList<>();
-        for (int i = 0; i < sessions.length(); i++) {
-            JSONObject item = sessions.optJSONObject(i);
-            if (item != null) {
-                rows.add(item);
-            }
-        }
-        rows.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
-        JSONArray next = new JSONArray();
-        for (int i = 0; i < Math.min(20, rows.size()); i++) {
-            next.put(rows.get(i));
-        }
-        root.put("sessions", next);
-    }
-
-    private void sendChatMessage() {
-        String prompt = trim(activeInput);
-        if (prompt.isEmpty()) {
-            toast("请输入消息");
-            return;
-        }
-        JSONArray contextMessages = chatContextMessagesForRequest();
-        hideKeyboard(activeInput);
-        setSending(true);
-        activeInput.setText("");
-        List<Uri> attachments = new ArrayList<>(selectedAttachmentUris);
-        selectedAttachmentUris.clear();
-        renderAttachmentPreview();
-        saveLocalRecent("chat", selectedChatAssistant, prompt);
-        for (Uri uri : attachments) {
-            String preview = imageSourceForBubble(uri);
-            if (!preview.isEmpty()) {
-                appendLocalConversation("chat", "user", "image", preview);
-                appendConversationItem(ConversationUiItem.image("chat", "user", preview, System.currentTimeMillis(), -1), true);
-            }
-        }
-        appendLocalConversation("chat", "user", "text", prompt);
-        appendConversationItem(ConversationUiItem.message("chat", "user", prompt, System.currentTimeMillis(), -1), true);
-        long assistantStartedAt = System.currentTimeMillis();
-        LinearLayout live = addStreamingBubble("assistant", assistantStartedAt);
-        updateStreamingBubble(live, "正在思考...", assistantStartedAt, false);
-        appendConversationItem(ConversationUiItem.message("chat:plain", "assistant", "正在思考...", assistantStartedAt, -1), true);
-        localAutoScrollEnabled = true;
-        scrollToBottom();
-        runNetwork(() -> {
-            JSONObject body = new JSONObject();
-            body.put("model", resolveChatModel(!attachments.isEmpty()));
-            body.put("stream", true);
-            String reasoning = reasoningValue(selectedReasoning);
-            if (!"off".equals(reasoning)) {
-                body.put("reasoning_effort", reasoning);
-            }
-            JSONArray messages = new JSONArray();
-            messages.put(new JSONObject().put("role", "system").put("content", assistantPrompt(selectedChatAssistant) + "\n上下文：" + selectedContextWindow));
-            for (int i = 0; i < contextMessages.length(); i++) {
-                JSONObject item = contextMessages.optJSONObject(i);
-                if (item != null) {
-                    messages.put(item);
-                }
-            }
-            if (attachments.isEmpty()) {
-                messages.put(new JSONObject().put("role", "user").put("content", prompt));
-            } else {
-                JSONArray contentParts = new JSONArray();
-                contentParts.put(new JSONObject().put("type", "text").put("text", prompt));
-                for (Uri uri : attachments) {
-                    String dataUrl = uriToDataUrl(uri);
-                    if (dataUrl.isEmpty()) {
-                        throw new ApiException(0, "", "图片读取失败，请重新选择图片后再发送。");
-                    }
-                    contentParts.put(new JSONObject().put("type", "image_url").put("image_url", new JSONObject().put("url", dataUrl)));
-                }
-                messages.put(new JSONObject().put("role", "user").put("content", contentParts));
-            }
-            body.put("messages", messages);
-            String text = streamChatResponse(body, live, assistantStartedAt);
-            ui(() -> {
-                setSending(false);
-                if (text.trim().isEmpty()) {
-                    replaceStreamingBubble(live, "本次没有返回可显示内容。", assistantStartedAt);
-                    appendLocalConversation("chat", "assistant", "text", "本次没有返回可显示内容。");
-                } else {
-                    replaceStreamingBubble(live, text, assistantStartedAt);
-                    appendLocalConversation("chat", "assistant", "text", text);
-                }
-                renderLocalConversationNow("chat", true);
-            });
-        });
-    }
-
-    private JSONArray chatContextMessagesForRequest() {
-        JSONArray out = new JSONArray();
-        JSONArray history = localConversationMessages("chat");
-        int limit = contextMessageLimit();
-        int start = Math.max(0, history.length() - limit);
-        for (int i = start; i < history.length(); i++) {
-            JSONObject item = history.optJSONObject(i);
-            if (item == null || !"text".equals(item.optString("type", "text"))) {
-                continue;
-            }
-            String role = item.optString("role", "");
-            if (!"user".equals(role) && !"assistant".equals(role)) {
-                continue;
-            }
-            String text = cleanDisplayText(item.optString("text", ""));
-            if (text.isEmpty()) {
-                continue;
-            }
-            try {
-                out.put(new JSONObject().put("role", role).put("content", trimAssistantContext(text)));
-            } catch (Exception ignored) {
-            }
-        }
-        return out;
-    }
-
-    private int contextMessageLimit() {
-        if (selectedContextWindow.contains("短")) {
-            return 6;
-        }
-        if (selectedContextWindow.contains("长")) {
-            return 20;
-        }
-        return 12;
-    }
-
-    private String trimAssistantContext(String text) {
-        String value = cleanDisplayText(text);
-        if (value.length() <= 4000) {
-            return value;
-        }
-        return value.substring(value.length() - 4000);
-    }
-
-    private void sendImageMessage() {
-        String prompt = trim(activeInput);
-        if (prompt.isEmpty()) {
-            toast("请输入图片描述");
-            return;
-        }
-        hideKeyboard(activeInput);
-        setSending(true);
-        activeInput.setText("");
-        List<Uri> attachments = new ArrayList<>(selectedAttachmentUris);
-        selectedAttachmentUris.clear();
-        renderAttachmentPreview();
-        saveLocalRecent("image", selectedImageAssistant, prompt);
-        for (Uri uri : attachments) {
-            String preview = imageSourceForBubble(uri);
-            if (!preview.isEmpty()) {
-                appendLocalConversation("image", "user", "image", preview);
-                appendConversationItem(ConversationUiItem.image("image", "user", preview, System.currentTimeMillis(), -1), true);
-            }
-        }
-        int userIndex = appendLocalConversation("image", "user", "text", prompt);
-        appendConversationItem(ConversationUiItem.message("image", "user", prompt, System.currentTimeMillis(), userIndex), true);
-        LinearLayout progress = addImageProgressBubble();
-        appendConversationItem(ConversationUiItem.message("image:plain", "assistant", "正在生成图片...", System.currentTimeMillis(), -1), true);
-        localAutoScrollEnabled = true;
-        scrollToBottom();
-        runNetwork(() -> {
-            JSONObject response;
-            if (!attachments.isEmpty()) {
-                response = apiImageEdit(attachments.get(0), imageAssistantPrompt(selectedImageAssistant, prompt));
-            } else {
-                JSONObject body = new JSONObject();
-                body.put("model", "gpt-image-2");
-                body.put("prompt", imageAssistantPrompt(selectedImageAssistant, prompt));
-                body.put("n", 1);
-                body.put("size", selectedImageSize);
-                body.put("quality", imageQualityValue(selectedImageQuality));
-                body.put("response_format", "b64_json");
-                if (imageRandomSeed) {
-                    body.put("seed", System.currentTimeMillis() % 1000000);
-                }
-                response = api("POST", "/pg/images/generations", body);
-            }
-            String text = extractImageText(response);
-            ui(() -> {
-                setSending(false);
-                String result = text.isEmpty() ? "模型没有返回可展示的图片。" : text;
-                int assistantIndex = appendLocalConversation("image", "assistant", result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/") ? "image" : "text", result);
-                renderImageResult(progress, result, System.currentTimeMillis(), "image", assistantIndex);
-                renderLocalConversationNow("image", true);
-            });
-        });
-    }
-
-    private String resolveChatModel(boolean hasImageAttachment) {
-        if (hasImageAttachment) {
-            String selected = selectedChatModel == null ? "" : selectedChatModel.trim();
-            if (isVisionChatModel(selected)) {
-                return selected;
-            }
-            for (String model : chatModels) {
-                if (isVisionChatModel(model)) {
-                    return model;
-                }
-            }
-            return "gpt-5.4";
-        }
-        if (selectedChatModel != null && !selectedChatModel.isEmpty()) {
-            return selectedChatModel;
-        }
-        return codexModels.isEmpty() ? "gpt-5.4" : codexModels.get(0);
-    }
-
-    private boolean isVisionChatModel(String model) {
-        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
-        return n.startsWith("gpt") || n.startsWith("gemini") || n.startsWith("claude");
-    }
-
-    private String imageQualityValue(String label) {
-        if (label.contains("高清")) return "high";
-        return "medium";
-    }
-
-    private String uriToDataUrl(Uri uri) {
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            if (input == null) {
-                return "";
-            }
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-            }
-            String mime = getContentResolver().getType(uri);
-            if (mime == null || mime.trim().isEmpty()) {
-                mime = "image/png";
-            }
-            return "data:" + mime + ";base64," + android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP);
-        } catch (Exception ignored) {
-            return "";
-        }
-    }
-
-    private String extractChatText(JSONObject response) {
-        JSONArray choices = response.optJSONArray("choices");
-        if (choices == null || choices.length() == 0) {
-            JSONObject data = response.optJSONObject("data");
-            return data == null ? response.optString("message", "") : extractChatText(data);
-        }
-        JSONObject choice = choices.optJSONObject(0);
-        JSONObject message = choice == null ? null : choice.optJSONObject("message");
-        return message == null ? "" : cleanJsonString(message, "content");
-    }
-
-    private String extractImageText(JSONObject response) {
-        String image = findImageSource(response);
-        if (!image.isEmpty()) {
-            return image;
-        }
-        return "";
-    }
-
-    private String findImageSource(Object value) {
-        if (value == null || value == JSONObject.NULL) {
-            return "";
-        }
-        if (value instanceof String) {
-            String text = cleanDisplayText((String) value);
-            if (looksLikeImageSource(text)) {
-                return normalizeImageSource(text);
-            }
-            return "";
-        }
-        if (value instanceof JSONArray) {
-            JSONArray array = (JSONArray) value;
-            for (int i = 0; i < array.length(); i++) {
-                String found = findImageSource(array.opt(i));
-                if (!found.isEmpty()) {
-                    return found;
-                }
-            }
-            return "";
-        }
-        if (!(value instanceof JSONObject)) {
-            return "";
-        }
-        JSONObject object = (JSONObject) value;
-        for (String key : new String[]{"url", "image_url", "imageUrl"}) {
-            String source = cleanJsonString(object, key);
-            if (!source.isEmpty()) {
-                return normalizeImageSource(source);
-            }
-        }
-        for (String key : new String[]{"b64_json", "b64Json", "image_base64", "binary_data_base64", "base64"}) {
-            String source = cleanJsonString(object, key);
-            if (!source.isEmpty()) {
-                return normalizeImageSource(source);
-            }
-        }
-        String type = cleanJsonString(object, "type");
-        String result = firstNonEmptyJsonString(object, "result", "image", "output_image");
-        if (!result.isEmpty() && (type.equals("image_generation_call") || type.equals("output_image") || type.equals("image"))) {
-            return normalizeImageSource(result);
-        }
-        for (String key : new String[]{"data", "output", "images", "result", "image_urls", "image_base64", "binary_data_base64"}) {
-            String found = findImageSource(object.opt(key));
-            if (!found.isEmpty()) {
-                return found;
-            }
-        }
-        return "";
-    }
-
-    private String firstNonEmptyJsonString(JSONObject object, String... keys) {
-        for (String key : keys) {
-            String value = cleanJsonString(object, key);
-            if (!value.isEmpty()) {
-                return value;
-            }
-        }
-        return "";
-    }
-
-    private boolean looksLikeImageSource(String value) {
-        String text = value == null ? "" : value.trim();
-        return text.startsWith("http://")
-                || text.startsWith("https://")
-                || text.startsWith("data:image/")
-                || text.length() > 120 && text.matches("^[A-Za-z0-9+/=\\r\\n]+$");
-    }
-
-    private String normalizeImageSource(String source) {
-        String value = cleanDisplayText(source).replace("\n", "").replace("\r", "");
-        if (value.startsWith("http://") || value.startsWith("https://") || value.startsWith("data:image/")) {
-            return value;
-        }
-        return "data:image/png;base64," + value;
-    }
-
-    private String streamChatResponse(JSONObject body, LinearLayout live, long timestamp) throws Exception {
-        String base = prefs.getString("server", "").replaceAll("/+$", "");
-        HttpURLConnection conn = (HttpURLConnection) new URL(base + "/pg/chat/completions").openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(180000);
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Accept", "text/event-stream, application/json");
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        String cookie = prefs.getString("cookie", "");
-        if (!cookie.isEmpty()) {
-            conn.setRequestProperty("Cookie", cookie);
-        }
-        String userId = prefs.getString("user_id", "");
-        if (!userId.isEmpty()) {
-            conn.setRequestProperty("New-Api-User", userId);
-        }
-        conn.setDoOutput(true);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(body.toString().getBytes(StandardCharsets.UTF_8));
-        }
-        int code = conn.getResponseCode();
-        if (code >= 400) {
-            String raw = readStream(conn.getErrorStream());
-            conn.disconnect();
-            throw new ApiException(code, raw, "聊天服务暂时不可用，请稍后重试。");
-        }
-        String contentType = conn.getContentType() == null ? "" : conn.getContentType().toLowerCase(Locale.ROOT);
-        if (!contentType.contains("event-stream")) {
-            String raw = readStream(conn.getInputStream());
-            conn.disconnect();
-            String text = extractChatText(new JSONObject(raw.isEmpty() ? "{}" : raw));
-            ui(() -> updateStreamingBubble(live, text, timestamp, false));
-            return text;
-        }
-        StringBuilder answer = new StringBuilder();
-        StringBuilder thinking = new StringBuilder();
-        long[] lastLiveUpdateAt = new long[]{0L};
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (!line.startsWith("data:")) {
-                    continue;
-                }
-                String data = line.substring(5).trim();
-                if (data.isEmpty()) {
-                    continue;
-                }
-                if ("[DONE]".equals(data)) {
-                    break;
-                }
-                try {
-                    JSONObject json = new JSONObject(data);
-                    JSONArray choices = json.optJSONArray("choices");
-                    JSONObject choice = choices == null || choices.length() == 0 ? null : choices.optJSONObject(0);
-                    JSONObject delta = choice == null ? null : choice.optJSONObject("delta");
-                    if (delta == null) {
-                        continue;
-                    }
-                    String reasoning = rawJsonString(delta, "reasoning_content");
-                    if (reasoning.length() == 0) {
-                        reasoning = rawJsonString(delta, "reasoning");
-                    }
-                    String content = rawJsonString(delta, "content");
-                    if (reasoning.length() > 0) {
-                        thinking.append(reasoning);
-                    }
-                    if (content.length() > 0) {
-                        answer.append(content);
-                    }
-                    long now = System.currentTimeMillis();
-                    if (now - lastLiveUpdateAt[0] >= 90L) {
-                        lastLiveUpdateAt[0] = now;
-                        String rendered = renderLiveChatText(thinking.toString(), answer.toString());
-                        ui(() -> {
-                            updateStreamingBubble(live, rendered, timestamp, false);
-                            scrollToBottomIfLocalAuto();
-                        });
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-        } finally {
-            conn.disconnect();
-        }
-        String finalText = renderLiveChatText(thinking.toString(), answer.toString());
-        ui(() -> updateStreamingBubble(live, finalText, timestamp, false));
-        return finalText;
-    }
-
-    private String renderLiveChatText(String thinking, String answer) {
-        StringBuilder out = new StringBuilder();
-        String[] normalized = normalizeThinkingAndAnswer(thinking, answer);
-        if (!normalized[0].trim().isEmpty()) {
-            out.append("思考过程\n").append(normalized[0].trim()).append("\n\n");
-        }
-        out.append(normalized[1]);
-        return out.toString();
-    }
-
-    private String[] normalizeThinkingAndAnswer(String thinking, String answer) {
-        String resolvedThinking = cleanDisplayText(thinking);
-        String resolvedAnswer = cleanDisplayText(answer);
-        String[] extracted = extractTaggedThinking(resolvedAnswer, "think");
-        if (extracted[0].isEmpty()) {
-            extracted = extractTaggedThinking(resolvedAnswer, "thinking");
-        }
-        if (!extracted[0].isEmpty()) {
-            resolvedThinking = joinNonEmpty(resolvedThinking, extracted[0]);
-            resolvedAnswer = extracted[1];
-        }
-        if (resolvedAnswer.startsWith("Thinking\n")) {
-            int split = resolvedAnswer.indexOf("\n\n");
-            if (split > 0) {
-                resolvedThinking = joinNonEmpty(resolvedThinking, resolvedAnswer.substring("Thinking\n".length(), split));
-                resolvedAnswer = resolvedAnswer.substring(split + 2).trim();
-            } else {
-                resolvedAnswer = resolvedAnswer.substring("Thinking\n".length()).trim();
-            }
-        }
-        return new String[]{resolvedThinking, resolvedAnswer};
-    }
-
-    private String[] extractTaggedThinking(String value, String tag) {
-        String text = value == null ? "" : value;
-        String lower = text.toLowerCase(Locale.ROOT);
-        String open = "<" + tag + ">";
-        String close = "</" + tag + ">";
-        StringBuilder thinking = new StringBuilder();
-        StringBuilder answer = new StringBuilder();
-        int cursor = 0;
-        while (true) {
-            int start = lower.indexOf(open, cursor);
-            if (start < 0) {
-                answer.append(text.substring(cursor));
-                break;
-            }
-            answer.append(text, cursor, start);
-            int contentStart = start + open.length();
-            int end = lower.indexOf(close, contentStart);
-            if (end < 0) {
-                thinking.append(text.substring(contentStart));
-                cursor = text.length();
-                break;
-            }
-            thinking.append(text, contentStart, end).append('\n');
-            cursor = end + close.length();
-        }
-        return new String[]{cleanDisplayText(thinking.toString()), cleanDisplayText(answer.toString())};
-    }
-
-    private String joinNonEmpty(String first, String second) {
-        String left = cleanDisplayText(first);
-        String right = cleanDisplayText(second);
-        if (left.isEmpty()) return right;
-        if (right.isEmpty()) return left;
-        return left + "\n" + right;
-    }
-
-    private String cleanJsonString(JSONObject object, String key) {
-        if (object == null || key == null || !object.has(key) || object.isNull(key)) {
-            return "";
-        }
-        return cleanDisplayText(jsonValueToText(object.opt(key)));
-    }
-
-    private String rawJsonString(JSONObject object, String key) {
-        if (object == null || key == null || !object.has(key) || object.isNull(key)) {
-            return "";
-        }
-        return jsonValueToText(object.opt(key)).replace("\u0000", "");
-    }
-
-    private String jsonValueToText(Object value) {
-        if (value == null || value == JSONObject.NULL) {
-            return "";
-        }
-        if (value instanceof String) {
-            return (String) value;
-        }
-        if (value instanceof JSONArray) {
-            JSONArray array = (JSONArray) value;
-            StringBuilder out = new StringBuilder();
-            for (int i = 0; i < array.length(); i++) {
-                String part = jsonValueToText(array.opt(i));
-                if (!part.trim().isEmpty()) {
-                    if (out.length() > 0) out.append('\n');
-                    out.append(part);
-                }
-            }
-            return out.toString();
-        }
-        if (value instanceof JSONObject) {
-            JSONObject object = (JSONObject) value;
-            for (String key : new String[]{"text", "content", "summary", "value"}) {
-                String part = jsonValueToText(object.opt(key));
-                if (!part.trim().isEmpty()) {
-                    return part;
-                }
-            }
-            return "";
-        }
-        return String.valueOf(value);
-    }
-
-    private String cleanDisplayText(String text) {
-        if (text == null) {
-            return "";
-        }
-        String value = text.replace("\u0000", "").trim();
-        while (value.endsWith("null")) {
-            String next = value.substring(0, value.length() - 4).trim();
-            if (next.equals(value)) {
-                break;
-            }
-            value = next;
-        }
-        return "null".equalsIgnoreCase(value) ? "" : value;
-    }
-
-    private void refreshSubscriptions() {
-        runNetworkQuiet(() -> {
-            JSONObject envelope = api("GET", "/api/subscription/plans", null);
-            JSONArray data = envelope.optJSONArray("data");
-            if (data == null) {
-                data = new JSONArray();
-            }
-            JSONArray plans = data;
-            ui(() -> {
-                View maybe = content == null ? null : content.findViewWithTag("subscription_list");
-                if (maybe instanceof LinearLayout) {
-                    renderSubscriptionList((LinearLayout) maybe, plans);
-                }
-            });
-        });
-    }
-
-    private void renderSubscriptionList(LinearLayout list, JSONArray records) {
-        list.removeAllViews();
-        if (records.length() == 0) {
-            list.addView(card("暂无可订阅套餐", "服务器当前没有开启可订阅套餐。"));
-            return;
-        }
-        Set<String> recommendedPlans = recommendedPlanKeys(records);
-        for (int i = 0; i < records.length(); i++) {
-            JSONObject record = records.optJSONObject(i);
+        Set<String> recommended = recommendedPlanKeys(plans);
+        for (int i = 0; i < plans.length(); i++) {
+            JSONObject record = plans.optJSONObject(i);
             JSONObject plan = record == null ? null : record.optJSONObject("plan");
-            if (plan == null || !plan.optBoolean("enabled", true)) {
-                continue;
-            }
-            if (isTrialPlan(plan) && hasPurchasedPlan(record, plan)) {
-                continue;
-            }
-            double priceAmount = plan.optDouble("price_amount", 0);
-            String title = plan.optString("title", "套餐");
-            String subtitle = plan.optString("subtitle", "适合稳定使用。");
-            String price = formatPlainPrice(priceAmount);
-            String quota = formatQuotaAsUsd(plan.optDouble("total_amount", 0), 500000);
-            String validity = formatDuration(plan);
-            String reset = resetLabel(plan.optString("quota_reset_period", "never"));
-            boolean trialPlan = isTrialPlan(plan);
-            boolean recommended = recommendedPlans.contains(planKey(plan));
-            FrameLayout frame = subscriptionCardFrame();
-            if (trialPlan && Math.abs(priceAmount - 50D) < 0.01D) {
+            if (plan == null) continue;
+            if (!plan.optBoolean("enabled", true)) continue;
+            if (isTrialPlan(plan) && hasPurchasedPlan(record, plan)) continue;
+            FrameLayout frame = new FrameLayout(this);
+            frame.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.LINE));
+            LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(-1, -2);
+            frameLp.setMargins(0, 0, 0, UiKit.dp(this, 16));
+            frame.setLayoutParams(frameLp);
+            if (isFreshPlan(plan)) {
                 ImageView gift = new ImageView(this);
                 gift.setImageResource(R.drawable.plan_gift);
-                gift.setAlpha(0.5f);
+                gift.setAlpha(0.46f);
                 gift.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                FrameLayout.LayoutParams giftLp = new FrameLayout.LayoutParams(dp(96), dp(96), Gravity.CENTER);
-                frame.addView(gift, giftLp);
-                frame.post(() -> {
-                    int side = Math.max(dp(72), frame.getHeight() / 2);
-                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(side, side, Gravity.CENTER);
-                    gift.setLayoutParams(lp);
-                });
+                frame.addView(gift, new FrameLayout.LayoutParams(UiKit.dp(this, 92), UiKit.dp(this, 92), Gravity.CENTER));
             }
-            LinearLayout panel = vertical();
-            panel.setPadding(dp(16), dp(15), dp(16), dp(15));
-            LinearLayout head = horizontal();
-            head.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-            TextView badge = planBadge(plan);
-            head.addView(badge, new LinearLayout.LayoutParams(dp(74), dp(28)));
-            panel.addView(head);
-            panel.addView(copy(subtitle));
-            panel.addView(copy("总额度 " + quota + " · 有效期 " + validity + " · " + reset));
-            LinearLayout foot = horizontal();
-            foot.setGravity(Gravity.CENTER_VERTICAL);
-            TextView priceView = bold(price + " 元");
-            priceView.setTextColor(BLUE);
-            foot.addView(priceView, new LinearLayout.LayoutParams(0, -2, 1));
-            if (recommended) {
+            LinearLayout card = UiKit.vertical(this);
+            card.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 15), UiKit.dp(this, 16), UiKit.dp(this, 15));
+            LinearLayout head = UiKit.horizontal(this);
+            head.addView(UiKit.bold(this, plan.optString("title", "套餐")), new LinearLayout.LayoutParams(0, -2, 1f));
+            head.addView(planBadge(plan), new LinearLayout.LayoutParams(UiKit.dp(this, 74), UiKit.dp(this, 28)));
+            card.addView(head);
+            card.addView(UiKit.text(this, plan.optString("subtitle", "适合稳定使用。"), UiKit.MUTED, 13));
+            card.addView(UiKit.text(this,
+                    "总额度 " + formatQuotaAsUsd(plan.optDouble("total_amount", 0), 500000)
+                            + " · 有效期 " + formatDuration(plan)
+                            + " · " + resetLabel(plan.optString("quota_reset_period", "never")),
+                    UiKit.MUTED, 13));
+            LinearLayout foot = UiKit.horizontal(this);
+            TextView price = UiKit.bold(this, formatPlainPrice(plan.optDouble("price_amount", 0)) + " 元");
+            price.setTextColor(UiKit.BLUE);
+            foot.addView(price, new LinearLayout.LayoutParams(0, -2, 1f));
+            if (recommended.contains(planKey(plan))) {
                 ImageView sale = new ImageView(this);
                 sale.setImageResource(R.drawable.plan_sale);
                 sale.setAlpha(0.82f);
                 sale.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                LinearLayout.LayoutParams saleLp = new LinearLayout.LayoutParams(dp(17), dp(17));
-                saleLp.setMargins(0, 0, dp(6), 0);
+                LinearLayout.LayoutParams saleLp = new LinearLayout.LayoutParams(UiKit.dp(this, 18), UiKit.dp(this, 18));
+                saleLp.setMargins(0, 0, UiKit.dp(this, 8), 0);
                 foot.addView(sale, saleLp);
             }
-            JSONObject selectedPlan = plan;
-            ImageButton buy = planBuyButton(() -> showSubscriptionPayDialog(selectedPlan));
-            foot.addView(buy, new LinearLayout.LayoutParams(dp(62), dp(62)));
-            LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, -2);
-            footLp.setMargins(0, dp(6), 0, 0);
-            panel.addView(foot, footLp);
-            frame.addView(panel, new FrameLayout.LayoutParams(-1, -2));
-            list.addView(frame);
-        }
-        if (list.getChildCount() == 0) {
-            list.addView(card("暂无可订阅套餐", "服务器当前没有开启可订阅套餐。"));
+            ImageButton buy = UiKit.imageButton(this, R.drawable.ic_bubble_buy, "购买套餐");
+            buy.setColorFilter(UiKit.BLUE);
+            buy.setBackgroundColor(Color.TRANSPARENT);
+            buy.setPadding(0, 0, 0, 0);
+            buy.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            buy.setOnClickListener(v -> purchasePlan(plan));
+            foot.addView(buy, new LinearLayout.LayoutParams(UiKit.dp(this, 32), UiKit.dp(this, 32)));
+            card.addView(foot);
+            frame.addView(card, new FrameLayout.LayoutParams(-1, -2));
+            panel.addView(frame);
         }
     }
 
-    private FrameLayout subscriptionCardFrame() {
-        FrameLayout frame = new FrameLayout(this);
-        frame.setBackground(round(GLASS, dp(18), LINE));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, 0, 0, dp(16));
-        frame.setLayoutParams(lp);
-        return frame;
-    }
-
-    private ImageButton planBuyButton(Runnable action) {
-        ImageButton b = new ImageButton(this);
-        b.setImageResource(R.drawable.ic_bubble_buy);
-        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        b.setPadding(dp(8), dp(8), dp(8), dp(8));
-        b.setBackground(round(Color.rgb(255, 255, 255), dp(18), LINE));
-        b.setContentDescription("订阅套餐");
-        b.setOnClickListener(v -> action.run());
-        return b;
+    private void purchasePlan(JSONObject plan) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        panel.addView(UiKit.bold(this, "钱包支付"));
+        panel.addView(UiKit.text(this, plan.optString("title", "套餐") + " · " + formatPlainPrice(plan.optDouble("price_amount", 0)) + " 元", UiKit.MUTED, 14));
+        panel.addView(UiKit.text(this, "确认后将从钱包余额扣除并购买该套餐。", UiKit.MUTED, 14));
+        LinearLayout actions = UiKit.horizontal(this);
+        Button cancel = UiKit.ghostButton(this, "取消");
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        Button confirm = UiKit.ghostButton(this, "确认支付");
+        confirm.setOnClickListener(v -> {
+            confirm.setEnabled(false);
+            confirm.setText("支付中");
+            network.execute(() -> {
+                try {
+                    JSONObject body = new JSONObject();
+                    body.put("plan_id", plan.optInt("id", 0));
+                    JSONObject response = billingController.purchase(body);
+                    mainHandler.post(() -> {
+                        dialog.dismiss();
+                        Toast.makeText(this, response.optJSONObject("data") == null ? "套餐购买成功" : response.optJSONObject("data").optString("notice", "套餐购买成功"), Toast.LENGTH_LONG).show();
+                        renderCurrent(false);
+                    });
+                } catch (Exception error) {
+                    mainHandler.post(() -> {
+                        confirm.setEnabled(true);
+                        confirm.setText("确认支付");
+                        Toast.makeText(this, "购买失败：" + message(error), Toast.LENGTH_LONG).show();
+                    });
+                }
+            });
+        });
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f);
+        cancelLp.setMargins(0, 0, UiKit.dp(this, 10), 0);
+        LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f);
+        confirmLp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
+        actions.addView(cancel, cancelLp);
+        actions.addView(confirm, confirmLp);
+        panel.addView(actions, centeredButtonLp());
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
     }
 
     private Set<String> recommendedPlanKeys(JSONArray records) {
@@ -2968,9 +1777,7 @@ public class MainActivity extends Activity {
         for (int i = 0; i < records.length(); i++) {
             JSONObject record = records.optJSONObject(i);
             JSONObject plan = record == null ? null : record.optJSONObject("plan");
-            if (plan == null || !plan.optBoolean("enabled", true) || isTrialPlan(plan)) {
-                continue;
-            }
+            if (plan == null || !plan.optBoolean("enabled", true) || isTrialPlan(plan)) continue;
             double price = plan.optDouble("price_amount", 0);
             String unit = plan.optString("duration_unit", "month");
             int value = Math.max(1, plan.optInt("duration_value", 1));
@@ -2992,25 +1799,23 @@ public class MainActivity extends Activity {
     }
 
     private String planKey(JSONObject plan) {
-        if (plan == null) {
-            return "";
-        }
-        int id = plan.optInt("id", 0);
-        if (id != 0) {
-            return "id:" + id;
-        }
-        return plan.optString("title", "") + "|" + plan.optString("duration_unit", "") + "|" + plan.optInt("duration_value", 0);
+        int id = plan == null ? 0 : plan.optInt("id", 0);
+        if (id != 0) return "id:" + id;
+        return plan == null ? "" : plan.optString("title", "") + "|" + plan.optString("duration_unit", "") + "|" + plan.optInt("duration_value", 0);
     }
 
     private boolean isTrialPlan(JSONObject plan) {
-        String text = (plan.optString("title") + " " + plan.optString("subtitle") + " " + plan.optString("name")).toLowerCase(Locale.ROOT);
+        String text = plan == null ? "" : (plan.optString("title") + " " + plan.optString("subtitle") + " " + plan.optString("name")).toLowerCase(Locale.ROOT);
         return text.contains("尝鲜") || text.contains("trial") || text.contains("体验");
     }
 
+    private boolean isFreshPlan(JSONObject plan) {
+        String text = plan == null ? "" : plan.optString("title", "") + " " + plan.optString("name", "");
+        return text.contains("尝鲜");
+    }
+
     private boolean hasPurchasedPlan(JSONObject record, JSONObject plan) {
-        if (record == null || plan == null) {
-            return false;
-        }
+        if (record == null || plan == null) return false;
         return record.optBoolean("purchased", false)
                 || record.optBoolean("subscribed", false)
                 || record.optBoolean("owned", false)
@@ -3021,4699 +1826,145 @@ public class MainActivity extends Activity {
     }
 
     private TextView planBadge(JSONObject plan) {
-        String label;
-        int color;
         String unit = plan.optString("duration_unit", "month");
         int value = Math.max(1, plan.optInt("duration_value", 1));
+        String label;
+        int fill;
         if ("year".equals(unit) || value >= 12) {
             label = "年付";
-            color = Color.argb(54, 245, 158, 11);
+            fill = Color.argb(54, 245, 158, 11);
         } else if ("month".equals(unit)) {
             label = "月付";
-            color = Color.argb(54, 54, 104, 240);
+            fill = Color.argb(54, 54, 104, 240);
         } else {
             label = formatDuration(plan);
-            color = Color.argb(54, 210, 132, 40);
+            fill = Color.argb(54, 210, 132, 40);
         }
-        TextView badge = copy(label);
-        badge.setTextColor(Color.rgb(66, 82, 108));
-        badge.setTextSize(12);
+        TextView badge = UiKit.text(this, label, Color.rgb(66, 82, 108), 12);
         badge.setGravity(Gravity.CENTER);
-        badge.setBackground(round(color, dp(14), Color.argb(74, 145, 160, 184)));
+        badge.setBackground(UiKit.round(fill, UiKit.dp(this, 14), Color.argb(74, 145, 160, 184)));
         return badge;
-    }
-
-    private void showSubscriptionPayDialog(JSONObject plan) {
-        if (plan == null) {
-            return;
-        }
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(104, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.addView(bold("钱包支付"));
-        panel.addView(copy(plan.optString("title", "套餐") + " · " + formatPlainPrice(plan.optDouble("price_amount", 0)) + " 元"));
-        panel.addView(copy("确认后将从钱包余额扣除并购买该套餐。"));
-        LinearLayout actions = horizontal();
-        actions.setPadding(0, dp(14), 0, 0);
-        Button cancel = ghost("取消");
-        cancel.setOnClickListener(v -> dialog.dismiss());
-        Button confirm = primary("确认支付");
-        confirm.setOnClickListener(v -> {
-            confirm.setEnabled(false);
-            confirm.setText("支付中");
-            executor.execute(() -> {
-                try {
-                    JSONObject body = new JSONObject();
-                    body.put("plan_id", plan.optInt("id", 0));
-                    JSONObject res = api("POST", "/api/subscription/wallet/pay", body);
-                    JSONObject data = res.optJSONObject("data");
-                    String notice = data == null ? "" : data.optString("notice", "");
-                    ui(() -> {
-                        dialog.dismiss();
-                        toast(notice.isEmpty() ? "套餐购买成功" : notice);
-                        refreshSubscriptions();
-                        refreshWallet();
-                    });
-                } catch (Exception e) {
-                    ui(() -> {
-                        confirm.setEnabled(true);
-                        confirm.setText("确认支付");
-                        toast(userMessage(e));
-                    });
-                }
-            });
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, dp(42), 1);
-        cancelLp.setMargins(0, 0, dp(8), 0);
-        LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(0, dp(42), 1);
-        confirmLp.setMargins(dp(8), 0, 0, 0);
-        actions.addView(cancel, cancelLp);
-        actions.addView(confirm, confirmLp);
-        panel.addView(actions);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2, Gravity.CENTER);
-        lp.setMargins(dp(18), 0, dp(18), 0);
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private void refreshWallet() {
-        runNetworkQuiet(() -> {
-            JSONObject profile = api("GET", "/api/user/self", null).optJSONObject("data");
-            JSONObject billing = api("GET", "/api/user/topup/self?p=1&page_size=3", null).optJSONObject("data");
-            JSONObject usage = api("GET", "/api/log/self?p=1&page_size=50", null).optJSONObject("data");
-            Object plansData = null;
-            JSONObject subscriptions = null;
-            try {
-                plansData = api("GET", "/api/subscription/plans", null).opt("data");
-            } catch (Exception ignored) {
-            }
-            try {
-                subscriptions = api("GET", "/api/subscription/self", null).optJSONObject("data");
-            } catch (Exception ignored) {
-            }
-            JSONArray plans = plansData instanceof JSONArray ? (JSONArray) plansData : new JSONArray();
-            JSONObject finalSubscriptions = subscriptions == null ? new JSONObject() : subscriptions;
-            ui(() -> {
-                View maybe = content == null ? null : content.findViewWithTag("wallet_list");
-                if (maybe instanceof LinearLayout) {
-                    renderWalletList((LinearLayout) maybe, profile == null ? new JSONObject() : profile, billing == null ? new JSONObject() : billing, usage == null ? new JSONObject() : usage, plans, finalSubscriptions);
-                }
-            });
-        });
-    }
-
-    private void renderWalletList(LinearLayout list, JSONObject profile, JSONObject billing, JSONObject usage, JSONArray plans, JSONObject subscriptions) {
-        list.removeAllViews();
-        LinearLayout overview = cardPanel();
-        overview.addView(bold("钱包总览"));
-        overview.addView(copy("剩余额度 " + formatQuotaAsUsd(profile.optDouble("quota", 0), 500000)));
-        overview.addView(copy("已用额度 " + formatQuotaAsUsd(profile.optDouble("used_quota", 0), 500000) + " · 请求数 " + profile.optLong("request_count", 0)));
-        list.addView(overview);
-
-        LinearLayout distribution = cardPanel();
-        distribution.addView(bold("消耗分布"));
-        renderUsageDistribution(distribution, usage.optJSONArray("items"));
-
-        LinearLayout bills = cardPanel();
-        bills.addView(bold("最近账单"));
-        JSONArray items = billing.optJSONArray("items");
-        if (items == null || items.length() == 0) {
-            bills.addView(copy("暂无最近账单。"));
-        } else {
-            for (int i = 0; i < Math.min(items.length(), 3); i++) {
-                JSONObject item = items.optJSONObject(i);
-                if (item == null) {
-                    continue;
-                }
-                double amount = Math.abs(item.optDouble("amount", item.optDouble("money", 0)));
-                bills.addView(billingRow(formatBillingLabel(item) + " · " + formatPlainPrice(item.optDouble("money", amount)) + " 元", resolveBillingUsageRatio(item, plans, subscriptions)));
-            }
-        }
-        list.addView(bills);
-        list.addView(distribution);
-    }
-
-    private void refreshServiceStatus() {
-        runNetworkQuiet(() -> {
-            JSONObject envelope = api("GET", "/api/service-status", null);
-            JSONObject data = envelope.optJSONObject("data");
-            JSONArray items = data == null ? new JSONArray() : data.optJSONArray("items");
-            long refreshedAt = data == null ? 0 : data.optLong("refreshedAt", 0);
-            JSONArray finalItems = items == null ? new JSONArray() : items;
-            ui(() -> {
-                View maybe = content == null ? null : content.findViewWithTag("service_status_list");
-                if (maybe instanceof LinearLayout) {
-                    renderServiceStatusList((LinearLayout) maybe, finalItems, refreshedAt);
-                }
-            });
-        });
-    }
-
-    private void renderServiceStatusList(LinearLayout list, JSONArray items, long refreshedAt) {
-        list.removeAllViews();
-        LinearLayout header = cardPanel();
-        header.addView(bold("渠道运行状态"));
-        header.addView(copy(refreshedAt > 0 ? "最后更新：" + formatDateTime(refreshedAt) : "最近状态变化"));
-        list.addView(header);
-        if (items.length() == 0) {
-            list.addView(card("当前没有可展示的服务状态", "服务器尚未配置 Claude、Codex、Gemini、DeepSeek 或 XiaomiMIMO 渠道。"));
-            return;
-        }
-        for (int i = 0; i < items.length(); i++) {
-            JSONObject item = items.optJSONObject(i);
-            if (item == null) {
-                continue;
-            }
-            LinearLayout row = cardPanel();
-            LinearLayout head = horizontal();
-            head.addView(bold(item.optString("title", "服务")), new LinearLayout.LayoutParams(0, -2, 1));
-            TextView status = copy(serviceToneLabel(item.optString("tone")));
-            status.setTextColor(serviceToneColor(item.optString("tone")));
-            status.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-            head.addView(status, new LinearLayout.LayoutParams(dp(96), -2));
-            row.addView(head);
-            String subtitle = item.optString("subtitle", "");
-            if (!subtitle.isEmpty()) {
-                row.addView(copy(subtitle));
-            }
-            JSONArray history = item.optJSONArray("history");
-            if (history != null && history.length() > 0) {
-                row.addView(serviceHistoryDots(history));
-            }
-            String meta = "";
-            if (item.optLong("latencyMs", 0) > 0) {
-                meta += "延迟 " + item.optLong("latencyMs") + " ms";
-            }
-            if (item.optLong("checkedAt", 0) > 0) {
-                meta += (meta.isEmpty() ? "" : " · ") + "检测时间 " + formatDateTime(item.optLong("checkedAt"));
-            }
-            if (!meta.isEmpty()) {
-                row.addView(copy(meta));
-            }
-            String detail = item.optString("detail", "");
-            if (!detail.isEmpty()) {
-                row.addView(copy(detail));
-            }
-            list.addView(row);
-        }
-    }
-
-    private void refreshModels() {
-        runNetworkQuiet(() -> {
-            JSONObject envelope = api("GET", "/api/pricing", null);
-            JSONArray data = envelope.optJSONArray("data");
-            if (data == null) {
-                return;
-            }
-            for (int i = 0; i < data.length(); i++) {
-                JSONObject item = data.optJSONObject(i);
-                String model = item == null ? "" : item.optString("model_name", item.optString("model", ""));
-                addModelIfCompatible(model);
-            }
-            ui(() -> {
-                if ("codex".equals(section) || "claude".equals(section)) {
-                    renderSection();
-                }
-            });
-        });
-    }
-
-    private void addModelIfCompatible(String model) {
-        String m = model == null ? "" : model.trim();
-        String n = m.toLowerCase(Locale.ROOT);
-        if (m.isEmpty()) {
-            return;
-        }
-        if ((n.startsWith("gpt-") || n.contains("codex") || n.equals("deepseek-v4-flash") || n.equals("deepseek-v4-pro") || n.equals("mimo-v2.5") || n.equals("mimo-v2.5-pro")) && !codexModels.contains(m)) {
-            codexModels.add(m);
-        }
-        if ((n.startsWith("claude") || n.equals("deepseek-v4-flash") || n.equals("deepseek-v4-pro") || n.equals("mimo-v2.5-pro")) && !claudeModels.contains(m)) {
-            claudeModels.add(m);
-        }
-        if (isChatModelName(m) && !chatModels.contains(m)) {
-            chatModels.add(m);
-        }
-    }
-
-    private boolean isChatModelName(String model) {
-        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
-        return !n.isEmpty() && !n.contains("image") && !n.contains("midjourney") && !n.contains("dall") && !n.contains("stable");
-    }
-
-    private void refreshAssistants(boolean showToast) {
-        runNetworkQuiet(() -> {
-            String query = boundDeviceId.isEmpty() ? "" : "?device_id=" + enc(boundDeviceId);
-            JSONObject envelope = api("GET", "/api/mobile/desktop-assistants" + query, null);
-            JSONArray data = envelope.optJSONArray("data");
-            if (data == null) {
-                data = new JSONArray();
-            }
-            List<JSONObject> chat = new ArrayList<>();
-            List<JSONObject> image = new ArrayList<>();
-            for (int i = 0; i < data.length(); i++) {
-                JSONObject item = data.optJSONObject(i);
-                if (item == null) {
-                    continue;
-                }
-                String scope = item.optString("scope", "chat");
-                if ("draw".equals(scope) || "image".equals(scope)) {
-                    image.add(item);
-                } else {
-                    chat.add(item);
-                }
-            }
-            ui(() -> {
-                chatAssistants.clear();
-                chatAssistants.addAll(chat);
-                imageAssistants.clear();
-                imageAssistants.addAll(image);
-            });
-        });
-    }
-
-    private void refreshDevices(boolean showToast) {
-        runNetworkQuiet(() -> {
-            JSONObject envelope = api("GET", "/api/mobile/desktop-devices", null);
-            JSONArray devices = envelope.optJSONArray("data");
-            if (devices == null) {
-                devices = new JSONArray();
-            }
-            devices = activeDevices(devices);
-            String stored = prefs.getString("bound_device_id", "");
-            boolean storedExists = stored.isEmpty();
-            for (int i = 0; i < devices.length(); i++) {
-                JSONObject device = devices.optJSONObject(i);
-                if (device != null && stored.equals(device.optString("deviceId"))) {
-                    storedExists = true;
-                }
-                if (device != null && device.optBoolean("bound")) {
-                    stored = device.optString("deviceId");
-                    storedExists = true;
-                    break;
-                }
-            }
-            if (!stored.isEmpty() && storedExists) {
-                boundDeviceId = stored;
-                prefs.edit().putString("bound_device_id", stored).apply();
-            } else if (!stored.isEmpty()) {
-                boundDeviceId = "";
-                prefs.edit().remove("bound_device_id").apply();
-            }
-            JSONArray finalDevices = devices;
-            ui(() -> {
-                if (statusText != null) {
-                    statusText.setText(boundDeviceId.isEmpty() ? "未绑定设备" : "绑定设备 " + shortId(boundDeviceId));
-                }
-                View maybe = content == null ? null : content.findViewWithTag("device_list");
-                if (maybe instanceof LinearLayout) {
-                    renderDeviceList((LinearLayout) maybe, finalDevices);
-                }
-            });
-        });
-    }
-
-    private void renderDeviceList(LinearLayout list, JSONArray devices) {
-        list.removeAllViews();
-        if (devices.length() == 0) {
-            LinearLayout empty = cardPanel();
-            LinearLayout head = horizontal();
-            head.addView(bold("暂无客户端"), new LinearLayout.LayoutParams(0, -2, 1));
-            Button refresh = iconButton("↻");
-            refresh.setContentDescription("刷新设备");
-            refresh.setOnClickListener(v -> refreshDevices(true));
-            head.addView(refresh, new LinearLayout.LayoutParams(dp(32), dp(32)));
-            empty.addView(head);
-            empty.addView(copy("请打开 PC/Mac 客户端并登录同一账号，客户端在线后会自动出现在这里。"));
-            list.addView(empty);
-            return;
-        }
-        for (int i = 0; i < devices.length(); i++) {
-            JSONObject d = devices.optJSONObject(i);
-            if (d == null) {
-                continue;
-            }
-            String deviceId = d.optString("deviceId");
-            boolean current = !boundDeviceId.isEmpty() && deviceId.equals(boundDeviceId);
-            LinearLayout row = cardPanel();
-            if (!current) {
-                row.setBackground(round(Color.argb(154, 238, 241, 246), dp(18), Color.argb(92, 158, 169, 188)));
-            }
-            LinearLayout head = horizontal();
-            head.addView(bold(d.optString("name", "桌面客户端")), new LinearLayout.LayoutParams(0, -2, 1));
-            if (i == 0) {
-                Button refresh = iconButton("↻");
-                refresh.setContentDescription("刷新设备");
-                refresh.setOnClickListener(v -> refreshDevices(true));
-                head.addView(refresh, new LinearLayout.LayoutParams(dp(32), dp(32)));
-            }
-            row.addView(head);
-            row.addView(copy(d.optString("platform", "desktop") + " · " + d.optString("status", "online") + " · " + shortId(deviceId)));
-            LinearLayout actions = horizontal();
-            actions.setPadding(0, dp(14), 0, dp(8));
-            if (current) {
-                Button bound = primary("已绑定");
-                bound.setEnabled(false);
-                Button unbind = ghost("解除");
-                unbind.setOnClickListener(v -> unbindDevice(deviceId));
-                LinearLayout.LayoutParams a = new LinearLayout.LayoutParams(0, dp(44), 1);
-                a.setMargins(0, 0, dp(8), 0);
-                LinearLayout.LayoutParams b = new LinearLayout.LayoutParams(0, dp(44), 1);
-                b.setMargins(dp(8), 0, 0, 0);
-                actions.addView(bound, a);
-                actions.addView(unbind, b);
-            } else {
-                Button bind = primary("绑定/切换");
-                bind.setOnClickListener(v -> bindDevice(deviceId));
-                actions.addView(bind, new LinearLayout.LayoutParams(-1, dp(44)));
-            }
-            row.addView(actions);
-            list.addView(row);
-        }
-    }
-
-    private JSONArray activeDevices(JSONArray devices) throws Exception {
-        JSONArray out = new JSONArray();
-        long now = System.currentTimeMillis();
-        for (int i = 0; i < devices.length(); i++) {
-            JSONObject device = devices.optJSONObject(i);
-            if (device == null) {
-                continue;
-            }
-            boolean bound = device.optBoolean("bound");
-            long lastSeen = device.optLong("lastSeenAt", 0);
-            boolean fresh = lastSeen > 0 && now - lastSeen < 15 * 60 * 1000L;
-            if (fresh) {
-                out.put(device);
-            }
-        }
-        return out;
-    }
-
-    private void bindDevice(String deviceId) {
-        runNetwork(() -> {
-            JSONObject body = new JSONObject();
-            body.put("appId", prefs.getString("app_id", ""));
-            body.put("appName", "OneAPI Android");
-            body.put("deviceId", deviceId);
-            try {
-                api("POST", "/api/mobile/desktop-bindings", body);
-            } catch (ApiException error) {
-                if (!isBindingEndpointMissing(error)) {
-                    throw error;
-                }
-            }
-            boundDeviceId = deviceId;
-            prefs.edit().putString("bound_device_id", deviceId).apply();
-            ui(() -> {
-                refreshDevices(false);
-                renderSection();
-            });
-        });
-    }
-
-    private boolean isBindingEndpointMissing(ApiException error) {
-        return error.status == 404 || error.raw.toLowerCase(Locale.ROOT).contains("404 page not found");
-    }
-
-    private void unbindDevice(String deviceId) {
-        runNetwork(() -> {
-            try {
-                api("DELETE", "/api/mobile/desktop-bindings/" + enc(deviceId) + "?appId=" + enc(prefs.getString("app_id", "")), null);
-            } catch (ApiException error) {
-                if (!isBindingEndpointMissing(error)) {
-                    throw error;
-                }
-            }
-            if (deviceId.equals(boundDeviceId)) {
-                boundDeviceId = "";
-                prefs.edit().remove("bound_device_id").apply();
-            }
-            ui(() -> {
-                refreshDevices(false);
-                renderSection();
-            });
-        });
-    }
-
-    private void sendCliJob(String client) {
-        if (boundDeviceId.isEmpty()) {
-            toast("请先在我的页面绑定 PC/Mac 客户端");
-            return;
-        }
-        String prompt = trim(activeInput);
-        if (prompt.isEmpty()) {
-            toast("请输入要执行的任务");
-            return;
-        }
-        hideKeyboard(activeInput);
-        setSending(true);
-        activeInput.setText("");
-        runNetwork(() -> {
-            JSONObject body = new JSONObject();
-            body.put("client", client);
-            body.put("deviceId", boundDeviceId);
-            body.put("sessionId", resolveCliSessionIdForJob(client));
-            body.put("prompt", prompt);
-            body.put("model", selectedCliModelFor(client));
-            body.put("reasoningEffort", reasoningValue(selectedReasoning));
-            body.put("permissionMode", selectedPermission.contains("全权限") ? "full" : "restricted");
-            JSONArray extensionRefs = new JSONArray();
-            for (JSONObject ref : extensionRefsFor(client)) {
-                extensionRefs.put(new JSONObject()
-                        .put("id", ref.optString("id", ref.optString("name")))
-                        .put("kind", ref.optString("kind", "skill"))
-                        .put("name", ref.optString("name")));
-            }
-            body.put("extensionRefs", extensionRefs);
-            api("POST", "/api/mobile/desktop-jobs", body);
-            ui(() -> {
-                setSending(false);
-                pollSessionsOnce();
-            });
-        });
-    }
-
-    private String resolveCliSessionIdForJob(String client) {
-        String selected = selectedCliSessionIds.get(client);
-        if (selected == null || selected.trim().isEmpty()) {
-            selected = prefs.getString("cli_active_session_id_" + client, "");
-        }
-        selected = selected == null ? "" : selected.trim();
-        if (!selected.isEmpty()) {
-            return selected;
-        }
-        try {
-            JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
-            JSONArray sessions = envelope.optJSONArray("data");
-            if (sessions != null) {
-                for (int i = 0; i < sessions.length(); i++) {
-                    JSONObject item = sessions.optJSONObject(i);
-                    if (item == null || !client.equals(item.optString("client"))) {
-                        continue;
-                    }
-                    String id = item.optString("sessionId", item.optString("id", "")).trim();
-                    if (!id.isEmpty() && !id.endsWith("-remote")) {
-                        selectedCliSessionIds.put(client, id);
-                        prefs.edit().putString("cli_active_session_id_" + client, id).apply();
-                        updateSelectedCliProject(client, item);
-                        return id;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return sessionId;
-    }
-
-    private void startPolling() {
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (!polling) {
-                    return;
-                }
-                if (isCliSection() && shouldAutoRefreshCliSection(section)) {
-                    pollSessionsOnce(false);
-                    handler.postDelayed(this, 3000);
-                } else {
-                    handler.postDelayed(this, 12000);
-                }
-            }
-        }, 800);
-    }
-
-    private boolean shouldAutoRefreshCliSection(String client) {
-        if (!"codex".equals(client) && !"claude".equals(client)) {
-            return false;
-        }
-        if (requestRunning) {
-            return true;
-        }
-        for (int i = 0; i < cachedDesktopSessions.length(); i++) {
-            JSONObject session = cachedDesktopSessions.optJSONObject(i);
-            if (session == null || !client.equals(session.optString("client"))) {
-                continue;
-            }
-            String status = session.optString("status", "").toLowerCase(Locale.ROOT);
-            if ("queued".equals(status) || "claimed".equals(status) || "running".equals(status) || "waiting_interaction".equals(status)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void loadDesktopSessionCache() {
-        try {
-            cachedDesktopSessions = new JSONArray(prefs.getString("desktop_sessions_cache", "[]"));
-            hydrateCliTimelineCache(cachedDesktopSessions);
-        } catch (Exception ignored) {
-            cachedDesktopSessions = new JSONArray();
-        }
-    }
-
-    private void refreshDesktopSessionsCache(boolean force) {
-        if (desktopSessionsRefreshRunning && !force) {
-            return;
-        }
-        desktopSessionsRefreshRunning = true;
-        runNetworkQuiet(() -> {
-            try {
-                JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
-                JSONArray sessions = envelope.optJSONArray("data");
-                if (sessions == null) {
-                    sessions = new JSONArray();
-                }
-                JSONArray finalSessions = sessions;
-                prefs.edit().putString("desktop_sessions_cache", finalSessions.toString()).apply();
-                ui(() -> {
-                    cachedDesktopSessions = finalSessions;
-                    updateCliTimelineCaches(finalSessions, isCliSection());
-                });
-            } finally {
-                desktopSessionsRefreshRunning = false;
-            }
-        });
-    }
-
-    private void hydrateCliTimelineCache(JSONArray sessions) {
-        updateCliTimelineCaches(sessions, false);
-    }
-
-    private void updateCliTimelineCaches(JSONArray sessions, boolean renderActiveChange) {
-        for (String client : new String[]{"codex", "claude"}) {
-            try {
-                JSONArray events = mergedEventsForClient(sessions == null ? new JSONArray() : sessions, client);
-                String signature = events.toString();
-                String previous = cliTimelineSignatures.get(client);
-                cliTimelineCache.put(client, events);
-                if (signature.equals(previous)) {
-                    continue;
-                }
-                cliTimelineSignatures.put(client, signature);
-                if (renderActiveChange && client.equals(section)) {
-                    renderTimeline(events, true);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-    }
-
-    private void renderCachedCliTimeline(String client) {
-        if (!client.equals(section) || timeline == null) {
-            return;
-        }
-        JSONArray cached = cliTimelineCache.get(client);
-        renderTimeline(cached == null ? new JSONArray() : cached, false);
-    }
-
-    private void pollSessionsOnce() {
-        pollSessionsOnce(false);
-    }
-
-    private void pollSessionsOnce(boolean force) {
-        if (!"codex".equals(section) && !"claude".equals(section)) {
-            return;
-        }
-        String targetSection = section;
-        synchronized (cliRefreshRunningClients) {
-            if (cliRefreshRunningClients.contains(targetSection)) {
-                return;
-            }
-            cliRefreshRunningClients.add(targetSection);
-        }
-        runNetworkQuiet(() -> {
-            try {
-                JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
-                JSONArray sessions = envelope.optJSONArray("data");
-                if (sessions == null) {
-                    sessions = new JSONArray();
-                }
-                prefs.edit().putString("desktop_sessions_cache", sessions.toString()).apply();
-                JSONArray events = mergedEventsForClient(sessions, targetSection);
-                String signature = events.toString();
-                JSONArray finalSessions = sessions;
-                ui(() -> {
-                    cachedDesktopSessions = finalSessions;
-                    cliTimelineCache.put(targetSection, events);
-                    renderTimelineIfChanged(targetSection, events, signature);
-                });
-            } finally {
-                cliRefreshRunningClients.remove(targetSection);
-            }
-        });
-    }
-
-    private boolean isCliSection() {
-        return "codex".equals(section) || "claude".equals(section);
-    }
-
-    private int contentBottomScrollY(ScrollView scroll) {
-        if (scroll == null || scroll.getChildCount() == 0) {
-            return 0;
-        }
-        View child = scroll.getChildAt(0);
-        return Math.max(0, child.getMeasuredHeight() - scroll.getHeight());
-    }
-
-    private boolean isContentNearBottom(ScrollView scroll) {
-        if (scroll == null) {
-            return true;
-        }
-        return scroll.getScrollY() >= contentBottomScrollY(scroll) - dp(24);
-    }
-
-    private void refreshCliAtEdge() {
-        long now = System.currentTimeMillis();
-        if (now - lastCliRefreshAt < 9000L) {
-            return;
-        }
-        lastCliRefreshAt = now;
-        pollSessionsOnce(true);
-    }
-
-    private void renderSelectedCliSession(String client, JSONObject session) {
-        if (client.equals(section)) {
-            showConversationLoading("正在加载选中的会话...");
-            renderCliComposerOnly(client);
-        }
-        executor.execute(() -> {
-            try {
-                JSONArray events = eventsForCliSession(session);
-                ui(() -> {
-                    cliTimelineCache.put(client, events);
-                    cliTimelineSignatures.put(client, "");
-                    timelineVisibleItemCounts.put(client, INITIAL_RENDER_ITEM_COUNT);
-                    if (client.equals(section)) {
-                        renderTimeline(events, true);
-                        renderCliComposerOnly(client);
-                    }
-                });
-            } catch (Exception ignored) {
-                ui(this::renderSection);
-            }
-        });
-    }
-
-    private JSONArray eventsForCliSession(JSONObject session) throws Exception {
-        List<JSONObject> rows = new ArrayList<>();
-        collectRows(rows, session == null ? null : session.optJSONArray("messages"), "message");
-        collectPurposes(rows, session);
-        collectRows(rows, session == null ? null : session.optJSONArray("logs"), "log");
-        rows.sort(Comparator.comparingLong(o -> o.optLong("timestamp")));
-        JSONArray out = new JSONArray();
-        Set<String> seen = new HashSet<>();
-        for (JSONObject row : rows) {
-            if (shouldHideLog(row)) {
-                continue;
-            }
-            String key = logDedupeKey(row);
-            if (!key.isEmpty() && !seen.add(key)) {
-                continue;
-            }
-            out.put(row);
-        }
-        return out;
-    }
-
-    private JSONArray mergedEventsForClient(JSONArray sessions, String client) throws Exception {
-        List<JSONObject> rows = new ArrayList<>();
-        String selectedSessionId = selectedCliSessionIds.get(client);
-        selectedSessionId = selectedSessionId == null ? "" : selectedSessionId.trim();
-        if (selectedSessionId.startsWith("android-")) {
-            selectedSessionId = "";
-        }
-        JSONObject fallbackSession = null;
-        for (int i = 0; i < sessions.length(); i++) {
-            JSONObject session = sessions.optJSONObject(i);
-            if (session == null || !client.equals(session.optString("client"))) {
-                continue;
-            }
-            String remoteSessionId = session.optString("sessionId", session.optString("id", "")).trim();
-            if (fallbackSession == null) {
-                fallbackSession = session;
-            }
-            if (!remoteSessionId.isEmpty() && !remoteSessionId.endsWith("-remote")) {
-                String current = selectedCliSessionIds.get(client);
-                if (current == null || current.trim().isEmpty() || current.startsWith("android-")) {
-                    selectedCliSessionIds.put(client, remoteSessionId);
-                    prefs.edit().putString("cli_active_session_id_" + client, remoteSessionId).apply();
-                    selectedSessionId = remoteSessionId;
-                    updateSelectedCliProject(client, session);
-                }
-            }
-            if (!selectedSessionId.isEmpty() && !selectedSessionId.equals(remoteSessionId) && !selectedSessionId.equals(session.optString("id", ""))) {
-                continue;
-            }
-            updateSelectedCliProject(client, session);
-            collectRows(rows, session.optJSONArray("messages"), "message");
-            collectPurposes(rows, session);
-            collectRows(rows, session.optJSONArray("logs"), "log");
-        }
-        if (rows.isEmpty() && fallbackSession != null && selectedSessionId.isEmpty()) {
-            updateSelectedCliProject(client, fallbackSession);
-            collectRows(rows, fallbackSession.optJSONArray("messages"), "message");
-            collectPurposes(rows, fallbackSession);
-            collectRows(rows, fallbackSession.optJSONArray("logs"), "log");
-        }
-        rows.sort(Comparator.comparingLong(o -> o.optLong("timestamp")));
-        JSONArray out = new JSONArray();
-        Set<String> seen = new HashSet<>();
-        for (JSONObject row : rows) {
-            if (shouldHideLog(row)) {
-                continue;
-            }
-            String key = logDedupeKey(row);
-            if (!key.isEmpty() && !seen.add(key)) {
-                continue;
-            }
-            out.put(row);
-        }
-        return out;
-    }
-
-    private void collectRows(List<JSONObject> rows, JSONArray source, String kind) throws Exception {
-        if (source == null) {
-            return;
-        }
-        for (int i = 0; i < source.length(); i++) {
-            JSONObject item = source.optJSONObject(i);
-            if (item != null) {
-                item.put("_kind", kind);
-                rows.add(item);
-            }
-        }
-    }
-
-    private void collectPurposes(List<JSONObject> rows, JSONObject session) throws Exception {
-        JSONArray purposes = session == null ? null : session.optJSONArray("purposes");
-        if (purposes == null || purposes.length() == 0) {
-            return;
-        }
-        StringBuilder body = new StringBuilder();
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < purposes.length(); i++) {
-            String item = cleanDisplayText(purposes.optString(i));
-            if (item.isEmpty() || !seen.add(item)) {
-                continue;
-            }
-            if (body.length() > 0) {
-                body.append('\n');
-            }
-            body.append(item);
-        }
-        if (body.length() == 0) {
-            return;
-        }
-        long timestamp = System.currentTimeMillis();
-        JSONArray messages = session.optJSONArray("messages");
-        if (messages != null && messages.length() > 0) {
-            JSONObject first = messages.optJSONObject(0);
-            if (first != null && first.optLong("timestamp", 0) > 0) {
-                timestamp = first.optLong("timestamp") + 1;
-            }
-        }
-        rows.add(new JSONObject()
-                .put("_kind", "log")
-                .put("id", session.optString("id") + ":purpose")
-                .put("type", "intent")
-                .put("phase", "intent")
-                .put("title", "执行目的")
-                .put("body", body.toString())
-                .put("timestamp", timestamp));
-    }
-
-    private void renderTimeline(JSONArray events) {
-        renderTimeline(events, true);
-    }
-
-    private void renderTimeline(JSONArray events, boolean scrollLatest) {
-        if (conversationList == null) {
-            return;
-        }
-        int generation = ++renderGeneration;
-        String targetClient = section;
-        hidePageLoading();
-        resetContentScrollPosition();
-        if (scrollLatest) {
-            localAutoScrollEnabled = true;
-        }
-        if (timeline != null) {
-            clearContainer(timeline);
-        }
-        if (interactionBar != null) {
-            clearContainer(interactionBar);
-        }
-        if (events == null || events.length() == 0) {
-            hidePageLoading();
-            submitConversationItems(listConversationItem(ConversationUiItem.empty("暂无可显示的会话内容。请先在会话记录中选择其他会话，或从输入框发起新任务。")), false);
-            updateScrollDock();
-            return;
-        }
-        int visibleCount = timelineVisibleItemCounts.getOrDefault(targetClient, INITIAL_RENDER_ITEM_COUNT);
-        int startIndex = Math.max(0, events.length() - visibleCount);
-        List<ConversationUiItem> items = new ArrayList<>();
-        if (startIndex > 0) {
-            items.add(ConversationUiItem.loadEarlier("加载更早执行记录（剩余 " + startIndex + " 条）", () -> {
-                timelineVisibleItemCounts.put(targetClient, visibleCount + RENDER_PAGE_INCREMENT);
-                JSONArray cached = cliTimelineCache.get(targetClient);
-                renderTimeline(cached == null ? events : cached, false);
-            }));
-        }
-        for (int i = startIndex; i < events.length(); i++) {
-            JSONObject e = events.optJSONObject(i);
-            if (e == null) {
-                continue;
-            }
-            if ("message".equals(e.optString("_kind"))) {
-                String text = compactLocalFileReferences(cleanDisplayText(e.optString("text")));
-                if (!text.isEmpty()) {
-                    long timestamp = e.optLong("timestamp", e.optLong("createdAt", 0));
-                    items.add(ConversationUiItem.message(targetClient, e.optString("role"), text, timestamp, i));
-                }
-            } else if (!shouldHideLog(e)) {
-                items.add(ConversationUiItem.log(targetClient, e, i));
-            }
-        }
-        if (generation != renderGeneration || !targetClient.equals(section)) {
-            return;
-        }
-        hidePageLoading();
-        submitConversationItems(items, scrollLatest);
-    }
-
-    private void renderTimelineChunk(JSONArray events, int index, int generation, boolean scrollLatest, String targetClient) {
-        if (generation != renderGeneration || timeline == null || !targetClient.equals(section)) {
-            return;
-        }
-        int end = Math.min(events.length(), index + RENDER_CHUNK_SIZE);
-        for (int i = index; i < end; i++) {
-            JSONObject e = events.optJSONObject(i);
-            if (e == null) {
-                continue;
-            }
-            if ("message".equals(e.optString("_kind"))) {
-                String text = compactLocalFileReferences(cleanDisplayText(e.optString("text")));
-                if (!text.isEmpty()) {
-                    long timestamp = e.optLong("timestamp", e.optLong("createdAt", 0));
-                    timeline.addView(messageBubble(e.optString("role"), text, timestamp, targetClient, -1));
-                }
-            } else {
-                addLogRow(e);
-            }
-        }
-        if (end < events.length()) {
-            handler.post(() -> renderTimelineChunk(events, end, generation, scrollLatest, targetClient));
-            return;
-        }
-        hidePageLoading();
-        if (scrollLatest) {
-            scrollToBottom();
-        }
-        updateScrollDock();
-    }
-
-    private void renderTimelineIfChanged(String targetSection, JSONArray events, String signature) {
-        if (!targetSection.equals(section)) {
-            return;
-        }
-        String previous = cliTimelineSignatures.get(targetSection);
-        if (signature != null && signature.equals(previous)) {
-            return;
-        }
-        cliTimelineSignatures.put(targetSection, signature == null ? "" : signature);
-        renderTimeline(events);
-    }
-
-    private void addLogRow(JSONObject e) {
-        View row = logRowView(e);
-        if (row != null && timeline != null) {
-            timeline.addView(row);
-        }
-    }
-
-    private View logRowView(JSONObject e) {
-        if (shouldHideLog(e)) {
-            return null;
-        }
-        String title = cleanDisplayText(e.optString("title", e.optString("type")));
-        String body = cleanDisplayText(e.optString("body"));
-        String rawCommand = cleanDisplayText(e.optString("command"));
-        String command = compactCommand(rawCommand);
-        String preview = logPreview(e, body, rawCommand, command);
-        if (title.trim().isEmpty() && body.trim().isEmpty() && command.trim().isEmpty()) {
-            return null;
-        }
-        if (title.equals(body) && command.trim().isEmpty()) {
-            body = "";
-        }
-        String phase = e.optString("phase", e.optString("type", ""));
-        if (phase.toLowerCase(Locale.ROOT).contains("intent") && !body.trim().isEmpty()) {
-            title = body;
-            body = "";
-        }
-        if (!command.trim().isEmpty()) {
-            body = "";
-            title = commandTitle(title, e.optString("phase", e.optString("type", "")));
-        }
-        LinearLayout row = cardPanel();
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
-        rowLp.setMargins(0, dp(8), 0, dp(8));
-        row.setLayoutParams(rowLp);
-        int level = e.optInt("level", 0);
-        int accent = level >= 2 ? Color.rgb(216, 71, 86) : level == 1 ? Color.rgb(210, 132, 40) : phaseColor(phase);
-        LinearLayout head = horizontal();
-        head.setGravity(Gravity.TOP);
-        TextView dot = copy("●");
-        dot.setTextColor(accent);
-        dot.setTextSize(13);
-        dot.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        head.addView(dot, new LinearLayout.LayoutParams(dp(18), -2));
-        TextView titleView = bold(title);
-        titleView.setTextSize(14);
-        titleView.setLineSpacing(dp(2), 1.04f);
-        head.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView toggle = copy("▸");
-        toggle.setTextColor(accent);
-        toggle.setTextSize(14);
-        toggle.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        head.addView(toggle, new LinearLayout.LayoutParams(dp(18), -2));
-        TextView phaseView = copy(phaseLabel(phase));
-        phaseView.setTextColor(accent);
-        phaseView.setGravity(Gravity.START | Gravity.TOP);
-        head.addView(phaseView, new LinearLayout.LayoutParams(dp(58), -2));
-        row.addView(head);
-        LinearLayout detailBox = vertical();
-        String rowId = logRowId(e);
-        boolean initiallyExpanded = expandedLogIds.contains(rowId);
-        detailBox.setVisibility(initiallyExpanded ? View.VISIBLE : View.GONE);
-        toggle.setText(initiallyExpanded ? "▾" : "▸");
-        if (!body.trim().isEmpty() && !"intent".equalsIgnoreCase(phase)) {
-            detailBox.addView(copy(body));
-        }
-        if (!command.trim().isEmpty()) {
-            TextView cmd = copy(command);
-            cmd.setTextColor(Color.rgb(45, 74, 124));
-            cmd.setBackground(new ColorDrawable(Color.TRANSPARENT));
-            cmd.setPadding(0, dp(4), 0, dp(4));
-            detailBox.addView(cmd);
-        }
-        if (!preview.trim().isEmpty()) {
-            TextView detail = copy(preview);
-            detail.setTextColor(Color.rgb(66, 82, 108));
-            detail.setBackground(round(Color.argb(116, 255, 255, 255), dp(10), LINE));
-            detail.setPadding(dp(10), dp(8), dp(10), dp(8));
-            LinearLayout.LayoutParams detailLp = new LinearLayout.LayoutParams(-1, -2);
-            detailLp.setMargins(0, dp(8), 0, 0);
-            detailBox.addView(detail, detailLp);
-        }
-        if (detailBox.getChildCount() > 0) {
-            LinearLayout.LayoutParams detailBoxLp = new LinearLayout.LayoutParams(-1, -2);
-            detailBoxLp.setMargins(0, dp(8), 0, 0);
-            row.addView(detailBox, detailBoxLp);
-            View.OnClickListener toggleAction = v -> {
-                boolean expanded = detailBox.getVisibility() == View.VISIBLE;
-                detailBox.setVisibility(expanded ? View.GONE : View.VISIBLE);
-                toggle.setText(expanded ? "▸" : "▾");
-                if (expanded) {
-                    expandedLogIds.remove(rowId);
-                } else {
-                    expandedLogIds.add(rowId);
-                }
-            };
-            row.setOnClickListener(toggleAction);
-            head.setOnClickListener(toggleAction);
-        } else {
-            toggle.setVisibility(View.INVISIBLE);
-        }
-        int indent = Math.max(0, e.optInt("indentLevel", 0));
-        if (indent > 0) {
-            row.setPadding(dp(16 + indent * 12), dp(15), dp(16), dp(15));
-        }
-        String interactionId = e.optString("interactionId");
-        if (!interactionId.isEmpty() && "pending".equals(e.optString("interactionStatus", "pending"))) {
-            LinearLayout actions = horizontal();
-            actions.addView(actionButton("允许", e, "approve"), new LinearLayout.LayoutParams(0, dp(42), 1));
-            actions.addView(actionButton("拒绝", e, "reject"), new LinearLayout.LayoutParams(0, dp(42), 1));
-            actions.addView(actionButton("总是允许", e, "approve_always"), new LinearLayout.LayoutParams(0, dp(42), 1));
-            LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(-1, -2);
-            actionLp.setMargins(0, dp(8), 0, 0);
-            row.addView(actions, actionLp);
-        }
-        return row;
-    }
-
-    private String logRowId(JSONObject e) {
-        String id = e.optString("id", e.optString("eventId", ""));
-        if (!id.trim().isEmpty()) {
-            return id.trim();
-        }
-        String key = logDedupeKey(e);
-        if (!key.trim().isEmpty()) {
-            return key.trim();
-        }
-        return e.optString("phase", e.optString("type", "log")) + ":" + e.optLong("timestamp", 0);
-    }
-
-    private boolean shouldHideLog(JSONObject e) {
-        if (e == null || "message".equals(e.optString("_kind"))) {
-            return false;
-        }
-        String all = (e.optString("title") + " " + e.optString("body") + " " + e.optString("command") + " " + e.optString("type") + " " + e.optString("phase"))
-                .replaceAll("\\s+", "")
-                .toLowerCase(Locale.ROOT);
-        return all.contains("扩展上下文准备")
-                || all.contains("扩展与上下文准备")
-                || all.contains("输出已结束正在整理会话记录")
-                || all.contains("codex输出已结束")
-                || all.contains("claude输出已结束")
-                || all.contains("codex已完成本次回复")
-                || all.contains("claude已完成本次回复");
-    }
-
-    private String logDedupeKey(JSONObject e) {
-        if (e == null || "message".equals(e.optString("_kind"))) {
-            return "";
-        }
-        String command = compactCommand(e.optString("command"));
-        String title = cleanDisplayText(e.optString("title", e.optString("type")));
-        String body = cleanDisplayText(e.optString("body"));
-        String phase = e.optString("phase", e.optString("type", ""));
-        String base = command.isEmpty() ? title + "|" + body : command;
-        if (base.trim().isEmpty()) {
-            return "";
-        }
-        return phase + "|" + base.replaceAll("\\s+", " ").trim();
-    }
-
-    private String commandTitle(String title, String phase) {
-        String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
-        if (p.contains("result")) {
-            return "执行结果";
-        }
-        if (p.contains("error")) {
-            return "执行异常";
-        }
-        if (p.contains("invoke") || p.contains("command") || p.contains("tool")) {
-            return "执行命令";
-        }
-        return title == null || title.trim().isEmpty() ? "执行命令" : title;
-    }
-
-    private String compactCommand(String raw) {
-        String command = cleanDisplayText(raw);
-        if (command.isEmpty()) {
-            return "";
-        }
-        int commandIndex = command.indexOf("-Command");
-        if (commandIndex >= 0) {
-            return command.substring(commandIndex).trim();
-        }
-        commandIndex = command.indexOf("-command");
-        if (commandIndex >= 0) {
-            return command.substring(commandIndex).trim();
-        }
-        command = command.replaceAll("(?i)[A-Z]:\\\\(?:[^\\\\\\s\"']+\\\\)+([^\\\\\\s\"']+)", "$1");
-        command = command.replaceAll("(?i)/(?:[^/\\s\"']+/)+([^/\\s\"']+)", "$1");
-        return command.trim();
-    }
-
-    private String logPreview(JSONObject e, String body, String rawCommand, String compactCommand) {
-        for (String key : new String[]{"fileContent", "content", "detail", "output", "body"}) {
-            String candidate = cleanDisplayText(e.optString(key));
-            if (looksLikeFileContentPreview(candidate, rawCommand, compactCommand, body)) {
-                return trimPreview(candidate);
-            }
-        }
-        return "";
-    }
-
-    private boolean looksLikeFileContentPreview(String value, String rawCommand, String compactCommand, String body) {
-        String clean = cleanDisplayText(value);
-        if (clean.isEmpty() || clean.equals(cleanDisplayText(rawCommand)) || clean.equals(cleanDisplayText(compactCommand))) {
-            return false;
-        }
-        if (!clean.contains("\n")) {
-            return false;
-        }
-        String lower = clean.toLowerCase(Locale.ROOT).trim();
-        if (lower.startsWith("-command") || lower.startsWith("powershell") || lower.startsWith("cmd /")
-                || lower.startsWith("node ") || lower.startsWith("python ") || lower.startsWith("npm ")
-                || lower.startsWith("git ") || lower.endsWith(".exe") || lower.endsWith(".cmd") || lower.endsWith(".ps1")) {
-            return false;
-        }
-        if (clean.equals(cleanDisplayText(body)) && !hasCodeOrPatchMarker(clean)) {
-            return false;
-        }
-        return hasCodeOrPatchMarker(clean);
-    }
-
-    private boolean hasCodeOrPatchMarker(String value) {
-        String lower = value.toLowerCase(Locale.ROOT);
-        return lower.contains("diff --git")
-                || lower.contains("\n@@")
-                || lower.contains("\n+")
-                || lower.contains("\n-")
-                || lower.contains("public ")
-                || lower.contains("private ")
-                || lower.contains("protected ")
-                || lower.contains("class ")
-                || lower.contains("function ")
-                || lower.contains("const ")
-                || lower.contains("let ")
-                || lower.contains("import ")
-                || lower.contains("export ")
-                || lower.contains("package ")
-                || lower.contains("</")
-                || lower.contains("=>")
-                || lower.contains("{\n")
-                || lower.contains("}\n");
-    }
-
-    private String trimPreview(String value) {
-        String clean = cleanDisplayText(value).replaceAll("\\n{4,}", "\n\n\n");
-        if (clean.length() <= 900) {
-            return clean;
-        }
-        return clean.substring(0, 900) + "\n...";
-    }
-
-    private String compactLocalFileReferences(String value) {
-        String clean = cleanDisplayText(value);
-        if (clean.isEmpty()) {
-            return clean;
-        }
-        clean = compactPathPattern(clean, Pattern.compile("(?i)([A-Z]:\\\\(?:[^\\\\\\s<>:\"|?*]+\\\\)*[^\\\\\\s<>:\"|?*]+)"));
-        clean = compactPathPattern(clean, Pattern.compile("(?<![A-Za-z0-9:/])(/(?:Users|home|Volumes|mnt|var|tmp|private)/(?:[^\\s<>]+/)*[^\\s<>]+)"));
-        return clean;
-    }
-
-    private String compactPathPattern(String value, Pattern pattern) {
-        Matcher matcher = pattern.matcher(value);
-        StringBuffer out = new StringBuffer();
-        while (matcher.find()) {
-            String pathValue = matcher.group(1);
-            String fileName = fileNameFromPath(pathValue);
-            if (fileName.isEmpty()) {
-                fileName = "本地文件";
-            }
-            matcher.appendReplacement(out, Matcher.quoteReplacement("[" + fileName + "]"));
-        }
-        matcher.appendTail(out);
-        return out.toString();
-    }
-
-    private int phaseColor(String phase) {
-        String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
-        if (p.contains("invoke")) return INDIGO;
-        if (p.contains("result") || p.contains("complete")) return MINT;
-        if (p.contains("error")) return Color.rgb(216, 71, 86);
-        if (p.contains("intent")) return BLUE;
-        return MUTED;
-    }
-
-    private String phaseLabel(String phase) {
-        String p = phase == null ? "" : phase.toLowerCase(Locale.ROOT);
-        if (p.contains("intent")) return "计划";
-        if (p.contains("invoke")) return "执行";
-        if (p.contains("result")) return "结果";
-        if (p.contains("complete")) return "完成";
-        if (p.contains("error")) return "异常";
-        if (p.contains("assistant")) return "回复";
-        return "日志";
-    }
-
-    private void renderInteraction(JSONObject e) {
-        if (interactionBar == null || interactionBar.getChildCount() > 0) {
-            return;
-        }
-        interactionBar.addView(card("等待确认", e.optString("title", "桌面端请求确认")));
-        LinearLayout actions = horizontal();
-        actions.addView(actionButton("允许", e, "approve"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        actions.addView(actionButton("拒绝", e, "reject"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        actions.addView(actionButton("总是允许", e, "approve_always"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        interactionBar.addView(actions);
-    }
-
-    private Button actionButton(String text, JSONObject event, String action) {
-        Button b = ghost(text);
-        b.setOnClickListener(v -> runNetwork(() -> {
-            JSONObject body = new JSONObject();
-            body.put("deviceId", boundDeviceId);
-            body.put("action", action);
-            api("POST", "/api/mobile/desktop-jobs/" + enc(event.optString("jobId")) + "/interactions/" + enc(event.optString("interactionId")), body);
-            ui(() -> {
-                pollSessionsOnce();
-            });
-        }));
-        return b;
-    }
-
-    private View messageBubble(String role, String text) {
-        return messageBubble(role, text, 0);
-    }
-
-    private View messageBubble(String role, String text, long timestamp) {
-        return messageBubble(role, text, timestamp, "", -1);
-    }
-
-    private View messageBubble(String role, String text, long timestamp, String mode, int messageIndex) {
-        LinearLayout box = vertical();
-        box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        boolean user = "user".equals(role);
-        box.setBackground(round(user ? Color.WHITE : GLASS, dp(16), user ? LINE : LINE));
-        String rawMode = mode == null ? "" : mode;
-        boolean forcePlain = rawMode.endsWith(":plain");
-        boolean nativeRich = rawMode.endsWith(":native");
-        String actionMode = forcePlain ? rawMode.substring(0, rawMode.length() - ":plain".length()) : rawMode;
-        actionMode = nativeRich ? actionMode.substring(0, actionMode.length() - ":native".length()) : actionMode;
-        String clean = cleanDisplayText(text);
-        if (nativeRich && !forcePlain && !user && shouldRenderRichText(clean)) {
-            addNativeMarkdownContent(box, clean, () -> toggleActionRows(box));
-        } else if (!forcePlain && !user && ("chat".equals(actionMode) || actionMode.isEmpty()) && shouldRenderRichText(clean)) {
-            addRichAssistantContent(box, clean, () -> toggleActionRows(box));
-        } else {
-            addPlainMessageContent(box, clean, user, () -> toggleActionRows(box));
-        }
-        addTimestamp(box, timestamp, user, actionMode, messageIndex, clean);
-        box.setLayoutParams(bubbleLayoutParams(user));
-        box.setOnClickListener(v -> toggleActionRows(box));
-        return box;
-    }
-
-    private void addPlainMessageContent(LinearLayout box, String text, boolean user) {
-        addPlainMessageContent(box, text, user, null);
-    }
-
-    private void addPlainMessageContent(LinearLayout box, String text, boolean user, Runnable clickAction) {
-        String[] split = splitThinkingBlock(text);
-        if (!user && !split[0].isEmpty()) {
-            addThinkingBlock(box, split[0], clickAction);
-            if (!split[1].isEmpty()) {
-                box.addView(gap(8));
-            }
-        }
-        TextView t = copy(split[1].isEmpty() ? text : split[1]);
-        t.setTextColor(user ? INK : INK);
-        t.setTextIsSelectable(true);
-        if (clickAction != null) {
-            t.setOnClickListener(v -> clickAction.run());
-        }
-        box.addView(t);
-    }
-
-    private String[] splitThinkingBlock(String text) {
-        String clean = cleanDisplayText(text);
-        String lower = clean.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("<thinking>")) {
-            int end = lower.indexOf("</thinking>");
-            if (end > "<thinking>".length()) {
-                return new String[]{
-                        clean.substring("<thinking>".length(), end).trim(),
-                        clean.substring(end + "</thinking>".length()).trim()
-                };
-            }
-        }
-        String prefix = "";
-        if (clean.startsWith("思考过程\n")) {
-            prefix = "思考过程\n";
-        } else if (lower.startsWith("thinking:\n")) {
-            prefix = clean.substring(0, "thinking:\n".length());
-        } else if (lower.startsWith("thinking：\n")) {
-            prefix = clean.substring(0, "thinking：\n".length());
-        } else if (lower.startsWith("thinking:")) {
-            prefix = clean.substring(0, "thinking:".length());
-        } else if (lower.startsWith("thinking：")) {
-            prefix = clean.substring(0, "thinking：".length());
-        }
-        if (prefix.isEmpty()) {
-            return new String[]{"", clean};
-        }
-        String rest = clean.substring(prefix.length()).trim();
-        int split = rest.indexOf("\n\n");
-        if (split < 0) {
-            return new String[]{rest, ""};
-        }
-        return new String[]{
-                rest.substring(0, split).trim(),
-                rest.substring(split + 2).trim()
-        };
-    }
-
-    private boolean shouldRenderRichText(String text) {
-        String clean = cleanDisplayText(text);
-        return clean.contains("```")
-                || clean.contains("'''")
-                || clean.contains("# ")
-                || clean.matches("(?s).*#{1,6}[^#\\s].*")
-                || clean.startsWith("- ")
-                || clean.matches("(?s)^\\s*[-*+]\\s+.*")
-                || clean.matches("(?s).*(^|\\n)\\s*[-*+]\\s+.*")
-                || clean.matches("(?s).*(^|\\n)\\s*'\\s*(\\n|$).*")
-                || clean.contains("\n- ")
-                || clean.contains("\n1. ")
-                || clean.contains("**")
-                || clean.contains("|")
-                || clean.toLowerCase(Locale.ROOT).contains("mermaid");
-    }
-
-    private void addNativeMarkdownContent(LinearLayout box, String text, Runnable clickAction) {
-        String[] split = splitThinkingBlock(text);
-        if (!split[0].isEmpty()) {
-            addThinkingBlock(box, split[0], clickAction);
-            if (!split[1].isEmpty()) {
-                box.addView(gap(8));
-            }
-        }
-        String body = normalizeMarkdownForRender(split[1].isEmpty() ? text : split[1]);
-        if (body.trim().isEmpty()) {
-            return;
-        }
-        String[] lines = body.split("\\n", -1);
-        StringBuilder paragraph = new StringBuilder();
-        StringBuilder code = new StringBuilder();
-        boolean inCode = false;
-        for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-            String rawLine = lines[lineIndex];
-            String line = rawLine == null ? "" : rawLine;
-            String trimmed = line.trim();
-            if (trimmed.startsWith("```")) {
-                if (inCode) {
-                    addNativeMarkdownCode(box, code.toString(), clickAction);
-                    code.setLength(0);
-                    inCode = false;
-                } else {
-                    flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                    inCode = true;
-                }
-                continue;
-            }
-            if (inCode) {
-                code.append(line).append('\n');
-                continue;
-            }
-            if (trimmed.isEmpty()) {
-                flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                continue;
-            }
-            if (isMarkdownTableStart(lines, lineIndex)) {
-                flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                int endIndex = lineIndex + 2;
-                while (endIndex < lines.length && isMarkdownTableDataLine(lines[endIndex])) {
-                    endIndex++;
-                }
-                addNativeMarkdownTable(box, lines, lineIndex, endIndex, clickAction);
-                lineIndex = endIndex - 1;
-                continue;
-            }
-            Matcher heading = Pattern.compile("^(#{1,6})\\s+(.+)$").matcher(trimmed);
-            if (heading.find()) {
-                flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                addNativeMarkdownText(box, styledMarkdownText(heading.group(2)), INK, true, Math.max(15, 21 - heading.group(1).length()), clickAction);
-                continue;
-            }
-            if (trimmed.startsWith(">")) {
-                flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                TextView quote = copy(trimmed.replaceFirst("^>\\s*", ""));
-                quote.setText(styledMarkdownText(String.valueOf(quote.getText())));
-                quote.setTextColor(Color.rgb(70, 88, 120));
-                quote.setTextIsSelectable(true);
-                quote.setBackground(round(Color.argb(28, 54, 104, 240), dp(10), Color.argb(52, 54, 104, 240)));
-                quote.setPadding(dp(10), dp(7), dp(10), dp(7));
-                if (clickAction != null) {
-                    quote.setOnClickListener(v -> clickAction.run());
-                }
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-                lp.setMargins(0, dp(4), 0, dp(6));
-                box.addView(quote, lp);
-                continue;
-            }
-            if (trimmed.matches("^[-*+]\\s+.+$")) {
-                flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                addNativeMarkdownText(box, styledMarkdownText("• " + trimmed.replaceFirst("^[-*+]\\s+", "")), INK, false, 14, clickAction);
-                continue;
-            }
-            if (trimmed.matches("^\\d+[\\.、]\\s+.+$")) {
-                flushNativeMarkdownParagraph(box, paragraph, clickAction);
-                addNativeMarkdownText(box, styledMarkdownText(trimmed), INK, false, 14, clickAction);
-                continue;
-            }
-            if (paragraph.length() > 0) {
-                paragraph.append('\n');
-            }
-            paragraph.append(line);
-        }
-        if (inCode && code.length() > 0) {
-            addNativeMarkdownCode(box, code.toString(), clickAction);
-        }
-        flushNativeMarkdownParagraph(box, paragraph, clickAction);
-    }
-
-    private boolean isMarkdownTableStart(String[] lines, int index) {
-        if (lines == null || index < 0 || index + 1 >= lines.length) {
-            return false;
-        }
-        String header = lines[index] == null ? "" : lines[index].trim();
-        String separator = lines[index + 1] == null ? "" : lines[index + 1].trim();
-        return header.contains("|") && markdownTableCells(header).size() >= 2 && isMarkdownTableSeparator(separator);
-    }
-
-    private boolean isMarkdownTableSeparator(String line) {
-        String clean = line == null ? "" : line.trim();
-        if (!clean.contains("|")) {
-            return false;
-        }
-        List<String> cells = markdownTableCells(clean);
-        if (cells.size() < 2) {
-            return false;
-        }
-        for (String cell : cells) {
-            if (!cell.matches(":?-{3,}:?")) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private boolean isMarkdownTableDataLine(String line) {
-        String clean = line == null ? "" : line.trim();
-        return clean.contains("|") && !clean.isEmpty() && !isMarkdownTableSeparator(clean);
-    }
-
-    private List<String> markdownTableCells(String line) {
-        List<String> out = new ArrayList<>();
-        String clean = line == null ? "" : line.trim();
-        if (clean.startsWith("|")) {
-            clean = clean.substring(1);
-        }
-        if (clean.endsWith("|")) {
-            clean = clean.substring(0, clean.length() - 1);
-        }
-        for (String part : clean.split("\\|", -1)) {
-            out.add(part.trim());
-        }
-        return out;
-    }
-
-    private void addNativeMarkdownTable(LinearLayout box, String[] lines, int start, int end, Runnable clickAction) {
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(true);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
-        TableLayout table = new TableLayout(this);
-        table.setShrinkAllColumns(false);
-        table.setStretchAllColumns(false);
-        List<String> headers = markdownTableCells(lines[start]);
-        addNativeMarkdownTableRow(table, headers, true, clickAction);
-        for (int i = start + 2; i < end; i++) {
-            addNativeMarkdownTableRow(table, markdownTableCells(lines[i]), false, clickAction);
-        }
-        scroll.addView(table, new HorizontalScrollView.LayoutParams(-2, -2));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(6), 0, dp(8));
-        box.addView(scroll, lp);
-    }
-
-    private void addNativeMarkdownTableRow(TableLayout table, List<String> cells, boolean header, Runnable clickAction) {
-        TableRow row = new TableRow(this);
-        row.setGravity(Gravity.TOP);
-        for (String cell : cells) {
-            TextView view = copy("");
-            view.setText(styledMarkdownText(cell));
-            view.setTextColor(INK);
-            view.setTextSize(12);
-            view.setTextIsSelectable(true);
-            view.setMaxWidth(nativeTableMaxCellWidth());
-            view.setMinWidth(dp(72));
-            view.setPadding(dp(8), dp(7), dp(8), dp(7));
-            view.setBackground(round(header ? Color.rgb(247, 249, 255) : Color.argb(180, 255, 255, 255), dp(8), Color.rgb(220, 228, 241)));
-            if (header) {
-                view.setTypeface(Typeface.DEFAULT_BOLD);
-            }
-            if (clickAction != null) {
-                view.setOnClickListener(v -> clickAction.run());
-            }
-            TableRow.LayoutParams cellLp = new TableRow.LayoutParams(-2, -2);
-            cellLp.setMargins(0, 0, dp(4), dp(4));
-            row.addView(view, cellLp);
-        }
-        table.addView(row, new TableLayout.LayoutParams(-2, -2));
-    }
-
-    private int nativeTableMaxCellWidth() {
-        int screen = getResources().getDisplayMetrics().widthPixels;
-        int bubbleWidth = Math.max(dp(220), screen - dp(72));
-        return Math.max(dp(120), (int) (bubbleWidth * 0.8f));
-    }
-
-    private void flushNativeMarkdownParagraph(LinearLayout box, StringBuilder paragraph, Runnable clickAction) {
-        if (paragraph.length() == 0) {
-            return;
-        }
-        addNativeMarkdownText(box, styledMarkdownText(paragraph.toString().trim()), INK, false, 14, clickAction);
-        paragraph.setLength(0);
-    }
-
-    private void addNativeMarkdownText(LinearLayout box, CharSequence text, int color, boolean boldText, int sizeSp, Runnable clickAction) {
-        TextView view = copy("");
-        view.setText(text);
-        view.setTextColor(color);
-        view.setTextSize(sizeSp);
-        view.setTextIsSelectable(true);
-        if (boldText) {
-            view.setTypeface(Typeface.DEFAULT_BOLD);
-        }
-        if (clickAction != null) {
-            view.setOnClickListener(v -> clickAction.run());
-        }
-        box.addView(view);
-    }
-
-    private void addNativeMarkdownCode(LinearLayout box, String code, Runnable clickAction) {
-        String clean = cleanDisplayText(code);
-        if (clean.isEmpty()) {
-            return;
-        }
-        TextView view = copy(clean);
-        view.setTypeface(Typeface.MONOSPACE);
-        view.setTextSize(12);
-        view.setTextColor(Color.rgb(31, 41, 55));
-        view.setTextIsSelectable(true);
-        view.setBackground(round(Color.rgb(244, 247, 251), dp(10), Color.rgb(220, 228, 241)));
-        view.setPadding(dp(10), dp(8), dp(10), dp(8));
-        if (clickAction != null) {
-            view.setOnClickListener(v -> clickAction.run());
-        }
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(5), 0, dp(7));
-        box.addView(view, lp);
-    }
-
-    private CharSequence styledMarkdownText(String source) {
-        String value = cleanDisplayText(source);
-        List<int[]> spans = new ArrayList<>();
-        StringBuilder out = new StringBuilder();
-        int i = 0;
-        while (i < value.length()) {
-            int start = value.indexOf("**", i);
-            if (start < 0) {
-                out.append(value.substring(i));
-                break;
-            }
-            int end = value.indexOf("**", start + 2);
-            if (end < 0) {
-                out.append(value.substring(i));
-                break;
-            }
-            out.append(value, i, start);
-            int spanStart = out.length();
-            out.append(value, start + 2, end);
-            spans.add(new int[]{spanStart, out.length()});
-            i = end + 2;
-        }
-        SpannableString styled = new SpannableString(out.toString());
-        for (int[] span : spans) {
-            if (span[1] > span[0]) {
-                styled.setSpan(new StyleSpan(Typeface.BOLD), span[0], span[1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-        }
-        return styled;
-    }
-
-    private void addRichAssistantContent(LinearLayout box, String text, Runnable clickAction) {
-        String[] split = splitThinkingBlock(text);
-        String renderText = split[0].isEmpty() ? text : split[1];
-        boolean hasRenderText = !cleanDisplayText(renderText).isEmpty();
-        if (!split[0].isEmpty()) {
-            addThinkingBlock(box, split[0], clickAction);
-            if (hasRenderText) {
-                box.addView(gap(8));
-            }
-        }
-        if (!hasRenderText) {
-            return;
-        }
-        WebView web = new WebView(this);
-        configureContentWebView(web);
-        web.addJavascriptInterface(new MermaidBridge(web), "OneApiBridge");
-        if (clickAction != null) {
-            web.setOnClickListener(v -> clickAction.run());
-            final float[] touchStart = new float[2];
-            final boolean[] horizontalDrag = new boolean[1];
-            web.setOnTouchListener((v, event) -> {
-                if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
-                    touchStart[0] = event.getX();
-                    touchStart[1] = event.getY();
-                    horizontalDrag[0] = false;
-                } else if (event.getAction() == android.view.MotionEvent.ACTION_MOVE) {
-                    float dx = Math.abs(event.getX() - touchStart[0]);
-                    float dy = Math.abs(event.getY() - touchStart[1]);
-                    if (dx > dp(10) && dx > dy * 1.2f) {
-                        horizontalDrag[0] = true;
-                        suppressSwipeUntil = System.currentTimeMillis() + 700L;
-                        android.view.ViewParent parent = v.getParent();
-                        while (parent != null) {
-                            parent.requestDisallowInterceptTouchEvent(true);
-                            parent = parent.getParent();
-                        }
-                    }
-                } else if (event.getAction() == android.view.MotionEvent.ACTION_UP && !horizontalDrag[0]) {
-                    clickAction.run();
-                } else if (event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
-                    horizontalDrag[0] = false;
-                }
-                return false;
-            });
-        }
-        web.loadDataWithBaseURL("https://ai.oneapi.center/", markdownHtml(renderText), "text/html", "utf-8", null);
-        web.setVerticalScrollBarEnabled(false);
-        web.setHorizontalScrollBarEnabled(false);
-        web.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        box.addView(web, new LinearLayout.LayoutParams(-1, estimatedRichHeight(normalizeMarkdownForRender(renderText))));
-    }
-
-    private void addThinkingBlock(LinearLayout box, String thinkingText, Runnable clickAction) {
-        LinearLayout wrap = vertical();
-        wrap.setBackground(round(Color.argb(22, 54, 104, 240), dp(12), Color.argb(38, 54, 104, 240)));
-        wrap.setPadding(dp(10), dp(7), dp(10), dp(7));
-        TextView header = copy("Thinking：");
-        header.setTextColor(Color.rgb(70, 88, 120));
-        header.setTypeface(Typeface.DEFAULT_BOLD);
-        header.setTextSize(13);
-        TextView body = copy(thinkingText);
-        body.setTextColor(Color.rgb(84, 99, 128));
-        body.setTextIsSelectable(true);
-        body.setVisibility(View.GONE);
-        header.setOnClickListener(v -> body.setVisibility(body.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
-        if (clickAction != null) {
-            wrap.setOnClickListener(v -> clickAction.run());
-            body.setOnClickListener(v -> clickAction.run());
-        }
-        wrap.addView(header);
-        wrap.addView(body);
-        box.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
-    }
-
-    private void configureContentWebView(WebView web) {
-        WebSettings settings = web.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setLoadWithOverviewMode(true);
-        settings.setUseWideViewPort(true);
-        settings.setBuiltInZoomControls(true);
-        settings.setDisplayZoomControls(false);
-        web.setBackgroundColor(Color.TRANSPARENT);
-        web.setWebViewClient(new WebViewClient());
-    }
-
-    private int estimatedRichHeight(String text) {
-        String clean = cleanDisplayText(text);
-        int lines = Math.max(2, clean.split("\\n", -1).length + clean.length() / 52);
-        return Math.max(dp(96), Math.min(dp(900), dp(lines * 22)));
-    }
-
-    private String markdownHtml(String markdown) {
-        String normalized = normalizeMarkdownForRender(markdown);
-        String cacheKey = Integer.toHexString(normalized.hashCode()) + ":" + normalized.length();
-        String cached = markdownHtmlCache.get(cacheKey);
-        if (cached != null) {
-            return cached;
-        }
-        String html = buildMarkdownHtml(normalized);
-        markdownHtmlCache.put(cacheKey, html);
-        while (markdownHtmlCache.size() > 80) {
-            String oldestKey = markdownHtmlCache.keySet().iterator().next();
-            markdownHtmlCache.remove(oldestKey);
-        }
-        return html;
-    }
-
-    private String buildMarkdownHtml(String normalizedMarkdown) {
-        String jsMarkdown = JSONObject.quote(normalizedMarkdown);
-        return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                + "<style>html,body{margin:0;width:100%;max-width:100%;overflow-x:hidden;}body{font:14px/1.55 sans-serif;color:#171f30;background:transparent;overflow-y:hidden;}#root{max-width:100%;overflow-x:hidden;}p{margin:0 0 10px;}h1,h2,h3,h4,h5,h6{margin:12px 0 8px;line-height:1.28;color:#111827;font-weight:700;}h1{font-size:22px}h2{font-size:20px}h3{font-size:18px}h4,h5,h6{font-size:16px}ul,ol{margin:6px 0 10px;padding-left:22px;}li{margin:3px 0;}blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #9fb3e8;background:#f6f8ff;border-radius:8px;}hr{border:0;border-top:1px solid #dce4f1;margin:12px 0;}.code-wrap{position:relative;margin:8px 0;max-width:100%;overflow-x:auto;}.code-copy{position:absolute;right:8px;top:6px;border:1px solid #dce4f1;background:rgba(255,255,255,.95);color:#3668f0;border-radius:8px;padding:2px 6px;font-size:13px;line-height:1.2;z-index:2}pre{white-space:pre-wrap;background:#f4f7fb;border:1px solid #dce4f1;border-radius:10px;padding:30px 10px 10px;overflow:auto;margin:0;}code{font-family:monospace}strong{font-weight:700}.mermaid-wrap{position:relative;border:1px solid #dce4f1;border-radius:12px;padding:28px 8px 8px;margin:8px 0;background:#fff;max-width:100%;overflow-x:auto}.mermaid-tools{position:absolute;right:6px;top:4px;display:flex;gap:6px}.mermaid-tools button{border:0;background:transparent;font-size:16px;color:#3668f0;padding:2px 6px}.table-wrap{max-width:100%;overflow-x:auto;overflow-y:hidden;margin:8px 0 10px;border:1px solid #dce4f1;border-radius:10px;background:rgba(255,255,255,.72);-webkit-overflow-scrolling:touch;touch-action:pan-x;overscroll-behavior:contain;}.table-wrap::-webkit-scrollbar{height:6px}.table-wrap::-webkit-scrollbar-thumb{background:#b8c3d8;border-radius:6px}.table-wrap table{margin:0;border:0;}table{border-collapse:collapse;width:max-content;min-width:100%;table-layout:auto;font-size:12px;}td,th{border:1px solid #dce4f1;padding:5px 6px;vertical-align:top;min-width:72px;max-width:80vw;word-break:break-word;overflow-wrap:anywhere;}th{font-weight:700;background:#f7f9ff;}</style>"
-                + "<script src='https://cdn.jsdelivr.net/npm/marked/marked.min.js'></script>"
-                + "<script src='https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js'></script></head><body><div id='root'></div>"
-                + "<script>const md=" + jsMarkdown + ";if(window.mermaid)mermaid.initialize({startOnLoad:false,securityLevel:'loose'});"
-                + "function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}"
-                + "function inlineFmt(s){return esc(s).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>')}"
-                + "function cells(line){let p=line.trim();if(p.startsWith('|'))p=p.slice(1);if(p.endsWith('|'))p=p.slice(0,-1);return p.split('|').map(x=>x.trim())}"
-                + "function tableSep(line){return /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?\\s*$/.test(line)}"
-                + "function fallbackMarkdown(s){const lines=String(s||'').split(/\\n/);let h='',i=0,inCode=false,code='',list='';const close=()=>{if(list){h+='</'+list+'>';list=''}};while(i<lines.length){let line=lines[i];if(/^\\s*```/.test(line)){if(inCode){h+='<pre><code>'+esc(code.replace(/\\n$/,''))+'</code></pre>';code='';inCode=false}else{close();inCode=true}i++;continue}if(inCode){code+=line+'\\n';i++;continue}if(!line.trim()){close();i++;continue}if(i+1<lines.length&&line.indexOf('|')>=0&&tableSep(lines[i+1])){close();const head=cells(line);i+=2;let rows=[];while(i<lines.length&&lines[i].indexOf('|')>=0&&lines[i].trim()){rows.push(cells(lines[i]));i++}h+='<table><thead><tr>'+head.map(c=>'<th>'+inlineFmt(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>'<td>'+inlineFmt(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';continue}let m=line.match(/^(#{1,6})\\s+(.+)$/);if(m){close();h+='<h'+m[1].length+'>'+inlineFmt(m[2])+'</h'+m[1].length+'>';i++;continue}if(/^\\s*---+\\s*$/.test(line)){close();h+='<hr>';i++;continue}m=line.match(/^\\s*[-*+]\\s+(.+)$/);if(m){if(list!=='ul'){close();list='ul';h+='<ul>'}h+='<li>'+inlineFmt(m[1])+'</li>';i++;continue}m=line.match(/^\\s*\\d+[\\.、]\\s+(.+)$/);if(m){if(list!=='ol'){close();list='ol';h+='<ol>'}h+='<li>'+inlineFmt(m[1])+'</li>';i++;continue}close();h+='<p>'+inlineFmt(line)+'</p>';i++}close();if(inCode)h+='<pre><code>'+esc(code)+'</code></pre>';return h}"
-                + "function resizeRoot(){if(window.OneApiBridge){const root=document.getElementById('root');const h=Math.ceil(root?root.getBoundingClientRect().height:document.body.scrollHeight);OneApiBridge.resize(h)}}"
-                + "function enhanceMermaid(){document.querySelectorAll('pre code.language-mermaid,pre code.lang-mermaid').forEach(code=>{const src=code.textContent;const wrap=document.createElement('div');wrap.className='mermaid-wrap';wrap.innerHTML='<div class=\"mermaid-tools\"><button type=\"button\" onclick=\"downloadMermaid(this)\">⇩</button><button type=\"button\" onclick=\"fullscreenMermaid(this)\">⛶</button></div><div class=\"mermaid\">'+src+'</div>';code.closest('pre').replaceWith(wrap);});}"
-                + "function enhanceTables(){document.querySelectorAll('table').forEach(table=>{if(table.closest('.table-wrap'))return;const wrap=document.createElement('div');wrap.className='table-wrap';let sx=0,sy=0;wrap.addEventListener('touchstart',e=>{const t=e.touches&&e.touches[0];if(t){sx=t.clientX;sy=t.clientY}}, {passive:true});wrap.addEventListener('touchmove',e=>{const t=e.touches&&e.touches[0];if(!t)return;const dx=Math.abs(t.clientX-sx),dy=Math.abs(t.clientY-sy);if(dx>10&&dx>dy*1.15&&window.OneApiBridge)OneApiBridge.suppressSwipe()}, {passive:true});table.parentNode.insertBefore(wrap,table);wrap.appendChild(table);});}"
-                + "function enhanceCodeBlocks(){document.querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const code=pre.querySelector('code');if(code&&/(^|\\s)(language-)?mermaid(\\s|$)/.test(code.className))return;pre.dataset.enhanced='1';const wrap=document.createElement('div');wrap.className='code-wrap';const btn=document.createElement('button');btn.type='button';btn.className='code-copy';btn.textContent='⧉';btn.onclick=(e)=>{e.stopPropagation();if(window.OneApiBridge)OneApiBridge.copyText(code?code.innerText:pre.innerText)};pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(btn);wrap.appendChild(pre);});}"
-                + "if(window.marked){marked.setOptions({gfm:true,breaks:true});document.getElementById('root').innerHTML=marked.parse(md)}else{document.getElementById('root').innerHTML=fallbackMarkdown(md)}"
-                + "enhanceMermaid();enhanceCodeBlocks();enhanceTables();"
-                + "if(window.mermaid){try{Promise.resolve(mermaid.run()).finally(()=>setTimeout(resizeRoot,80))}catch(e){setTimeout(resizeRoot,80)}}setTimeout(resizeRoot,80);requestAnimationFrame(()=>setTimeout(resizeRoot,0));function svgFor(btn){const svg=btn.closest('.mermaid-wrap').querySelector('svg');return svg?new XMLSerializer().serializeToString(svg):''}"
-                + "function toPng(svg,cb){const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=Math.max(1,img.width);c.height=Math.max(1,img.height);const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0);cb(c.toDataURL('image/png'))};img.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svg)));}"
-                + "function downloadMermaid(btn){const svg=svgFor(btn);if(window.OneApiBridge&&svg)toPng(svg,(png)=>OneApiBridge.savePng(png))}"
-                + "function fullscreenMermaid(btn){const svg=svgFor(btn);if(window.OneApiBridge&&svg)OneApiBridge.openMermaid(svg)}</script></body></html>";
-    }
-
-    private String normalizeMarkdownForRender(String markdown) {
-        String source = cleanDisplayText(markdown).replace("\r\n", "\n").replace('\r', '\n');
-        if (source.isEmpty()) {
-            return "";
-        }
-        StringBuilder out = new StringBuilder();
-        boolean inFence = false;
-        boolean inAltFence = false;
-        String[] lines = source.split("\n", -1);
-        for (String rawLine : lines) {
-            String line = rawLine;
-            String trimmed = line.trim();
-            if (trimmed.startsWith("```") && !inAltFence) {
-                inFence = !inFence;
-                appendNormalizedLine(out, line);
-                continue;
-            }
-            if (("'".equals(trimmed) || "'''".equals(trimmed) || trimmed.startsWith("'''")) && (!inFence || inAltFence)) {
-                inFence = !inFence;
-                inAltFence = !inAltFence;
-                appendNormalizedLine(out, line.replaceFirst("^\\s*'''", "```").replaceFirst("^\\s*'\\s*$", "```"));
-                continue;
-            }
-            if (!inFence) {
-                line = normalizeMarkdownLine(line);
-            }
-            appendNormalizedLine(out, line);
-        }
-        String value = out.toString().trim();
-        value = value.replaceAll("\\s*---\\s*(#{1,6})", "\n\n---\n\n$1 ");
-        value = value.replaceAll("([^\\n])\\s+(#{1,6})([^#\\s])", "$1\n\n$2 $3");
-        value = value.replaceAll("(?m)(^|\\n)(#{1,6})([^#\\s])", "$1$2 $3");
-        value = value.replaceAll("([^\\n])\\s+[-*]([^\\s\\-*])", "$1\n- $2");
-        value = value.replaceAll("([^\\n])\\s+(\\d+[\\.、])([^\\s])", "$1\n$2 $3");
-        return value.replaceAll("\\n{3,}", "\n\n").trim();
-    }
-
-    private String normalizeMarkdownLine(String line) {
-        String value = line == null ? "" : line;
-        value = value.replaceAll("^(\\s{0,3}#{1,6})([^#\\s])", "$1 $2");
-        value = value.replaceAll("^(\\s*[-*+])([^\\s])", "$1 $2");
-        value = value.replaceAll("^(\\s*\\d+[\\.、])([^\\s])", "$1 $2");
-        return value;
-    }
-
-    private void appendNormalizedLine(StringBuilder out, String line) {
-        if (out.length() > 0) {
-            out.append('\n');
-        }
-        out.append(line);
-    }
-
-    private class MermaidBridge {
-        private final WebView web;
-
-        MermaidBridge() {
-            this.web = null;
-        }
-
-        MermaidBridge(WebView web) {
-            this.web = web;
-        }
-
-        @JavascriptInterface
-        public void openMermaid(String svg) {
-            ui(() -> showMermaidPreview(svg));
-        }
-
-        @JavascriptInterface
-        public void savePng(String dataUrl) {
-            ui(() -> saveDataUrlImage(dataUrl));
-        }
-
-        @JavascriptInterface
-        public void copyText(String text) {
-            ui(() -> copyToClipboard(text));
-        }
-
-        @JavascriptInterface
-        public void suppressSwipe() {
-            suppressSwipeUntil = System.currentTimeMillis() + 900L;
-        }
-
-        @JavascriptInterface
-        public void resize(int height) {
-            if (web == null) {
-                return;
-            }
-            ui(() -> {
-                int targetHeight = Math.max(dp(96), dp(Math.min(height + 24, 6000)));
-                web.setLayoutParams(new LinearLayout.LayoutParams(-1, targetHeight));
-                web.requestLayout();
-            });
-        }
-    }
-
-    private void showMermaidPreview(String svg) {
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(190, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(12), dp(12), dp(12), dp(12));
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold("Mermaid"), new LinearLayout.LayoutParams(0, -2, 1));
-        Button save = iconButton("⇩");
-        save.setContentDescription("下载");
-        save.setOnClickListener(v -> saveSvgAsPng(svg));
-        titleRow.addView(save, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        Button close = iconButton("×");
-        close.setContentDescription("关闭");
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-        WebView web = new WebView(this);
-        configureContentWebView(web);
-        String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>html,body{height:100%;margin:0;background:#fff;overflow:auto}svg{max-width:none}</style></head><body>" + (svg == null ? "" : svg) + "</body></html>";
-        web.loadDataWithBaseURL("https://ai.oneapi.center/", html, "text/html", "utf-8", null);
-        LinearLayout.LayoutParams webLp = new LinearLayout.LayoutParams(-1, dp(560));
-        webLp.setMargins(0, dp(8), 0, 0);
-        panel.addView(web, webLp);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
-        lp.setMargins(dp(14), 0, dp(14), 0);
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private LinearLayout addStreamingBubble(String role) {
-        return addStreamingBubble(role, 0);
-    }
-
-    private LinearLayout addStreamingBubble(String role, long timestamp) {
-        LinearLayout box = vertical();
-        box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        box.setBackground(round(GLASS, dp(16), LINE));
-        box.setLayoutParams(bubbleLayoutParams("user".equals(role)));
-        box.setOnClickListener(v -> toggleActionRows(box));
-        content.addView(box);
-        return box;
-    }
-
-    private void replaceStreamingBubble(LinearLayout box, String text, long timestamp) {
-        if (box == null) {
-            return;
-        }
-        renderAssistantBubbleContent(box, text, timestamp, true);
-    }
-
-    private void updateStreamingBubble(LinearLayout box, String text, long timestamp, boolean withActions) {
-        if (box == null) {
-            return;
-        }
-        if (!withActions) {
-            updateLiveAssistantBubble(box, text, timestamp);
-            return;
-        }
-        renderAssistantBubbleContent(box, text, timestamp, withActions);
-    }
-
-    private void updateLiveAssistantBubble(LinearLayout box, String text, long timestamp) {
-        String clean = cleanDisplayText(text);
-        String[] split = splitThinkingBlock(clean);
-        boolean needsThinking = !split[0].isEmpty();
-        String answer = split[1].isEmpty() ? (needsThinking ? "" : clean) : split[1];
-        TextView thinkingBody = taggedTextView(box, "live_thinking_body");
-        TextView answerBody = taggedTextView(box, "live_answer_body");
-        boolean hasThinkingView = thinkingBody != null;
-        boolean hasAnswerView = answerBody != null;
-        if (needsThinking != hasThinkingView || (!answer.trim().isEmpty() && !hasAnswerView)) {
-            clearContainer(box);
-            if (needsThinking) {
-                LinearLayout wrap = vertical();
-                wrap.setTag("live_thinking_wrap");
-                wrap.setBackground(round(Color.argb(22, 54, 104, 240), dp(12), Color.argb(38, 54, 104, 240)));
-                wrap.setPadding(dp(10), dp(7), dp(10), dp(7));
-                TextView header = copy("Thinking：");
-                header.setTextColor(Color.rgb(70, 88, 120));
-                header.setTypeface(Typeface.DEFAULT_BOLD);
-                header.setTextSize(13);
-                TextView body = copy(split[0]);
-                body.setTag("live_thinking_body");
-                body.setTextColor(Color.rgb(84, 99, 128));
-                body.setTextIsSelectable(true);
-                wrap.addView(header);
-                wrap.addView(body);
-                box.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
-                if (!answer.trim().isEmpty()) {
-                    box.addView(gap(8));
-                }
-            }
-            if (!answer.trim().isEmpty()) {
-                TextView body = copy(answer);
-                body.setTag("live_answer_body");
-                body.setTextColor(INK);
-                body.setTextIsSelectable(true);
-                box.addView(body);
-            }
-            addTimestamp(box, timestamp, false, "chat", -1, "");
-            return;
-        }
-        if (thinkingBody != null) {
-            thinkingBody.setText(split[0]);
-        }
-        if (answerBody != null) {
-            answerBody.setText(answer);
-        }
-    }
-
-    private TextView taggedTextView(View rootView, String tag) {
-        if (rootView == null) {
-            return null;
-        }
-        Object currentTag = rootView.getTag();
-        if (tag.equals(currentTag) && rootView instanceof TextView) {
-            return (TextView) rootView;
-        }
-        if (rootView instanceof LinearLayout) {
-            LinearLayout group = (LinearLayout) rootView;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                TextView found = taggedTextView(group.getChildAt(i), tag);
-                if (found != null) {
-                    return found;
-                }
-            }
-        }
-        if (rootView instanceof FrameLayout) {
-            FrameLayout group = (FrameLayout) rootView;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                TextView found = taggedTextView(group.getChildAt(i), tag);
-                if (found != null) {
-                    return found;
-                }
-            }
-        }
-        return null;
-    }
-
-    private void renderAssistantBubbleContent(LinearLayout box, String text, long timestamp, boolean withActions) {
-        clearContainer(box);
-        String clean = cleanDisplayText(text);
-        if (!withActions) {
-            addLiveAssistantContent(box, clean);
-        } else if (shouldRenderRichText(clean) || !splitThinkingBlock(clean)[0].isEmpty()) {
-            addRichAssistantContent(box, clean, () -> toggleActionRows(box));
-        } else {
-            addPlainMessageContent(box, clean, false, () -> toggleActionRows(box));
-        }
-        addTimestamp(box, timestamp, false, "chat", -1, withActions ? clean : "");
-    }
-
-    private void addLiveAssistantContent(LinearLayout box, String text) {
-        String[] split = splitThinkingBlock(text);
-        if (!split[0].isEmpty()) {
-            addLiveThinkingBlock(box, split[0]);
-            if (!split[1].isEmpty()) {
-                box.addView(gap(8));
-            }
-        }
-        String answer = split[1].isEmpty() ? (split[0].isEmpty() ? text : "") : split[1];
-        if (!cleanDisplayText(answer).isEmpty()) {
-            TextView body = copy(answer);
-            body.setTextColor(INK);
-            body.setTextIsSelectable(true);
-            box.addView(body);
-        }
-    }
-
-    private void addLiveThinkingBlock(LinearLayout box, String thinkingText) {
-        LinearLayout wrap = vertical();
-        wrap.setBackground(round(Color.argb(22, 54, 104, 240), dp(12), Color.argb(38, 54, 104, 240)));
-        wrap.setPadding(dp(10), dp(7), dp(10), dp(7));
-        TextView header = copy("Thinking：");
-        header.setTextColor(Color.rgb(70, 88, 120));
-        header.setTypeface(Typeface.DEFAULT_BOLD);
-        header.setTextSize(13);
-        TextView body = copy(thinkingText);
-        body.setTextColor(Color.rgb(84, 99, 128));
-        body.setTextIsSelectable(true);
-        wrap.addView(header);
-        if (!cleanDisplayText(thinkingText).isEmpty()) {
-            wrap.addView(body);
-        }
-        box.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
-    }
-
-    private LinearLayout addImageProgressBubble() {
-        LinearLayout box = vertical();
-        box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        box.setBackground(round(GLASS, dp(16), LINE));
-        DrawingProgressView progress = new DrawingProgressView(this);
-        box.addView(progress, new LinearLayout.LayoutParams(dp(168), dp(168)));
-        TextView status = copy("绘制草稿...");
-        status.setTag("image_status");
-        status.setTextColor(INK);
-        box.addView(status);
-        box.setLayoutParams(bubbleLayoutParams(false));
-        content.addView(box);
-        handler.postDelayed(() -> {
-            if (requestRunning && status.getParent() != null) {
-                status.setText("细化画面...");
-            }
-        }, 1200);
-        handler.postDelayed(() -> {
-            if (requestRunning && status.getParent() != null) {
-                status.setText("后处理...");
-            }
-        }, 2400);
-        return box;
-    }
-
-    private LinearLayout.LayoutParams bubbleLayoutParams(boolean user) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(user ? dp(42) : 0, dp(8), 0, dp(8));
-        return lp;
-    }
-
-    private View imageResultBubble(String source) {
-        return imageResultBubble(source, 0);
-    }
-
-    private View imageResultBubble(String source, long timestamp) {
-        return imageResultBubble(source, timestamp, "", -1);
-    }
-
-    private View imageResultBubble(String source, long timestamp, String mode, int messageIndex) {
-        return imageResultBubble(source, timestamp, mode, messageIndex, "assistant");
-    }
-
-    private View imageResultBubble(String source, long timestamp, String mode, int messageIndex, String role) {
-        boolean user = "user".equals(role);
-        LinearLayout box = vertical();
-        box.setPadding(dp(14), dp(12), dp(14), dp(12));
-        box.setBackground(round(user ? Color.WHITE : GLASS, dp(16), LINE));
-        box.setLayoutParams(bubbleLayoutParams(user));
-        renderImageResult(box, source, timestamp, mode, messageIndex, user);
-        box.setOnClickListener(v -> toggleActionRows(box));
-        return box;
-    }
-
-    private void renderImageResult(LinearLayout box, String source) {
-        renderImageResult(box, source, System.currentTimeMillis());
-    }
-
-    private void renderImageResult(LinearLayout box, String source, long timestamp) {
-        renderImageResult(box, source, timestamp, "", -1);
-    }
-
-    private void renderImageResult(LinearLayout box, String source, long timestamp, String mode, int messageIndex) {
-        renderImageResult(box, source, timestamp, mode, messageIndex, false);
-    }
-
-    private void renderImageResult(LinearLayout box, String source, long timestamp, String mode, int messageIndex, boolean user) {
-        if (box == null) {
-            content.addView(messageBubble("assistant", source));
-            return;
-        }
-        clearContainer(box);
-        if (isImageSource(source)) {
-            ImageView image = new ImageView(this);
-            image.setAdjustViewBounds(true);
-            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            image.setBackground(round(Color.WHITE, dp(14), LINE));
-            final long[] lastTapAt = {0L};
-            image.setOnClickListener(v -> {
-                long now = System.currentTimeMillis();
-                if (now - lastTapAt[0] < 320L) {
-                    lastTapAt[0] = 0L;
-                    showImagePreview(Uri.parse(source));
-                    return;
-                }
-                lastTapAt[0] = now;
-                toggleActionRows(box);
-            });
-            image.setOnLongClickListener(v -> {
-                showImagePreview(Uri.parse(source));
-                return true;
-            });
-            box.addView(image, new LinearLayout.LayoutParams(-1, dp(240)));
-            setImageSource(image, source);
-        } else {
-            addPlainMessageContent(box, cleanDisplayText(source), false, () -> toggleActionRows(box));
-        }
-        addTimestamp(box, timestamp, user, mode, messageIndex, source);
-    }
-
-    private void addTimestamp(LinearLayout box, long timestamp, boolean user) {
-        addTimestamp(box, timestamp, user, "", -1, "");
-    }
-
-    private void addTimestamp(LinearLayout box, long timestamp, boolean user, String mode, int messageIndex, String messageText) {
-        LinearLayout row = horizontal();
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setTag("bubble_meta");
-        LinearLayout actions = horizontal();
-        actions.setTag("bubble_actions");
-        actions.setVisibility(View.GONE);
-        boolean editableImage = !user && ("image".equals(mode) || mode.isEmpty()) && isImageSource(messageText);
-        if (editableImage) {
-            actions.addView(tinyAction(R.drawable.ic_bubble_edit, "编辑这张图", () -> referenceImageForEdit(messageText)));
-            actions.addView(tinyAction(R.drawable.ic_bubble_download, "下载图片", () -> saveImageSource(messageText)));
-        }
-        if (!cleanDisplayText(messageText).isEmpty()) {
-            actions.addView(tinyAction(R.drawable.ic_bubble_copy, "复制", () -> copyToClipboard(cleanDisplayText(messageText))));
-            actions.addView(tinyAction(R.drawable.ic_bubble_share, "分享", () -> shareText(cleanDisplayText(messageText))));
-        }
-        boolean localMessage = ("chat".equals(mode) || "image".equals(mode)) && messageIndex >= 0;
-        if (localMessage) {
-            if (user) {
-                actions.addView(tinyAction(R.drawable.ic_bubble_edit, "编辑", () -> editLocalMessage(mode, messageIndex)));
-            }
-            actions.addView(tinyAction(R.drawable.ic_bubble_delete, "删除", () -> deleteLocalMessage(mode, messageIndex)));
-        }
-        TextView time = copy(timestamp <= 0 ? "" : formatDateTime(timestamp));
-        time.setTextSize(11);
-        time.setTextColor(MUTED);
-        time.setGravity(user ? Gravity.END : Gravity.START);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(6), 0, 0);
-        if (user) {
-            row.addView(actions, new LinearLayout.LayoutParams(-2, dp(28)));
-            row.addView(time, new LinearLayout.LayoutParams(0, -2, 1));
-        } else {
-            row.addView(time, new LinearLayout.LayoutParams(0, -2, 1));
-            row.addView(actions, new LinearLayout.LayoutParams(-2, dp(28)));
-        }
-        box.addView(row, lp);
-    }
-
-    private ImageButton tinyAction(int iconRes, String description, Runnable action) {
-        ImageButton b = new ImageButton(this);
-        b.setImageResource(iconRes);
-        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        b.setPadding(dp(5), dp(5), dp(5), dp(5));
-        b.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        b.setContentDescription(description);
-        b.setOnClickListener(v -> action.run());
-        b.setLayoutParams(new LinearLayout.LayoutParams(dp(28), dp(28)));
-        return b;
-    }
-
-    private void toggleActionRows(LinearLayout box) {
-        View row = box.findViewWithTag("bubble_actions");
-        if (row == null) {
-            return;
-        }
-        boolean willShow = row.getVisibility() != View.VISIBLE;
-        if (activeBubbleActions != null && activeBubbleActions != row) {
-            activeBubbleActions.setVisibility(View.GONE);
-        }
-        row.setVisibility(willShow ? View.VISIBLE : View.GONE);
-        activeBubbleActions = willShow ? row : null;
-    }
-
-    private boolean isImageSource(String source) {
-        String value = source == null ? "" : source.trim().toLowerCase(Locale.ROOT);
-        return value.startsWith("http://")
-                || value.startsWith("https://")
-                || value.startsWith("data:image/")
-                || value.startsWith("content:")
-                || value.startsWith("file:");
-    }
-
-    private void referenceImageForEdit(String source) {
-        if (source == null || source.trim().isEmpty()) {
-            return;
-        }
-        selectedAttachmentUris.clear();
-        selectedAttachmentUris.add(Uri.parse(source.trim()));
-        renderAttachmentPreview();
-        focusComposerInput();
-    }
-
-    private void copyToClipboard(String text) {
-        String clean = cleanDisplayText(text);
-        if (clean.isEmpty()) {
-            return;
-        }
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        clipboard.setPrimaryClip(ClipData.newPlainText("OneAPI", clean));
-    }
-
-    private void shareText(String text) {
-        String clean = cleanDisplayText(text);
-        if (clean.isEmpty()) {
-            return;
-        }
-        Intent intent = new Intent(Intent.ACTION_SEND);
-        intent.setType("text/plain");
-        intent.putExtra(Intent.EXTRA_TEXT, clean);
-        try {
-            startActivity(Intent.createChooser(intent, "分享"));
-        } catch (Exception ignored) {
-            toast("当前系统没有可用的分享应用");
-        }
-    }
-
-    private void editLocalMessage(String mode, int index) {
-        JSONObject item = localMessageAt(mode, index);
-        if (item == null || activeInput == null) {
-            return;
-        }
-        activeInput.setText(cleanDisplayText(item.optString("text", "")));
-        focusComposerInput();
-    }
-
-    private void deleteLocalMessage(String mode, int index) {
-        try {
-            JSONObject root = localConversationStore(mode);
-            JSONObject session = findLocalSession(root, activeLocalSessionId(mode));
-            JSONArray messages = session == null ? null : session.optJSONArray("messages");
-            if (messages == null || index < 0 || index >= messages.length()) {
-                return;
-            }
-            JSONArray next = new JSONArray();
-            for (int i = 0; i < messages.length(); i++) {
-                if (i != index) {
-                    next.put(messages.opt(i));
-                }
-            }
-            session.put("messages", next);
-            session.put("updatedAt", System.currentTimeMillis());
-            saveLocalConversationStore(mode, root);
-            renderLocalConversationNow(mode, false);
-        } catch (Exception ignored) {
-        }
-    }
-
-    private JSONObject localMessageAt(String mode, int index) {
-        JSONArray messages = localConversationMessages(mode);
-        return index >= 0 && index < messages.length() ? messages.optJSONObject(index) : null;
-    }
-
-    private void saveImageSource(String source) {
-        String value = cleanDisplayText(source);
-        if (value.isEmpty()) {
-            return;
-        }
-        if (value.startsWith("data:image/")) {
-            saveDataUrlImage(value);
-            return;
-        }
-        if (!value.startsWith("http://") && !value.startsWith("https://")) {
-            toast("图片地址无法保存");
-            return;
-        }
-        executor.execute(() -> {
-            HttpURLConnection conn = null;
-            try {
-                conn = (HttpURLConnection) new URL(value).openConnection();
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(60000);
-                String mime = conn.getContentType();
-                try (InputStream input = conn.getInputStream();
-                     ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                    byte[] buffer = new byte[8192];
-                    int read;
-                    while ((read = input.read(buffer)) != -1) {
-                        output.write(buffer, 0, read);
-                    }
-                    saveImageBytes(output.toByteArray(), mime == null ? "image/png" : mime);
-                }
-            } catch (Exception ignored) {
-                ui(() -> toast("图片下载失败"));
-            } finally {
-                if (conn != null) {
-                    conn.disconnect();
-                }
-            }
-        });
-    }
-
-    private void saveImageBytes(byte[] bytes, String mime) {
-        try {
-            if (bytes == null || bytes.length == 0) {
-                ui(() -> toast("图片数据无法保存"));
-                return;
-            }
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "oneapi_" + System.currentTimeMillis() + ".png");
-            values.put(MediaStore.Images.Media.MIME_TYPE, (mime == null || mime.trim().isEmpty()) ? "image/png" : mime.split(";")[0].trim());
-            Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) {
-                ui(() -> toast("无法保存图片"));
-                return;
-            }
-            try (OutputStream output = getContentResolver().openOutputStream(uri)) {
-                if (output != null) {
-                    output.write(bytes);
-                }
-            }
-        } catch (Exception ignored) {
-            ui(() -> toast("图片保存失败"));
-        }
-    }
-
-    private void saveDataUrlImage(String dataUrl) {
-        try {
-            String value = dataUrl == null ? "" : dataUrl.trim();
-            int comma = value.indexOf(',');
-            if (!value.startsWith("data:image/") || comma < 0) {
-                toast("图片数据无法保存");
-                return;
-            }
-            byte[] bytes = android.util.Base64.decode(value.substring(comma + 1), android.util.Base64.DEFAULT);
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "oneapi_" + System.currentTimeMillis() + ".png");
-            values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-            Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) {
-                toast("无法保存图片");
-                return;
-            }
-            try (OutputStream output = getContentResolver().openOutputStream(uri)) {
-                if (output != null) {
-                    output.write(bytes);
-                }
-            }
-        } catch (Exception ignored) {
-            toast("图片保存失败");
-        }
-    }
-
-    private void saveSvgAsPng(String svg) {
-        try {
-            if (shell == null) {
-                toast("当前页面无法导出图片");
-                return;
-            }
-            WebView converter = new WebView(this);
-            configureContentWebView(converter);
-            converter.addJavascriptInterface(new MermaidBridge(), "OneApiBridge");
-            String encoded = android.util.Base64.encodeToString((svg == null ? "" : svg).getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
-            String html = "<!doctype html><html><body><script>"
-                    + "const svg=atob('" + encoded + "');const img=new Image();"
-                    + "img.onload=()=>{const c=document.createElement('canvas');c.width=Math.max(1,img.width);c.height=Math.max(1,img.height);const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0);OneApiBridge.savePng(c.toDataURL('image/png'));};"
-                    + "img.src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svg)));"
-                    + "</script></body></html>";
-            shell.addView(converter, new FrameLayout.LayoutParams(1, 1));
-            converter.loadDataWithBaseURL("https://ai.oneapi.center/", html, "text/html", "utf-8", null);
-            handler.postDelayed(() -> shell.removeView(converter), 2500);
-        } catch (Exception ignored) {
-            toast("无法导出 Mermaid 图片");
-        }
-    }
-
-    private void loadImageIntoView(String url, ImageView target) {
-        executor.execute(() -> {
-            try {
-                HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(60000);
-                Bitmap bitmap = BitmapFactory.decodeStream(conn.getInputStream());
-                conn.disconnect();
-                if (bitmap != null) {
-                    ui(() -> target.setImageBitmap(bitmap));
-                }
-            } catch (Exception ignored) {
-            }
-        });
-    }
-
-    private void setImageSource(ImageView target, String source) {
-        if (target == null || source == null || source.trim().isEmpty()) {
-            return;
-        }
-        String value = source.trim();
-        if (value.startsWith("http://") || value.startsWith("https://")) {
-            loadImageIntoView(value, target);
-            return;
-        }
-        if (value.startsWith("data:image/")) {
-            executor.execute(() -> {
-                try {
-                    String base64 = value.substring(value.indexOf(",") + 1);
-                    byte[] bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);
-                    Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                    if (bitmap != null) {
-                        ui(() -> target.setImageBitmap(bitmap));
-                    }
-                } catch (Exception ignored) {
-                }
-            });
-            return;
-        }
-        Uri uri = Uri.parse(value);
-        String scheme = uri.getScheme();
-        if ("content".equalsIgnoreCase(scheme) || "file".equalsIgnoreCase(scheme)) {
-            executor.execute(() -> {
-                try (InputStream input = getContentResolver().openInputStream(uri)) {
-                    Bitmap bitmap = BitmapFactory.decodeStream(input);
-                    if (bitmap != null) {
-                        ui(() -> target.setImageBitmap(bitmap));
-                    }
-                } catch (Exception ignored) {
-                    ui(() -> target.setImageURI(uri));
-                }
-            });
-            return;
-        }
-        target.setImageURI(uri);
-    }
-
-    private JSONObject api(String method, String path, JSONObject body) throws Exception {
-        String base = prefs.getString("server", "").replaceAll("/+$", "");
-        URL url = new URL(base + path);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(180000);
-        conn.setRequestMethod(method);
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        String cookie = prefs.getString("cookie", "");
-        if (!cookie.isEmpty()) {
-            conn.setRequestProperty("Cookie", cookie);
-        }
-        String userId = prefs.getString("user_id", "");
-        if (!userId.isEmpty()) {
-            conn.setRequestProperty("New-Api-User", userId);
-        }
-        if (body != null) {
-            conn.setDoOutput(true);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(body.toString().getBytes(StandardCharsets.UTF_8));
-            }
-        }
-        String setCookie = conn.getHeaderField("Set-Cookie");
-        if (setCookie != null && !setCookie.isEmpty()) {
-            prefs.edit().putString("cookie", setCookie.split(";", 2)[0]).apply();
-        }
-        int code = conn.getResponseCode();
-        String raw = readStream(code >= 400 ? conn.getErrorStream() : conn.getInputStream());
-        conn.disconnect();
-        JSONObject json;
-        try {
-            json = new JSONObject(raw.isEmpty() ? "{}" : raw);
-        } catch (Exception parseError) {
-            throw new ApiException(code, raw, code >= 400 ? "服务器接口暂时不可用，请确认服务器已更新。" : "服务器返回内容无法识别。");
-        }
-        if (code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
-            throw new ApiException(code, raw, json.optString("message", "服务器接口暂时不可用，请稍后重试。"));
-        }
-        return json;
-    }
-
-    private JSONObject apiImageEdit(Uri imageUri, String prompt) throws Exception {
-        String base = prefs.getString("server", "").replaceAll("/+$", "");
-        String boundary = "----OneApiAndroid" + System.currentTimeMillis();
-        URL url = new URL(base + "/v1/images/edits");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(180000);
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        String cookie = prefs.getString("cookie", "");
-        if (!cookie.isEmpty()) {
-            conn.setRequestProperty("Cookie", cookie);
-        }
-        String userId = prefs.getString("user_id", "");
-        if (!userId.isEmpty()) {
-            conn.setRequestProperty("New-Api-User", userId);
-        }
-        conn.setDoOutput(true);
-        String mime = getContentResolver().getType(imageUri);
-        if (mime == null || mime.trim().isEmpty()) {
-            mime = "image/png";
-        }
-        String fileName = "image." + (mime.contains("jpeg") ? "jpg" : mime.contains("webp") ? "webp" : "png");
-        try (DataOutputStream out = new DataOutputStream(conn.getOutputStream())) {
-            writeMultipartField(out, boundary, "model", "gpt-image-2");
-            writeMultipartField(out, boundary, "prompt", prompt);
-            writeMultipartField(out, boundary, "size", selectedImageSize);
-            writeMultipartField(out, boundary, "quality", imageQualityValue(selectedImageQuality));
-            writeMultipartField(out, boundary, "response_format", "b64_json");
-            out.writeBytes("--" + boundary + "\r\n");
-            out.writeBytes("Content-Disposition: form-data; name=\"image\"; filename=\"" + fileName + "\"\r\n");
-            out.writeBytes("Content-Type: " + mime + "\r\n\r\n");
-            try (InputStream input = getContentResolver().openInputStream(imageUri)) {
-                if (input == null) {
-                    throw new ApiException(0, "", "图片读取失败，请重新选择图片后再发送。");
-                }
-                byte[] buffer = new byte[8192];
-                int read;
-                while ((read = input.read(buffer)) != -1) {
-                    out.write(buffer, 0, read);
-                }
-            }
-            out.writeBytes("\r\n--" + boundary + "--\r\n");
-        }
-        String setCookie = conn.getHeaderField("Set-Cookie");
-        if (setCookie != null && !setCookie.isEmpty()) {
-            prefs.edit().putString("cookie", setCookie.split(";", 2)[0]).apply();
-        }
-        int code = conn.getResponseCode();
-        String raw = readStream(code >= 400 ? conn.getErrorStream() : conn.getInputStream());
-        conn.disconnect();
-        JSONObject json;
-        try {
-            json = new JSONObject(raw.isEmpty() ? "{}" : raw);
-        } catch (Exception parseError) {
-            throw new ApiException(code, raw, code >= 400 ? "图片编辑接口暂时不可用，请确认服务器已更新。" : "服务器返回内容无法识别。");
-        }
-        if (code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
-            throw new ApiException(code, raw, json.optString("message", "图片编辑接口暂时不可用，请稍后重试。"));
-        }
-        return json;
-    }
-
-    private void writeMultipartField(DataOutputStream out, String boundary, String name, String value) throws Exception {
-        out.writeBytes("--" + boundary + "\r\n");
-        out.writeBytes("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n");
-        out.write(value.getBytes(StandardCharsets.UTF_8));
-        out.writeBytes("\r\n");
-    }
-
-    private String readStream(InputStream stream) throws Exception {
-        if (stream == null) {
-            return "";
-        }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            sb.append(line);
-        }
-        return sb.toString();
-    }
-
-    private void runNetwork(JsonRunnable work) {
-        executor.execute(() -> {
-            try {
-                work.run();
-            } catch (Exception e) {
-                ui(() -> {
-                    setSending(false);
-                    toast(userMessage(e));
-                });
-            }
-        });
-    }
-
-    private void runNetworkQuiet(JsonRunnable work) {
-        executor.execute(() -> {
-            try {
-                work.run();
-            } catch (Exception ignored) {
-            }
-        });
-    }
-
-    private String userMessage(Exception e) {
-        String msg = e.getMessage() == null ? "" : e.getMessage();
-        String lower = msg.toLowerCase(Locale.ROOT);
-        if (msg.contains("未登录") || lower.contains("not logged")) {
-            return "登录已失效，请重新登录";
-        }
-        if (lower.contains("already bound") || msg.contains("已经绑定")) {
-            return "这台客户端已经绑定了另一个 Android 应用，请先解除原绑定";
-        }
-        if (e instanceof ApiException && ((ApiException) e).status == 404) {
-            return "服务器接口不存在，请更新服务器版本或检查服务地址";
-        }
-        if (lower.contains("timeout") || lower.contains("refused")) {
-            return "服务器暂时无响应，请稍后重试";
-        }
-        return msg.isEmpty() ? "操作失败，请稍后重试" : msg;
-    }
-
-    private interface JsonRunnable {
-        void run() throws Exception;
-    }
-
-    private interface ProgressHandler {
-        void onProgress(int percent);
-    }
-
-    private interface ChoiceHandler {
-        void onChoice(String value);
-    }
-
-    private static class ApiException extends Exception {
-        final int status;
-        final String raw;
-
-        ApiException(int status, String raw, String message) {
-            super(message);
-            this.status = status;
-            this.raw = raw == null ? "" : raw;
-        }
-    }
-
-    private static class FlowBackgroundView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private LinearGradient backgroundGradient;
-        private long startedAt = System.currentTimeMillis();
-
-        FlowBackgroundView(Context context) {
-            super(context);
-        }
-
-        @Override
-        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
-            super.onSizeChanged(w, h, oldw, oldh);
-            backgroundGradient = new LinearGradient(
-                    0,
-                    0,
-                    Math.max(1, w),
-                    Math.max(1, h),
-                    new int[]{
-                            Color.rgb(241, 247, 255),
-                            Color.rgb(230, 238, 255),
-                            Color.rgb(238, 249, 246),
-                            Color.rgb(245, 250, 255)
-                    },
-                    null,
-                    Shader.TileMode.CLAMP
-            );
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float w = Math.max(1, getWidth());
-            float h = Math.max(1, getHeight());
-            float t = ((System.currentTimeMillis() - startedAt) % 8000) / 8000f;
-            float wave = (float) ((Math.sin(t * Math.PI * 2) + 1f) * 0.5f);
-            float wave2 = (float) ((Math.cos(t * Math.PI * 2) + 1f) * 0.5f);
-            paint.setShader(backgroundGradient);
-            canvas.drawRect(0, 0, w, h, paint);
-            paint.setShader(null);
-            paint.setColor(Color.argb(42, 54, 104, 240));
-            canvas.drawCircle(w * (0.18f + 0.18f * wave), h * 0.24f, w * 0.34f, paint);
-            paint.setColor(Color.argb(36, 73, 190, 143));
-            canvas.drawCircle(w * 0.86f, h * (0.18f + 0.16f * wave2), w * 0.32f, paint);
-            paint.setColor(Color.argb(30, 91, 77, 215));
-            canvas.drawCircle(w * (0.42f + 0.12f * wave2), h * 0.86f, w * 0.46f, paint);
-            postInvalidateDelayed(33);
-        }
-    }
-
-    private static class FrostedOverlayView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        FrostedOverlayView(Context context) {
-            super(context);
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            paint.setColor(Color.argb(74, 255, 255, 255));
-            canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
-            paint.setColor(Color.argb(18, 255, 255, 255));
-            for (int y = 0; y < getHeight(); y += 6) {
-                canvas.drawLine(0, y, getWidth(), y, paint);
-            }
-        }
-    }
-
-    private static class DrawingProgressView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final long startedAt = System.currentTimeMillis();
-
-        DrawingProgressView(Context context) {
-            super(context);
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float size = Math.min(getWidth(), getHeight());
-            float left = (getWidth() - size) / 2f;
-            float top = (getHeight() - size) / 2f;
-            paint.setColor(Color.rgb(244, 248, 255));
-            canvas.drawRoundRect(left, top, left + size, top + size, 28, 28, paint);
-            float t = ((System.currentTimeMillis() - startedAt) % 1400) / 1400f;
-            for (int i = 0; i < 5; i++) {
-                float p = (t + i * 0.18f) % 1f;
-                paint.setColor(Color.argb((int) (70 + 120 * (1f - p)), 54, 104, 240));
-                canvas.drawCircle(left + size * (0.18f + p * 0.64f), top + size * (0.25f + i * 0.12f), size * (0.035f + p * 0.02f), paint);
-            }
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(4f);
-            paint.setColor(Color.argb(140, 73, 190, 143));
-            canvas.drawRoundRect(left + size * 0.18f, top + size * 0.18f, left + size * 0.82f, top + size * 0.82f, 22, 22, paint);
-            paint.setStyle(Paint.Style.FILL);
-            postInvalidateDelayed(33);
-        }
-    }
-
-    private LinearLayout vertical() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.VERTICAL);
-        return l;
-    }
-
-    private LinearLayout horizontal() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        l.setGravity(Gravity.CENTER_VERTICAL);
-        return l;
-    }
-
-    private LinearLayout glassPanel() {
-        LinearLayout l = vertical();
-        l.setBackground(round(GLASS_SOFT, dp(22), LINE));
-        return l;
-    }
-
-    private LinearLayout cardPanel() {
-        LinearLayout c = vertical();
-        c.setPadding(dp(16), dp(15), dp(16), dp(15));
-        c.setBackground(round(GLASS, dp(18), LINE));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, 0, 0, dp(16));
-        c.setLayoutParams(lp);
-        return c;
-    }
-
-    private View heroCard(String title, String desc) {
-        LinearLayout c = cardPanel();
-        TextView t = title(title);
-        t.setTextSize(24);
-        c.addView(t);
-        c.addView(copy(desc));
-        return c;
-    }
-
-    private View card(String title, String desc) {
-        LinearLayout c = cardPanel();
-        c.addView(bold(title));
-        c.addView(copy(desc));
-        return c;
-    }
-
-    private View loadingCard(String desc) {
-        LinearLayout c = cardPanel();
-        LinearLayout row = horizontal();
-        ProgressBar progress = new ProgressBar(this);
-        progress.setIndeterminate(true);
-        row.addView(progress, new LinearLayout.LayoutParams(dp(28), dp(28)));
-        TextView label = copy(desc);
-        label.setTextColor(MUTED);
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(0, -2, 1);
-        labelLp.setMargins(dp(10), 0, 0, 0);
-        row.addView(label, labelLp);
-        c.addView(row);
-        return c;
-    }
-
-    private View loadEarlierButton(String text, Runnable action) {
-        TextView button = copy(text);
-        button.setGravity(Gravity.CENTER);
-        button.setTextColor(BLUE);
-        button.setPadding(dp(10), dp(9), dp(10), dp(9));
-        button.setBackground(round(Color.argb(210, 255, 255, 255), dp(14), Color.argb(76, 54, 104, 240)));
-        button.setOnClickListener(v -> action.run());
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(4), 0, dp(8));
-        button.setLayoutParams(lp);
-        return button;
-    }
-
-    private View sectionTitle(String text) {
-        TextView t = title(text);
-        t.setTextSize(22);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, dp(4), 0, dp(14));
-        t.setLayoutParams(lp);
-        return t;
-    }
-
-    private View planCard(String name, String desc, String tag) {
-        LinearLayout c = cardPanel();
-        LinearLayout row = horizontal();
-        row.addView(bold(name), new LinearLayout.LayoutParams(0, -2, 1));
-        TextView badge = copy(tag);
-        badge.setTextColor(BLUE);
-        badge.setGravity(Gravity.CENTER);
-        badge.setBackground(round(Color.argb(62, 54, 104, 240), dp(12), Color.argb(80, 54, 104, 240)));
-        row.addView(badge, new LinearLayout.LayoutParams(dp(78), dp(28)));
-        c.addView(row);
-        c.addView(copy(desc));
-        Button subscribe = primary("查看套餐");
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(38));
-        lp.setMargins(0, dp(10), 0, 0);
-        c.addView(subscribe, lp);
-        return c;
-    }
-
-    private void showModelChoice(String title, List<String> models, String current, String mode, ChoiceHandler handler) {
-        List<String> filtered = new ArrayList<>();
-        for (String model : models) {
-            if (isModelAllowedForMode(model, mode) && !filtered.contains(model)) {
-                filtered.add(model);
-            }
-        }
-        Map<String, List<String>> grouped = new HashMap<>();
-        List<String> order = new ArrayList<>();
-        for (String model : filtered) {
-            String vendor = modelVendor(model);
-            if (!grouped.containsKey(vendor)) {
-                grouped.put(vendor, new ArrayList<>());
-                order.add(vendor);
-            }
-            grouped.get(vendor).add(model);
-        }
-        List<String> ordered = new ArrayList<>();
-        for (String vendor : list("OpenAI", "Claude", "Gemini", "DeepSeek", "MiMo", "其他")) {
-            if (grouped.containsKey(vendor)) {
-                ordered.add(vendor);
-            }
-        }
-        for (String vendor : order) {
-            if (!ordered.contains(vendor)) {
-                ordered.add(vendor);
-            }
-        }
-        showGroupedChoice(title, ordered, grouped, current, handler);
-    }
-
-    private boolean isModelAllowedForMode(String model, String mode) {
-        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
-        if ("chat".equals(mode)) {
-            return isChatModelName(model) && !n.contains("codex");
-        }
-        if ("codex".equals(mode)) {
-            return !n.startsWith("claude") && !n.contains("image");
-        }
-        if ("claude".equals(mode)) {
-            return n.startsWith("claude") || n.startsWith("deepseek") || n.startsWith("mimo");
-        }
-        return true;
-    }
-
-    private String modelVendor(String model) {
-        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
-        if (n.startsWith("claude")) return "Claude";
-        if (n.startsWith("gemini") || n.contains("google")) return "Gemini";
-        if (n.startsWith("deepseek")) return "DeepSeek";
-        if (n.startsWith("mimo")) return "MiMo";
-        if (n.startsWith("gpt") || n.contains("codex")) return "OpenAI";
-        return "其他";
-    }
-
-    private void showRecentSessions(String client) {
-        if ("chat".equals(client) || "image".equals(client)) {
-            showLocalRecentSessions(client);
-            return;
-        }
-        if (cachedDesktopSessions != null && cachedDesktopSessions.length() > 0) {
-            JSONArray snapshot = cachedDesktopSessions;
-            executor.execute(() -> showRecentSessionsFromArray(client, snapshot));
-            refreshDesktopSessionsCache(true);
-            return;
-        }
-        runNetwork(() -> {
-            JSONObject envelope = api("GET", "/api/mobile/desktop-sessions", null);
-            JSONArray sessions = envelope.optJSONArray("data");
-            JSONArray finalSessions = sessions == null ? new JSONArray() : sessions;
-            prefs.edit().putString("desktop_sessions_cache", finalSessions.toString()).apply();
-            ui(() -> {
-                cachedDesktopSessions = finalSessions;
-                hydrateCliTimelineCache(finalSessions);
-            });
-            sessions = finalSessions;
-            Map<String, List<String>> grouped = new HashMap<>();
-            List<String> tabs = new ArrayList<>();
-            Map<String, String> sessionIdByOption = new HashMap<>();
-            Map<String, JSONObject> sessionByOption = new HashMap<>();
-            if (sessions != null) {
-                List<JSONObject> cliSessions = new ArrayList<>();
-                for (int i = 0; i < sessions.length(); i++) {
-                    JSONObject session = sessions.optJSONObject(i);
-                    if (session == null || !client.equals(session.optString("client"))) {
-                        continue;
-                    }
-                    cliSessions.add(session);
-                }
-                cliSessions.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
-                Map<String, List<JSONObject>> byProject = new LinkedHashMap<>();
-                List<String> projectKeys = new ArrayList<>();
-                Set<String> seenSessions = new HashSet<>();
-                for (JSONObject session : cliSessions) {
-                    String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
-                    if (sessionKey.isEmpty()) {
-                        sessionKey = session.optString("id", "").trim();
-                    }
-                    if (!sessionKey.isEmpty() && !seenSessions.add(sessionKey)) {
-                        continue;
-                    }
-                    String title = cliSessionProjectTitle(session, client);
-                    String projectKey = cliSessionProjectKey(session, client);
-                    List<JSONObject> bucket = byProject.get(projectKey);
-                    if (bucket == null) {
-                        if (byProject.size() >= 3) {
-                            continue;
-                        }
-                        bucket = new ArrayList<>();
-                        byProject.put(projectKey, bucket);
-                        projectKeys.add(projectKey);
-                        tabs.add(title);
-                    }
-                    if (bucket.size() < 5) {
-                        bucket.add(session);
-                    }
-                }
-                Set<String> pinned = pinnedRecentSessions(client);
-                for (int projectIndex = 0; projectIndex < tabs.size(); projectIndex++) {
-                    String title = tabs.get(projectIndex);
-                    String projectKey = projectKeys.get(projectIndex);
-                    List<JSONObject> projectSessions = byProject.get(projectKey);
-                    List<String> options = new ArrayList<>();
-                    Set<String> seenOptions = new HashSet<>();
-                    if (projectSessions == null) {
-                        continue;
-                    }
-                    for (JSONObject session : projectSessions) {
-                        String preview = cliSessionPreview(session);
-                        if (preview.isEmpty()) {
-                            continue;
-                        }
-                        String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
-                        String raw = preview.substring(0, Math.min(36, preview.length()));
-                        String option = uniqueSessionOptionLabel(
-                                cliRecentAlias(client, title, raw),
-                                session.optLong("updatedAt", 0),
-                                sessionKey,
-                                seenOptions);
-                        seenOptions.add(option);
-                        options.add(option);
-                        if (!sessionKey.isEmpty()) {
-                            String key = title + "\n" + option;
-                            sessionIdByOption.put(key, sessionKey);
-                            sessionByOption.put(key, session);
-                        }
-                    }
-                    options.sort((a, b) -> {
-                        boolean ap = pinned.contains(title + "\n" + a);
-                        boolean bp = pinned.contains(title + "\n" + b);
-                        if (ap != bp) {
-                            return ap ? -1 : 1;
-                        }
-                        return 0;
-                    });
-                    grouped.put(title, options.isEmpty() ? list("暂无会话记录") : options);
-                }
-            }
-            if (tabs.isEmpty()) {
-                String title = label(client);
-                tabs.add(title);
-                grouped.put(title, list("暂无会话记录"));
-            }
-            ui(() -> showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
-                selectedCliSession = value.trim();
-                if (!"暂无会话记录".equals(selectedCliSession)) {
-                    JSONObject chosenSession = null;
-                    for (String tab : tabs) {
-                        String key = tab + "\n" + selectedCliSession;
-                        String id = sessionIdByOption.get(key);
-                        if (id != null && !id.trim().isEmpty()) {
-                            selectedCliSessionIds.put(client, id.trim());
-                            prefs.edit().putString("cli_active_session_id_" + client, id.trim()).apply();
-                            timelineVisibleItemCounts.put(client, INITIAL_RENDER_ITEM_COUNT);
-                            JSONObject chosen = sessionByOption.get(key);
-                            if (chosen != null) {
-                                updateSelectedCliProject(client, chosen);
-                                chosenSession = chosen;
-                            }
-                            break;
-                        }
-                    }
-                    if (chosenSession != null) {
-                        renderSelectedCliSession(client, chosenSession);
-                    } else {
-                        renderSection();
-                    }
-                    pollSessionsOnce(true);
-                }
-            }, null));
-        });
-    }
-
-    private void showRecentSessionsFromArray(String client, JSONArray sessions) {
-        Map<String, List<String>> grouped = new HashMap<>();
-        List<String> tabs = new ArrayList<>();
-        Map<String, String> sessionIdByOption = new HashMap<>();
-        Map<String, JSONObject> sessionByOption = new HashMap<>();
-        if (sessions != null) {
-            List<JSONObject> cliSessions = new ArrayList<>();
-            for (int i = 0; i < sessions.length(); i++) {
-                JSONObject session = sessions.optJSONObject(i);
-                if (session == null || !client.equals(session.optString("client"))) {
-                    continue;
-                }
-                cliSessions.add(session);
-            }
-            cliSessions.sort((a, b) -> Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt")));
-            Map<String, List<JSONObject>> byProject = new LinkedHashMap<>();
-            List<String> projectKeys = new ArrayList<>();
-            Set<String> seenSessions = new HashSet<>();
-            for (JSONObject session : cliSessions) {
-                String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
-                if (sessionKey.isEmpty()) {
-                    sessionKey = session.optString("id", "").trim();
-                }
-                if (!sessionKey.isEmpty() && !seenSessions.add(sessionKey)) {
-                    continue;
-                }
-                String title = cliSessionProjectTitle(session, client);
-                String projectKey = cliSessionProjectKey(session, client);
-                List<JSONObject> bucket = byProject.get(projectKey);
-                if (bucket == null) {
-                    if (byProject.size() >= 3) {
-                        continue;
-                    }
-                    bucket = new ArrayList<>();
-                    byProject.put(projectKey, bucket);
-                    projectKeys.add(projectKey);
-                    tabs.add(title);
-                }
-                if (bucket.size() < 5) {
-                    bucket.add(session);
-                }
-            }
-            Set<String> pinned = pinnedRecentSessions(client);
-            for (int projectIndex = 0; projectIndex < tabs.size(); projectIndex++) {
-                String title = tabs.get(projectIndex);
-                String projectKey = projectKeys.get(projectIndex);
-                List<JSONObject> projectSessions = byProject.get(projectKey);
-                List<String> options = new ArrayList<>();
-                Set<String> seenOptions = new HashSet<>();
-                if (projectSessions == null) {
-                    continue;
-                }
-                for (JSONObject session : projectSessions) {
-                    String preview = cliSessionPreview(session);
-                    if (preview.isEmpty()) {
-                        continue;
-                    }
-                    String sessionKey = session.optString("sessionId", session.optString("id", "")).trim();
-                    String raw = preview.substring(0, Math.min(36, preview.length()));
-                    String option = uniqueSessionOptionLabel(
-                            cliRecentAlias(client, title, raw),
-                            session.optLong("updatedAt", 0),
-                            sessionKey,
-                            seenOptions);
-                    seenOptions.add(option);
-                    options.add(option);
-                    if (!sessionKey.isEmpty()) {
-                        String key = title + "\n" + option;
-                        sessionIdByOption.put(key, sessionKey);
-                        sessionByOption.put(key, session);
-                    }
-                }
-                options.sort((a, b) -> {
-                    boolean ap = pinned.contains(title + "\n" + a);
-                    boolean bp = pinned.contains(title + "\n" + b);
-                    if (ap != bp) {
-                        return ap ? -1 : 1;
-                    }
-                    return 0;
-                });
-                grouped.put(title, options.isEmpty() ? list("暂无会话记录") : options);
-            }
-        }
-        if (tabs.isEmpty()) {
-            String title = label(client);
-            tabs.add(title);
-            grouped.put(title, list("暂无会话记录"));
-        }
-        ui(() -> showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
-            selectedCliSession = value.trim();
-            if (!"暂无会话记录".equals(selectedCliSession)) {
-                JSONObject chosenSession = null;
-                for (String tab : tabs) {
-                    String key = tab + "\n" + selectedCliSession;
-                    String id = sessionIdByOption.get(key);
-                    if (id != null && !id.trim().isEmpty()) {
-                        selectedCliSessionIds.put(client, id.trim());
-                        prefs.edit().putString("cli_active_session_id_" + client, id.trim()).apply();
-                        timelineVisibleItemCounts.put(client, INITIAL_RENDER_ITEM_COUNT);
-                        JSONObject chosen = sessionByOption.get(key);
-                        if (chosen != null) {
-                            updateSelectedCliProject(client, chosen);
-                            chosenSession = chosen;
-                        }
-                        break;
-                    }
-                }
-                if (chosenSession != null) {
-                    renderSelectedCliSession(client, chosenSession);
-                } else {
-                    renderSection();
-                }
-                pollSessionsOnce(true);
-            }
-        }, null));
-    }
-
-    private String cliSessionProjectKey(JSONObject session, String client) {
-        String path = cleanDisplayText(session.optString("projectPath", "")).replace("\\", "/").toLowerCase(Locale.ROOT);
-        if (!path.isEmpty()) {
-            return path;
-        }
-        return client + ":" + cliSessionProjectTitle(session, client).toLowerCase(Locale.ROOT);
-    }
-
-    private void updateSelectedCliProject(String client, JSONObject session) {
-        String projectName = cliSessionProjectTitle(session, client);
-        String projectPath = cleanDisplayText(session.optString("projectPath", ""));
-        selectedCliProjectNames.put(client, projectName);
-        selectedCliProjectPaths.put(client, projectPath);
-        if (client.equals(section) && cliProjectTagView != null) {
-            cliProjectTagView.setText("项目：" + ellipsizeLabel(projectName, 8));
-        }
-    }
-
-    private String cliSessionPreview(JSONObject session) {
-        String preview = cleanDisplayText(session.optString("preview", ""));
-        if (!preview.isEmpty()) {
-            return preview;
-        }
-        JSONArray messages = session.optJSONArray("messages");
-        if (messages != null) {
-            for (int j = messages.length() - 1; j >= 0; j--) {
-                JSONObject msg = messages.optJSONObject(j);
-                String text = msg == null ? "" : cleanDisplayText(msg.optString("text", ""));
-                if (!text.isEmpty()) {
-                    return text;
-                }
-            }
-        }
-        return "";
-    }
-
-    private String cliSessionProjectTitle(JSONObject session, String client) {
-        String projectName = cleanDisplayText(session.optString("projectName", ""));
-        if (!projectName.isEmpty()) {
-            return projectName;
-        }
-        String projectPath = cleanDisplayText(session.optString("projectPath", ""));
-        String fromPath = fileNameFromPath(projectPath);
-        if (!fromPath.isEmpty()) {
-            return fromPath;
-        }
-        String title = cleanDisplayText(session.optString("title", ""));
-        if (!title.isEmpty() && !title.equals(label(client) + " 远程会话")) {
-            return title;
-        }
-        return "本机项目";
-    }
-
-    private String fileNameFromPath(String path) {
-        String clean = cleanDisplayText(path).replace("\\", "/");
-        while (clean.endsWith("/")) {
-            clean = clean.substring(0, clean.length() - 1);
-        }
-        int index = clean.lastIndexOf('/');
-        return index >= 0 ? clean.substring(index + 1).trim() : clean.trim();
-    }
-
-    private void showLocalRecentSessions(String mode) {
-        Map<String, List<String>> grouped = new HashMap<>();
-        List<String> tabs = new ArrayList<>();
-        Map<String, String> sessionIdByTitle = new HashMap<>();
-        try {
-            JSONObject root = localConversationStore(mode);
-            JSONArray sessions = root.optJSONArray("sessions");
-            List<JSONObject> rows = new ArrayList<>();
-            if (sessions != null) {
-                for (int i = 0; i < sessions.length(); i++) {
-                    JSONObject session = sessions.optJSONObject(i);
-                    if (session != null && hasSessionContent(session)) {
-                        rows.add(session);
-                    }
-                }
-            }
-            Set<String> pinned = pinnedRecentSessions(mode);
-            rows.sort((a, b) -> {
-                boolean ap = pinned.contains(a.optString("id"));
-                boolean bp = pinned.contains(b.optString("id"));
-                if (ap != bp) {
-                    return ap ? -1 : 1;
-                }
-                return Long.compare(b.optLong("updatedAt"), a.optLong("updatedAt"));
-            });
-            for (JSONObject session : rows) {
-                String group = session.optString("group", "默认助手");
-                List<String> values = grouped.get(group);
-                if (values == null) {
-                    values = new ArrayList<>();
-                    grouped.put(group, values);
-                    tabs.add(group);
-                }
-                Set<String> seen = new HashSet<>(values);
-                String title = uniqueSessionOptionLabel(
-                        session.optString("title", "未命名会话"),
-                        session.optLong("updatedAt", 0),
-                        session.optString("id", ""),
-                        seen);
-                values.add(title);
-                sessionIdByTitle.put(group + "\n" + title, session.optString("id"));
-            }
-        } catch (Exception ignored) {
-        }
-        if (tabs.isEmpty()) {
-            String fallback = "chat".equals(mode) ? selectedChatAssistant : selectedImageAssistant;
-            grouped.put(fallback, list("暂无会话记录"));
-            tabs.add(fallback);
-        }
-        showStackedGroupedChoice(label(mode) + " 会话记录", tabs, grouped, "", value -> {
-            if (!"暂无会话记录".equals(value)) {
-                String selectedId = "";
-                String selectedGroup = "";
-                for (String tab : tabs) {
-                    selectedId = sessionIdByTitle.get(tab + "\n" + value);
-                    if (selectedId != null && !selectedId.isEmpty()) {
-                        selectedGroup = tab;
-                        break;
-                    }
-                }
-                if (selectedId != null && !selectedId.isEmpty()) {
-                    applyLocalSessionGroup(mode, selectedGroup);
-                    setActiveLocalSessionId(mode, selectedId);
-                    renderSection();
-                }
-            }
-        }, () -> {
-            createLocalConversation(mode);
-            renderSection();
-        });
-    }
-
-    private boolean hasSessionContent(JSONObject session) {
-        JSONArray messages = session == null ? null : session.optJSONArray("messages");
-        if (messages == null || messages.length() == 0) {
-            return false;
-        }
-        for (int i = 0; i < messages.length(); i++) {
-            JSONObject item = messages.optJSONObject(i);
-            if (item != null && !cleanDisplayText(item.optString("text", "")).isEmpty()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void applyLocalSessionGroup(String mode, String group) {
-        String clean = cleanDisplayText(group);
-        if (clean.isEmpty() || "暂无会话记录".equals(clean)) {
-            return;
-        }
-        SharedPreferences.Editor edit = prefs.edit();
-        if ("image".equals(mode)) {
-            selectedImageAssistant = clean;
-            edit.putString("selected_image_assistant", clean);
-        } else {
-            selectedChatAssistant = clean;
-            edit.putString("selected_chat_assistant", clean);
-        }
-        edit.apply();
-    }
-
-    private String uniqueSessionOptionLabel(String title, long updatedAt, String id, Set<String> used) {
-        String base = cleanDisplayText(title);
-        if (base.isEmpty()) {
-            base = "未命名会话";
-        }
-        if (used == null) {
-            used = new HashSet<>();
-        }
-        String label = base;
-        if (used.contains(label)) {
-            String time = updatedAt > 0 ? formatDateTime(updatedAt) : "";
-            String suffix = time.isEmpty() ? shortId(id) : time;
-            label = suffix.isEmpty() ? base : base + " · " + suffix;
-        }
-        if (used.contains(label)) {
-            String suffix = shortId(id);
-            if (!suffix.isEmpty()) {
-                label = label + " · " + suffix;
-            }
-        }
-        int suffix = 2;
-        String candidate = label;
-        while (used.contains(candidate)) {
-            candidate = label + " (" + suffix + ")";
-            suffix++;
-        }
-        return candidate;
-    }
-
-    private void saveLocalRecent(String mode, String group, String prompt) {
-        String key = mode + "_recent_sessions";
-        String safeGroup = group == null || group.trim().isEmpty() ? "默认助手" : group.trim();
-        try {
-            JSONObject root = new JSONObject(prefs.getString(key, "{}"));
-            JSONArray rows = root.optJSONArray(safeGroup);
-            if (rows == null) {
-                rows = new JSONArray();
-            }
-            JSONArray next = new JSONArray();
-            next.put(prompt);
-            for (int i = 0; i < rows.length() && next.length() < 8; i++) {
-                String item = rows.optString(i);
-                if (!item.equals(prompt)) {
-                    next.put(item);
-                }
-            }
-            root.put(safeGroup, next);
-            prefs.edit().putString(key, root.toString()).apply();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void showExtensionsChoice(String client) {
-        runNetwork(() -> {
-            String query = boundDeviceId.isEmpty() ? "" : "?device_id=" + enc(boundDeviceId);
-            JSONObject envelope = api("GET", "/api/mobile/desktop-extensions" + query, null);
-            JSONArray data = envelope.optJSONArray("data");
-            Map<String, List<String>> grouped = new HashMap<>();
-            grouped.put("Skill", new ArrayList<>());
-            grouped.put("Plugin", new ArrayList<>());
-            grouped.put("Command", new ArrayList<>());
-            Map<String, String> kindByName = new HashMap<>();
-            int skillCount = appendExtensions(grouped.get("Skill"), data, "skill", client);
-            int pluginCount = appendExtensions(grouped.get("Plugin"), data, "plugin", client);
-            int commandCount = appendExtensions(grouped.get("Command"), data, "command", client);
-            for (String name : grouped.get("Skill")) kindByName.put(name, "skill");
-            for (String name : grouped.get("Plugin")) kindByName.put(name, "plugin");
-            for (String name : grouped.get("Command")) kindByName.put(name, "command");
-            if (commandCount == 0) {
-                for (String command : list("/resume", "/compact", "/plan")) {
-                    grouped.get("Command").add(command);
-                    kindByName.put(command, "command");
-                }
-            }
-            if (skillCount == 0 && pluginCount == 0 && commandCount == 0) {
-                grouped.get("Command").add("默认");
-                kindByName.put("默认", "command");
-            }
-            List<String> tabs = new ArrayList<>();
-            for (String tab : list("Skill", "Plugin", "Command")) {
-                List<String> values = grouped.get(tab);
-                if (values != null && !values.isEmpty()) {
-                    tabs.add(tab);
-                }
-            }
-            ui(() -> showExtensionsMultiChoice(client, "Skill / Plugin / Command", tabs, grouped, kindByName));
-        });
-    }
-
-    private void showExtensionsMultiChoice(String client, String title, List<String> tabs, Map<String, List<String>> grouped, Map<String, String> kindByName) {
-        if (tabs == null || tabs.isEmpty()) {
-            showChoice(title, list("暂无可选项"), "", value -> { });
-            return;
-        }
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = iconButton("×");
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-
-        LinearLayout tabPanel = vertical();
-        tabPanel.setPadding(0, dp(8), 0, dp(8));
-        LinearLayout optionsBox = vertical();
-        ScrollView scroller = new ScrollView(this);
-        scroller.setVerticalScrollBarEnabled(false);
-        scroller.addView(optionsBox);
-        final String[] activeTab = {tabs.get(0)};
-        final List<Button> tabButtons = new ArrayList<>();
-        final Runnable[] renderOptions = new Runnable[1];
-        renderOptions[0] = () -> {
-            optionsBox.removeAllViews();
-            for (Button button : tabButtons) {
-                boolean active = activeTab[0].equals(String.valueOf(button.getTag()));
-                button.setTextColor(active ? Color.WHITE : INK);
-                button.setBackground(round(active ? BLUE : Color.argb(120, 255, 255, 255), dp(16), active ? BLUE : LINE));
-            }
-            List<String> values = sortFavoriteOptions(title, grouped.get(activeTab[0]));
-            if (values == null || values.isEmpty()) {
-                optionsBox.addView(copy("暂无可选项"));
-                return;
-            }
-            for (String option : values) {
-                String kind = kindByName.getOrDefault(option, option.startsWith("/") ? "command" : "skill");
-                boolean selected = isExtensionSelected(client, kind, option);
-                Button entry = drawerButton((selected ? "✓ " : "") + option);
-                entry.setTextColor(selected ? BLUE : INK);
-                entry.setBackground(round(selected ? Color.argb(72, 54, 104, 240) : Color.argb(120, 255, 255, 255), dp(16), selected ? Color.argb(110, 54, 104, 240) : LINE));
-                entry.setOnClickListener(v -> {
-                    toggleExtensionRef(client, kind, option);
-                    selectedSkillPlugin = option;
-                    renderOptions[0].run();
-                });
-                optionsBox.addView(entry);
-            }
-        };
-        LinearLayout tabRow = null;
-        for (int i = 0; i < tabs.size(); i++) {
-            if (i % 3 == 0) {
-                tabRow = horizontal();
-                tabPanel.addView(tabRow, new LinearLayout.LayoutParams(-1, dp(36)));
-            }
-            String tab = tabs.get(i);
-            Button button = ghost(tab);
-            button.setSingleLine(true);
-            button.setTag(tab);
-            button.setTextSize(12);
-            button.setOnClickListener(v -> {
-                activeTab[0] = tab;
-                renderOptions[0].run();
-            });
-            tabButtons.add(button);
-            LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(0, dp(34), 1);
-            tabLp.setMargins(0, 0, dp(6), 0);
-            tabRow.addView(button, tabLp);
-        }
-        panel.addView(tabPanel);
-        renderOptions[0].run();
-        panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(310)));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
-        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.setMargins(dp(18), 0, dp(18), dp(28));
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private boolean isExtensionSelected(String client, String kind, String name) {
-        String normalized = name == null ? "" : name.trim();
-        for (JSONObject ref : extensionRefsFor(client)) {
-            if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void toggleExtensionRef(String client, String kind, String name) {
-        String normalized = name == null ? "" : name.trim();
-        if (normalized.isEmpty() || "默认".equals(normalized)) {
-            return;
-        }
-        List<JSONObject> refs = extensionRefsFor(client);
-        for (int i = 0; i < refs.size(); i++) {
-            JSONObject ref = refs.get(i);
-            if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
-                refs.remove(i);
-                renderExtensionPreview();
-                return;
-            }
-        }
-        addExtensionRef(client, kind, normalized);
-    }
-
-    private int appendExtensions(List<String> out, JSONArray data, String kind, String client) {
-        if (data == null) {
-            return 0;
-        }
-        int count = 0;
-        for (int i = 0; i < data.length(); i++) {
-            JSONObject item = data.optJSONObject(i);
-            if (item == null || !kind.equals(item.optString("kind"))) {
-                continue;
-            }
-            String owner = item.optString("client", item.optString("owner", ""));
-            if (!owner.isEmpty() && !"shared".equals(owner) && !"command".equals(owner) && !client.equals(owner)) {
-                continue;
-            }
-            String name = item.optString("name", "");
-            String label = name;
-            if (!name.isEmpty() && !out.contains(label)) {
-                out.add(label);
-                count++;
-            }
-        }
-        return count;
-    }
-
-    private String extensionKindLabel(String kind) {
-        if ("plugin".equals(kind)) return "Plugin";
-        if ("command".equals(kind)) return "Command";
-        return "Skill";
-    }
-
-    private View statusCard(String name, String value) {
-        LinearLayout c = cardPanel();
-        LinearLayout row = horizontal();
-        row.addView(bold(name), new LinearLayout.LayoutParams(0, -2, 1));
-        TextView v = copy(value);
-        v.setTextColor(MINT);
-        v.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-        row.addView(v, new LinearLayout.LayoutParams(dp(120), -2));
-        c.addView(row);
-        return c;
-    }
-
-    private void showStackedGroupedChoice(String title, List<String> groups, Map<String, List<String>> grouped, String current, ChoiceHandler handler, Runnable newAction) {
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-        if (newAction != null) {
-            Button add = iconButton("+");
-            add.setContentDescription("新建会话");
-            add.setOnClickListener(v -> {
-                newAction.run();
-                dialog.dismiss();
-            });
-            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(32), dp(32));
-            addLp.setMargins(0, 0, dp(8), 0);
-            titleRow.addView(add, addLp);
-        }
-        Button close = iconButton("×");
-        close.setOnClickListener(v -> dialog.dismiss());
-        String cliClient = recentDialogClient(title);
-        if (!cliClient.isEmpty()) {
-            Button refresh = iconButton("↻");
-            refresh.setContentDescription("刷新会话记录");
-            refresh.setOnClickListener(v -> {
-                dialog.dismiss();
-                showRecentSessions(cliClient);
-                if (cliClient.equals(section)) {
-                    pollSessionsOnce(true);
-                }
-            });
-            LinearLayout.LayoutParams refreshLp = new LinearLayout.LayoutParams(dp(32), dp(32));
-            refreshLp.setMargins(0, 0, dp(8), 0);
-            titleRow.addView(refresh, refreshLp);
-        }
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-        panel.addView(gap(8));
-
-        ScrollView scroller = new ScrollView(this);
-        scroller.setVerticalScrollBarEnabled(false);
-        LinearLayout list = vertical();
-        for (String group : groups == null ? new ArrayList<String>() : groups) {
-            TextView header = bold(group);
-            header.setTextColor(MUTED);
-            LinearLayout.LayoutParams headerLp = new LinearLayout.LayoutParams(-1, -2);
-            headerLp.setMargins(0, dp(10), 0, dp(2));
-            list.addView(header, headerLp);
-            List<String> values = grouped == null ? null : grouped.get(group);
-            if (values == null || values.isEmpty()) {
-                list.addView(copy("暂无会话记录"));
-                continue;
-            }
-            for (String option : values) {
-                Button entry = drawerButton(option.equals(current) ? option + "  ✓" : option);
-                if (option.equals(current)) {
-                    entry.setTextColor(BLUE);
-                    entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
-                }
-                entry.setOnClickListener(v -> {
-                    handler.onChoice(option);
-                    dialog.dismiss();
-                });
-                entry.setOnLongClickListener(v -> {
-                    showRecentSessionActions(title, group, option);
-                    return true;
-                });
-                list.addView(entry);
-            }
-        }
-        if (list.getChildCount() == 0) {
-            list.addView(copy("暂无会话记录"));
-        }
-        scroller.addView(list);
-        panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(360)));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
-        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.setMargins(dp(18), 0, dp(18), dp(28));
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private void showRecentSessionActions(String title, String group, String option) {
-        if (option == null || option.equals("暂无会话记录")) {
-            return;
-        }
-        String mode = title.startsWith("Image") ? "image" : title.startsWith("Chat") ? "chat" : recentDialogClient(title);
-        List<String> labels = new ArrayList<>();
-        List<Runnable> actions = new ArrayList<>();
-        if (!mode.isEmpty()) {
-            labels.add("重命名");
-            actions.add(() -> {
-                if ("chat".equals(mode) || "image".equals(mode)) {
-                    showRenameLocalSession(mode, group, option);
-                } else {
-                    showRenameCliRecent(mode, group, option);
-                }
-            });
-            labels.add("置顶");
-            actions.add(() -> togglePinRecent(mode, group, option));
-            if ("chat".equals(mode) || "image".equals(mode)) {
-                labels.add("删除");
-                actions.add(() -> deleteLocalSessionByTitle(mode, group, option));
-                labels.add("分享");
-                actions.add(() -> shareText(localSessionShareText(mode, group, option)));
-            }
-            showLongPressMenu(labels, actions);
-            return;
-        }
-        showLongPressMenu(list("分享"), listRunnable(() -> shareText(option)));
-    }
-
-    private String recentDialogClient(String title) {
-        if (title == null) {
-            return "";
-        }
-        if (title.startsWith("Codex")) return "codex";
-        if (title.startsWith("Claude")) return "claude";
-        return "";
-    }
-
-    private Button textAction(String text, Runnable action) {
-        Button b = ghost(text);
-        b.setOnClickListener(v -> action.run());
-        return b;
-    }
-
-    private void showLongPressMenu(List<String> labels, List<Runnable> actions) {
-        if (labels == null || labels.isEmpty()) {
-            return;
-        }
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(14), dp(12), dp(14), dp(12));
-        panel.setGravity(Gravity.CENTER_HORIZONTAL);
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(20), LINE));
-        for (int i = 0; i < labels.size(); i++) {
-            String label = labels.get(i);
-            Runnable action = actions != null && i < actions.size() ? actions.get(i) : () -> { };
-            Button button = ghost(label);
-            button.setTextSize(15);
-            button.setGravity(Gravity.CENTER);
-            button.setMinWidth(dp(82));
-            button.setMinimumWidth(dp(82));
-            button.setPadding(dp(16), 0, dp(16), 0);
-            button.setOnClickListener(v -> {
-                dialog.dismiss();
-                action.run();
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(38));
-            lp.setMargins(0, i == 0 ? 0 : dp(6), 0, 0);
-            panel.addView(button, lp);
-        }
-        dialog.setContentView(panel);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
-        }
-    }
-
-    private List<Runnable> listRunnable(Runnable... actions) {
-        List<Runnable> out = new ArrayList<>();
-        Collections.addAll(out, actions);
-        return out;
-    }
-
-    private Set<String> pinnedRecentSessions(String mode) {
-        Set<String> out = new HashSet<>();
-        String raw = prefs.getString(mode + "_pinned_sessions", "");
-        for (String item : raw.split("\\n")) {
-            String clean = item.trim();
-            if (!clean.isEmpty()) {
-                out.add(clean);
-            }
-        }
-        return out;
-    }
-
-    private void savePinnedRecentSessions(String mode, Set<String> values) {
-        StringBuilder raw = new StringBuilder();
-        for (String item : values) {
-            if (raw.length() > 0) raw.append('\n');
-            raw.append(item);
-        }
-        prefs.edit().putString(mode + "_pinned_sessions", raw.toString()).apply();
-    }
-
-    private JSONObject findLocalSessionByTitle(String mode, String group, String title) {
-        try {
-            JSONArray sessions = localConversationStore(mode).optJSONArray("sessions");
-            if (sessions == null) {
-                return null;
-            }
-            for (int i = 0; i < sessions.length(); i++) {
-                JSONObject session = sessions.optJSONObject(i);
-                if (session != null
-                        && group.equals(session.optString("group"))
-                        && title.equals(session.optString("title", "未命名会话"))) {
-                    return session;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
-    private void showRenameLocalSession(String mode, String group, String title) {
-        JSONObject target = findLocalSessionByTitle(mode, group, title);
-        if (target == null) {
-            return;
-        }
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.addView(bold("重命名"));
-        EditText edit = outlinedInput("会话名称");
-        edit.setText(title);
-        panel.addView(edit);
-        Button ok = primary("保存");
-        ok.setOnClickListener(v -> {
-            renameLocalSession(mode, target.optString("id"), trim(edit));
-            dialog.dismiss();
-        });
-        panel.addView(ok, compactFullButtonLp());
-        dialog.setContentView(panel);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(dp(300), WindowManager.LayoutParams.WRAP_CONTENT);
-        }
-    }
-
-    private void renameLocalSession(String mode, String sessionId, String nextTitle) {
-        String clean = cleanDisplayText(nextTitle);
-        if (clean.isEmpty()) {
-            return;
-        }
-        try {
-            JSONObject root = localConversationStore(mode);
-            JSONObject session = findLocalSession(root, sessionId);
-            if (session != null) {
-                session.put("title", cleanSessionTitle(clean));
-                session.put("updatedAt", System.currentTimeMillis());
-                saveLocalConversationStore(mode, root);
-                renderSection();
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void togglePinLocalSession(String mode, String group, String title) {
-        JSONObject session = findLocalSessionByTitle(mode, group, title);
-        if (session == null) {
-            return;
-        }
-        Set<String> pinned = pinnedRecentSessions(mode);
-        String id = session.optString("id");
-        if (pinned.contains(id)) {
-            pinned.remove(id);
-        } else {
-            pinned.add(id);
-        }
-        savePinnedRecentSessions(mode, pinned);
-    }
-
-    private void togglePinRecent(String mode, String group, String title) {
-        if ("chat".equals(mode) || "image".equals(mode)) {
-            togglePinLocalSession(mode, group, title);
-            return;
-        }
-        Set<String> pinned = pinnedRecentSessions(mode);
-        String key = group + "\n" + title;
-        if (pinned.contains(key)) {
-            pinned.remove(key);
-        } else {
-            pinned.add(key);
-        }
-        savePinnedRecentSessions(mode, pinned);
-    }
-
-    private String cliRecentAlias(String client, String group, String preview) {
-        String key = "cli_recent_alias_" + client + "_" + Integer.toHexString((group + "\n" + preview).hashCode());
-        return prefs.getString(key, preview);
-    }
-
-    private void showRenameCliRecent(String client, String group, String title) {
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.addView(bold("重命名"));
-        EditText edit = outlinedInput("会话名称");
-        edit.setText(title);
-        panel.addView(edit);
-        Button ok = primary("保存");
-        ok.setOnClickListener(v -> {
-            String key = "cli_recent_alias_" + client + "_" + Integer.toHexString((group + "\n" + title).hashCode());
-            String clean = cleanDisplayText(trim(edit));
-            if (!clean.isEmpty()) {
-                prefs.edit().putString(key, clean).apply();
-            }
-            dialog.dismiss();
-            showRecentSessions(client);
-        });
-        panel.addView(ok, compactFullButtonLp());
-        dialog.setContentView(panel);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(dp(300), WindowManager.LayoutParams.WRAP_CONTENT);
-        }
-    }
-
-    private void deleteLocalSessionByTitle(String mode, String group, String title) {
-        try {
-            JSONObject root = localConversationStore(mode);
-            JSONArray sessions = root.optJSONArray("sessions");
-            if (sessions == null) {
-                return;
-            }
-            JSONArray next = new JSONArray();
-            String removedId = "";
-            for (int i = 0; i < sessions.length(); i++) {
-                JSONObject session = sessions.optJSONObject(i);
-                boolean remove = session != null
-                        && group.equals(session.optString("group"))
-                        && title.equals(session.optString("title", "未命名会话"));
-                if (remove) {
-                    removedId = session.optString("id");
-                } else if (session != null) {
-                    next.put(session);
-                }
-            }
-            root.put("sessions", next);
-            if (removedId.equals(activeLocalSessionId(mode))) {
-                setActiveLocalSessionId(mode, "");
-            }
-            saveLocalConversationStore(mode, root);
-            renderSection();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private String localSessionShareText(String mode, String group, String title) {
-        JSONObject session = findLocalSessionByTitle(mode, group, title);
-        if (session == null) {
-            return title;
-        }
-        StringBuilder out = new StringBuilder(title);
-        JSONArray messages = session.optJSONArray("messages");
-        if (messages != null) {
-            for (int i = 0; i < messages.length(); i++) {
-                JSONObject item = messages.optJSONObject(i);
-                if (item == null) continue;
-                out.append("\n\n").append("user".equals(item.optString("role")) ? "用户：" : "AI：")
-                        .append(cleanDisplayText(item.optString("text")));
-            }
-        }
-        return out.toString();
-    }
-
-    private void showGroupedChoice(String title, List<String> tabs, Map<String, List<String>> grouped, String current, ChoiceHandler handler) {
-        showGroupedChoice(title, tabs, grouped, current, handler, null);
-    }
-
-    private boolean favoriteChoiceEnabled(String title) {
-        String t = title == null ? "" : title;
-        return t.contains("助手") || t.contains("模型选择") || t.contains("AI 模型") || t.contains("Skill") || t.contains("Plugin");
-    }
-
-    private String favoriteChoiceKey(String title) {
-        String normalized = (title == null ? "choice" : title).replaceAll("[^A-Za-z0-9\\u4e00-\\u9fa5]+", "_");
-        return "favorite_choice_" + normalized;
-    }
-
-    private Set<String> favoriteChoices(String title) {
-        Set<String> out = new HashSet<>();
-        String raw = prefs.getString(favoriteChoiceKey(title), "");
-        for (String item : raw.split("\\n")) {
-            String clean = item.trim();
-            if (!clean.isEmpty()) {
-                out.add(clean);
-            }
-        }
-        return out;
-    }
-
-    private void saveFavoriteChoices(String title, Set<String> values) {
-        StringBuilder raw = new StringBuilder();
-        for (String item : values) {
-            if (raw.length() > 0) {
-                raw.append('\n');
-            }
-            raw.append(item);
-        }
-        prefs.edit().putString(favoriteChoiceKey(title), raw.toString()).apply();
-    }
-
-    private List<String> sortFavoriteOptions(String title, List<String> options) {
-        List<String> out = new ArrayList<>();
-        if (options != null) {
-            out.addAll(options);
-        }
-        if (!favoriteChoiceEnabled(title)) {
-            return out;
-        }
-        Set<String> favorites = favoriteChoices(title);
-        out.sort((left, right) -> {
-            boolean lf = favorites.contains(left);
-            boolean rf = favorites.contains(right);
-            if (lf != rf) {
-                return lf ? -1 : 1;
-            }
-            return 0;
-        });
-        return out;
-    }
-
-    private View choiceOptionView(String title, String option, String current, Runnable onFavoriteChanged, Runnable onChoose) {
-        boolean selected = option.equals(current);
-        boolean header = option.startsWith("【") && option.endsWith("】");
-        if (!favoriteChoiceEnabled(title) || header) {
-            Button entry = drawerButton(selected ? option + "  ✓" : option);
-            if (header) {
-                entry.setEnabled(false);
-                entry.setTextColor(BLUE);
-                entry.setBackground(new ColorDrawable(Color.TRANSPARENT));
-            }
-            if (selected) {
-                entry.setTextColor(BLUE);
-                entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
-            }
-            entry.setOnClickListener(v -> onChoose.run());
-            if (title.contains("助手") && !header && !"暂无可选项".equals(option)) {
-                entry.setOnLongClickListener(v -> {
-                    showAssistantActions(option);
-                    return true;
-                });
-            }
-            return entry;
-        }
-
-        Set<String> favorites = favoriteChoices(title);
-        LinearLayout row = horizontal();
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(round(selected ? Color.argb(72, 54, 104, 240) : Color.argb(120, 255, 255, 255), dp(16), selected ? Color.argb(110, 54, 104, 240) : LINE));
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, dp(42));
-        rowLp.setMargins(0, dp(8), 0, 0);
-        row.setLayoutParams(rowLp);
-        Button pick = ghost(selected ? option + "  ✓" : option);
-        pick.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-        pick.setTextColor(selected ? BLUE : INK);
-        pick.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        pick.setOnClickListener(v -> onChoose.run());
-        if (title.contains("助手") && !"暂无可选项".equals(option)) {
-            row.setOnLongClickListener(v -> {
-                showAssistantActions(option);
-                return true;
-            });
-            pick.setOnLongClickListener(v -> {
-                showAssistantActions(option);
-                return true;
-            });
-        }
-        row.addView(pick, new LinearLayout.LayoutParams(0, -1, 1));
-        Button star = iconButton(favorites.contains(option) ? "★" : "☆");
-        star.setTextColor(favorites.contains(option) ? Color.rgb(224, 157, 42) : MUTED);
-        star.setContentDescription(favorites.contains(option) ? "取消收藏" : "收藏");
-        star.setOnClickListener(v -> {
-            Set<String> next = favoriteChoices(title);
-            if (next.contains(option)) {
-                next.remove(option);
-            } else {
-                next.add(option);
-            }
-            saveFavoriteChoices(title, next);
-            onFavoriteChanged.run();
-        });
-        row.addView(star, new LinearLayout.LayoutParams(dp(38), dp(38)));
-        return row;
-    }
-
-    private void showAssistantActions(String option) {
-        String scope = "image".equals(activeComposerMode) ? "image" : "chat";
-        showLongPressMenu(
-                list("分享", "编辑", "删除"),
-                listRunnable(
-                        () -> shareText(assistantShareText(scope, option)),
-                        () -> showAssistantEditDialog(scope, option),
-                        () -> deleteCustomAssistant(scope, option)
-                )
-        );
-    }
-
-    private String assistantEditorPrompt(String scope, String option) {
-        String custom = customAssistantPrompt(scope, option);
-        if (!custom.trim().isEmpty()) {
-            return custom;
-        }
-        if ("image".equals(scope)) {
-            return imageAssistantPrompt(option, "")
-                    .replace("\n\n用户图片需求：", "")
-                    .replace("用户图片需求：", "")
-                    .trim();
-        }
-        return assistantPrompt(option);
-    }
-
-    private void showAssistantEditDialog(String scope, String option) {
-        boolean create = cleanDisplayText(option).isEmpty();
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        LinearLayout panel = vertical();
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.addView(bold(create ? "新建助手" : "编辑助手"));
-        panel.addView(gap(8));
-        EditText name = outlinedInput("助手名称");
-        if (!create) {
-            name.setText(option);
-        }
-        panel.addView(name);
-        panel.addView(gap(8));
-        EditText prompt = outlinedInput("助手提示词");
-        prompt.setMinLines(4);
-        prompt.setMaxLines(8);
-        if (!create) {
-            prompt.setText(assistantEditorPrompt(scope, option));
-        }
-        panel.addView(prompt);
-        Button save = primary("保存");
-        save.setOnClickListener(v -> {
-            saveCustomAssistant(scope, create ? "" : option, trim(name), prompt.getText().toString());
-            dialog.dismiss();
-        });
-        panel.addView(save, compactFullButtonLp());
-        dialog.setContentView(panel);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(dp(320), WindowManager.LayoutParams.WRAP_CONTENT);
-        }
-    }
-
-    private void showGroupedChoice(String title, List<String> tabs, Map<String, List<String>> grouped, String current, ChoiceHandler handler, Runnable newAction) {
-        if (tabs == null || tabs.isEmpty()) {
-            showChoice(title, list("暂无可选项"), current, value -> { });
-            return;
-        }
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-        if (newAction != null) {
-            Button add = iconButton("+");
-            add.setContentDescription("新建会话");
-            add.setOnClickListener(v -> {
-                newAction.run();
-                dialog.dismiss();
-            });
-            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(32), dp(32));
-            addLp.setMargins(0, 0, dp(8), 0);
-            titleRow.addView(add, addLp);
-        }
-        Button close = iconButton("×");
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-
-        LinearLayout tabPanel = vertical();
-        tabPanel.setPadding(0, dp(8), 0, dp(8));
-        LinearLayout optionsBox = vertical();
-        ScrollView scroller = new ScrollView(this);
-        scroller.setVerticalScrollBarEnabled(false);
-        scroller.addView(optionsBox);
-        String initialTab = tabs.get(0);
-        for (String tab : tabs) {
-            List<String> values = grouped.get(tab);
-            if (values != null && values.contains(current)) {
-                initialTab = tab;
-                break;
-            }
-        }
-        final String[] activeTab = {initialTab};
-        final List<Button> tabButtons = new ArrayList<>();
-        final Runnable[] renderOptions = new Runnable[1];
-        renderOptions[0] = () -> {
-            optionsBox.removeAllViews();
-            for (Button button : tabButtons) {
-                boolean active = activeTab[0].equals(String.valueOf(button.getTag()));
-                button.setTextColor(active ? Color.WHITE : INK);
-                button.setBackground(round(active ? BLUE : Color.argb(120, 255, 255, 255), dp(16), active ? BLUE : LINE));
-            }
-            List<String> values = sortFavoriteOptions(title, grouped.get(activeTab[0]));
-            if (values == null || values.isEmpty()) {
-                optionsBox.addView(copy("暂无可选项"));
-                return;
-            }
-            for (String option : values) {
-                View entryView = choiceOptionView(title, option, current, () -> renderOptions[0].run(), () -> {
-                    handler.onChoice(option);
-                    dialog.dismiss();
-                });
-                if (!(entryView instanceof Button)) {
-                    optionsBox.addView(entryView);
-                    continue;
-                }
-                Button entry = (Button) entryView;
-                if (option.equals(current)) {
-                    entry.setTextColor(BLUE);
-                    entry.setBackground(round(Color.argb(72, 54, 104, 240), dp(16), Color.argb(110, 54, 104, 240)));
-                }
-                entry.setOnClickListener(v -> {
-                    handler.onChoice(option);
-                    dialog.dismiss();
-                });
-                optionsBox.addView(entry);
-            }
-        };
-        LinearLayout tabRow = null;
-        for (int i = 0; i < tabs.size(); i++) {
-            if (i % 3 == 0) {
-                tabRow = horizontal();
-                tabPanel.addView(tabRow, new LinearLayout.LayoutParams(-1, dp(36)));
-            }
-            String tab = tabs.get(i);
-            Button button = ghost(tab);
-            button.setSingleLine(true);
-            button.setTag(tab);
-            button.setTextSize(12);
-            button.setOnClickListener(v -> {
-                activeTab[0] = tab;
-                renderOptions[0].run();
-            });
-            tabButtons.add(button);
-            LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(0, dp(34), 1);
-            tabLp.setMargins(0, 0, dp(6), 0);
-            tabRow.addView(button, tabLp);
-        }
-        panel.addView(tabPanel);
-        renderOptions[0].run();
-        panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(310)));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
-        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.setMargins(dp(18), 0, dp(18), dp(28));
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private void showChoice(String title, List<String> options, String current, ChoiceHandler handler) {
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-        if ("助手".equals(title)) {
-            Button add = iconButton("+");
-            add.setContentDescription("新建助手");
-            add.setOnClickListener(v -> {
-                dialog.dismiss();
-                showAssistantEditDialog("image".equals(activeComposerMode) ? "image" : "chat", "");
-            });
-            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(32), dp(32));
-            addLp.setMargins(0, 0, dp(8), 0);
-            titleRow.addView(add, addLp);
-        }
-        Button close = iconButton("×");
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-        panel.addView(gap(8));
-        ScrollView scroller = new ScrollView(this);
-        scroller.setVerticalScrollBarEnabled(false);
-        LinearLayout optionsBox = vertical();
-        List<String> orderedOptions = sortFavoriteOptions(title, options);
-        for (String option : orderedOptions) {
-            View entry = choiceOptionView(title, option, current, () -> {
-                dialog.dismiss();
-                showChoice(title, options, current, handler);
-            }, () -> {
-                handler.onChoice(option);
-                if (!option.startsWith("【")) {
-                    dialog.dismiss();
-                }
-            });
-            optionsBox.addView(entry);
-        }
-        scroller.addView(optionsBox);
-        panel.addView(scroller, new LinearLayout.LayoutParams(-1, Math.min(dp(390), Math.max(dp(90), dp(50) * Math.min(options.size(), 8)))));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(294), -2);
-        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.setMargins(dp(18), 0, dp(18), dp(28));
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private void showTextDialog(String title, String text) {
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
-        LinearLayout panel = vertical();
-        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout titleRow = horizontal();
-        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = iconButton("×");
-        close.setContentDescription("关闭");
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
-        panel.addView(titleRow);
-        ScrollView scroller = new ScrollView(this);
-        scroller.setVerticalScrollBarEnabled(false);
-        TextView body = copy(text);
-        body.setTextColor(INK);
-        scroller.addView(body);
-        LinearLayout.LayoutParams scrollerLp = new LinearLayout.LayoutParams(-1, dp(320));
-        scrollerLp.setMargins(0, dp(10), 0, 0);
-        panel.addView(scroller, scrollerLp);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
-        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.setMargins(dp(18), 0, dp(18), dp(28));
-        overlay.addView(panel, lp);
-        overlay.setOnClickListener(v -> dialog.dismiss());
-        panel.setOnClickListener(v -> { });
-        dialog.setContentView(overlay);
-        dialog.show();
-        Window shown = dialog.getWindow();
-        if (shown != null) {
-            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        }
-    }
-
-    private TextView title(String text) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextColor(INK);
-        t.setTextSize(30);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setIncludeFontPadding(false);
-        return t;
-    }
-
-    private TextView bold(String text) {
-        TextView t = copy(text);
-        t.setTextColor(INK);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setTextSize(17);
-        return t;
-    }
-
-    private TextView copy(String text) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextColor(MUTED);
-        t.setTextSize(14);
-        t.setLineSpacing(dp(3), 1.08f);
-        t.setPadding(0, dp(4), 0, dp(4));
-        return t;
-    }
-
-    private EditText input(String hint) {
-        EditText e = new EditText(this);
-        e.setHint(hint);
-        e.setSingleLine(false);
-        e.setTextColor(INK);
-        e.setHintTextColor(Color.rgb(130, 142, 162));
-        e.setTextSize(13);
-        e.setPadding(dp(8), dp(8), dp(8), dp(8));
-        e.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(0, 0, 0, 0);
-        e.setLayoutParams(lp);
-        return e;
-    }
-
-    private EditText outlinedInput(String hint) {
-        EditText e = input(hint);
-        e.setPadding(dp(10), dp(8), dp(10), dp(8));
-        e.setBackground(round(Color.argb(225, 255, 255, 255), dp(12), LINE));
-        return e;
-    }
-
-    private Spinner spinner(List<String> items) {
-        Spinner s = new Spinner(this);
-        s.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, items));
-        return s;
-    }
-
-    private View labelRow(String label, View value) {
-        LinearLayout row = horizontal();
-        row.setPadding(0, dp(10), 0, 0);
-        row.addView(bold(label), new LinearLayout.LayoutParams(dp(70), -2));
-        row.addView(value, new LinearLayout.LayoutParams(0, -2, 1));
-        return row;
-    }
-
-    private Button primary(String text) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextColor(Color.WHITE);
-        b.setTextSize(13);
-        b.setAllCaps(false);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setPadding(dp(10), 0, dp(10), 0);
-        b.setBackground(round(BLUE, dp(16), BLUE));
-        return b;
-    }
-
-    private Button danger(String text) {
-        Button b = primary(text);
-        b.setBackground(round(Color.rgb(216, 71, 86), dp(16), Color.rgb(216, 71, 86)));
-        return b;
-    }
-
-    private Button ghost(String text) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextColor(INK);
-        b.setTextSize(13);
-        b.setAllCaps(false);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setPadding(dp(8), 0, dp(8), 0);
-        b.setBackground(round(Color.argb(120, 255, 255, 255), dp(16), LINE));
-        return b;
-    }
-
-    private Button iconButton(String icon) {
-        Button b = ghost(icon);
-        b.setTextSize(18);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setPadding(0, 0, 0, dp(1));
-        b.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        return b;
-    }
-
-    private Button navButton(String text, boolean active) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(18);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setAllCaps(false);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setPadding(dp(4), 0, dp(4), 0);
-        b.setTextColor(active ? Color.WHITE : INK);
-        b.setBackground(round(active ? BLUE : Color.argb(150, 255, 255, 255), dp(19), active ? BLUE : LINE));
-        return b;
-    }
-
-    private View navImageButton(int resId, boolean active) {
-        LinearLayout wrapper = vertical();
-        wrapper.setGravity(Gravity.CENTER);
-        ImageButton b = new ImageButton(this);
-        b.setImageResource(resId);
-        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        b.setPadding(dp(8), dp(5), dp(8), dp(5));
-        b.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        b.setClickable(false);
-        b.setFocusable(false);
-        wrapper.addView(b, new LinearLayout.LayoutParams(-1, 0, 1));
-        View line = new View(this);
-        line.setBackground(round(active ? BLUE : Color.TRANSPARENT, dp(2), Color.TRANSPARENT));
-        LinearLayout.LayoutParams lineLp = new LinearLayout.LayoutParams(dp(24), dp(3));
-        wrapper.addView(line, lineLp);
-        return wrapper;
-    }
-
-    private Button drawerButton(String text) {
-        Button b = ghost(text);
-        b.setGravity(Gravity.CENTER_VERTICAL);
-        b.setTextSize(15);
-        b.setSingleLine(true);
-        b.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(42));
-        lp.setMargins(0, dp(8), 0, 0);
-        b.setLayoutParams(lp);
-        return b;
-    }
-
-    private View drawerEntry(String item) {
-        LinearLayout row = horizontal();
-        row.setGravity(Gravity.CENTER);
-        row.setPadding(dp(6), 0, dp(6), 0);
-        row.setBackground(round(Color.argb(120, 255, 255, 255), dp(16), LINE));
-        LinearLayout group = horizontal();
-        group.setGravity(Gravity.CENTER);
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(drawerIconRes(item));
-        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        icon.setPadding(dp(5), dp(5), dp(5), dp(5));
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(30), -1);
-        iconLp.setMargins(0, 0, dp(8), 0);
-        group.addView(icon, iconLp);
-        TextView text = bold(label(item));
-        text.setTextSize(16);
-        text.setGravity(Gravity.CENTER_VERTICAL);
-        text.setIncludeFontPadding(true);
-        text.setSingleLine(true);
-        text.setEllipsize(TextUtils.TruncateAt.END);
-        group.addView(text, new LinearLayout.LayoutParams(-2, -1));
-        row.addView(group, new LinearLayout.LayoutParams(-1, -1));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(46));
-        lp.setMargins(0, dp(10), 0, 0);
-        row.setLayoutParams(lp);
-        return row;
-    }
-
-    private int drawerIconRes(String item) {
-        if ("assistants".equals(item)) return R.drawable.drawer_aichat;
-        if ("subscriptions".equals(item)) return R.drawable.drawer_shop;
-        if ("service".equals(item)) return R.drawable.drawer_cloud;
-        if ("wallet".equals(item)) return R.drawable.drawer_wallet;
-        if ("settings".equals(item)) return R.drawable.drawer_setting;
-        return R.drawable.nav_chat;
-    }
-
-    private GradientDrawable round(int fill, int radius, int stroke) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(fill);
-        g.setCornerRadius(radius);
-        g.setStroke(dp(1), stroke);
-        return g;
-    }
-
-    private View gap(int height) {
-        View v = new View(this);
-        v.setLayoutParams(new LinearLayout.LayoutParams(1, dp(height)));
-        return v;
-    }
-
-    private List<String> list(String... values) {
-        List<String> out = new ArrayList<>();
-        Collections.addAll(out, values);
-        return out;
-    }
-
-    private String label(String value) {
-        switch (value) {
-            case "chat": return "Chat";
-            case "image": return "Image";
-            case "codex": return "Codex";
-            case "claude": return "Claude";
-            case "assistants": return "AIChat";
-            case "subscriptions": return "套餐订阅";
-            case "service": return "服务状态";
-            case "wallet": return "我的钱包";
-            case "settings": return "系统设置";
-            default: return value;
-        }
-    }
-
-    private int navDrawable(String value) {
-        switch (value) {
-            case "chat": return R.drawable.nav_chat;
-            case "image": return R.drawable.nav_image;
-            case "codex": return R.drawable.nav_codex;
-            case "claude": return R.drawable.nav_claude;
-            default: return R.drawable.nav_chat;
-        }
-    }
-
-    private String reasoningValue(String label) {
-        if (label.contains("低")) return "low";
-        if (label.contains("中")) return "medium";
-        if (label.contains("高")) return "high";
-        return "off";
-    }
-
-    private String formatPlainPrice(double value) {
-        return String.format(Locale.CHINA, "%.2f", value);
-    }
-
-    private String formatQuotaAsUsd(double value, double quotaPerUnit) {
-        double unit = quotaPerUnit > 0 ? quotaPerUnit : 500000;
-        double usd = value / unit;
-        return "$" + String.format(Locale.US, usd >= 1 ? "%.2f" : "%.4f", usd);
     }
 
     private String formatDuration(JSONObject plan) {
         String unit = plan.optString("duration_unit", "month");
         int value = Math.max(1, plan.optInt("duration_value", 1));
-        switch (unit) {
-            case "year": return value + " 年";
-            case "day": return value + " 天";
-            case "hour": return value + " 小时";
-            case "custom": return Math.max(1, plan.optLong("custom_seconds", 0) / 86400) + " 天";
-            default: return value + " 个月";
-        }
+        if ("year".equals(unit)) return value + "年";
+        if ("month".equals(unit)) return value + "个月";
+        if ("day".equals(unit)) return value + "天";
+        return value + "期";
     }
 
     private String resetLabel(String value) {
-        switch (value) {
-            case "daily": return "每日";
-            case "weekly": return "每周";
-            case "monthly": return "每月";
-            case "custom": return "自定义";
-            default: return "不重置";
+        if ("month".equals(value)) return "每月重置";
+        if ("year".equals(value)) return "每年重置";
+        if ("day".equals(value)) return "每日重置";
+        return "不重置";
+    }
+
+    private String formatPlainPrice(double value) {
+        if (Math.abs(value - Math.rint(value)) < 0.001) return String.valueOf((long) Math.rint(value));
+        return String.format(Locale.CHINA, "%.2f", value);
+    }
+
+    private String formatQuotaAsUsd(double value, double unit) {
+        double normalized = unit <= 0 ? value : value / unit;
+        if (Math.abs(normalized - Math.rint(normalized)) < 0.001) return "$" + (long) Math.rint(normalized);
+        return "$" + String.format(Locale.CHINA, "%.2f", normalized);
+    }
+
+    private void renderUsageDistribution(LinearLayout parent, JSONArray items) {
+        if (items == null || items.length() == 0) {
+            parent.addView(UiKit.text(this, "暂无用量记录。", UiKit.MUTED, 14));
+            return;
+        }
+        List<String> labels = new ArrayList<>();
+        List<Double> quotas = new ArrayList<>();
+        double total = 0;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) continue;
+            double quota = Math.max(0, item.optDouble("quota", 0));
+            if (quota <= 0) continue;
+            total += quota;
+            String model = item.optString("model_name", item.optString("token_name", "未知模型"));
+            int index = labels.indexOf(model);
+            if (index >= 0) quotas.set(index, quotas.get(index) + quota);
+            else {
+                labels.add(model);
+                quotas.add(quota);
+            }
+        }
+        if (labels.isEmpty() || total <= 0) {
+            parent.addView(UiKit.text(this, "暂无用量记录。", UiKit.MUTED, 14));
+            return;
+        }
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < labels.size(); i++) order.add(i);
+        order.sort((a, b) -> Double.compare(quotas.get(b), quotas.get(a)));
+        for (int i = 0; i < Math.min(order.size(), 5); i++) {
+            int index = order.get(i);
+            parent.addView(progressRow(labels.get(index), quotas.get(index) / total));
         }
     }
 
+    private View billingRow(String label, double ratio) {
+        return progressRow(label, ratio);
+    }
+
+    private View progressRow(String label, double ratio) {
+        LinearLayout row = UiKit.horizontal(this);
+        row.setPadding(0, UiKit.dp(this, 8), 0, 0);
+        TextView text = UiKit.text(this, label, UiKit.MUTED, 13);
+        text.setSingleLine(true);
+        text.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1f));
+        row.addView(progressBar(ratio), new LinearLayout.LayoutParams(UiKit.dp(this, 132), UiKit.dp(this, 8)));
+        return row;
+    }
+
+    private View progressBar(double ratio) {
+        FrameLayout track = new FrameLayout(this);
+        track.setBackground(UiKit.round(Color.argb(78, 145, 160, 184), UiKit.dp(this, 4), Color.TRANSPARENT));
+        View fill = new View(this);
+        fill.setBackground(UiKit.round(UiKit.BLUE, UiKit.dp(this, 4), UiKit.BLUE));
+        int width = Math.max(UiKit.dp(this, 4), (int) (UiKit.dp(this, 132) * Math.max(0.04, Math.min(1, ratio))));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width, UiKit.dp(this, 8), Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        track.addView(fill, lp);
+        return track;
+    }
+
     private String formatBillingLabel(JSONObject item) {
-        String title = item.optString("plan_title", "").trim();
-        if (!title.isEmpty()) {
-            return title;
-        }
-        String trade = item.optString("trade_no", "").replaceAll("SUBWALLETUSR1NO[a-zA-Z0-9_-]*", "").trim();
-        if (!trade.isEmpty()) {
-            return trade;
-        }
+        String trade = item.optString("trade_no", "").trim();
+        if (!trade.isEmpty()) return trade;
         String payment = item.optString("payment_method", "").replaceAll("(?i)^wallet$", "").trim();
         return payment.isEmpty() ? "购买记录" : payment;
     }
 
     private double resolveBillingUsageRatio(JSONObject bill, JSONArray plans, JSONObject subscriptions) {
         String title = bill == null ? "" : bill.optString("plan_title", "").trim();
-        if (title.isEmpty() || plans == null || subscriptions == null) {
-            return 0;
-        }
+        if (title.isEmpty() || plans == null || subscriptions == null) return 0;
         Map<Integer, String> titleByPlanId = new HashMap<>();
         for (int i = 0; i < plans.length(); i++) {
             JSONObject record = plans.optJSONObject(i);
             JSONObject plan = record == null ? null : record.optJSONObject("plan");
-            if (plan == null) {
-                continue;
-            }
+            if (plan == null) continue;
             String planTitle = plan.optString("title", "").trim();
-            if (!planTitle.isEmpty()) {
-                titleByPlanId.put(plan.optInt("id", 0), planTitle);
-            }
+            if (!planTitle.isEmpty()) titleByPlanId.put(plan.optInt("id", 0), planTitle);
         }
         JSONArray rows = subscriptions.optJSONArray("all_subscriptions");
-        if (rows == null) {
-            rows = subscriptions.optJSONArray("subscriptions");
-        }
-        if (rows == null) {
-            return 0;
-        }
+        if (rows == null) rows = subscriptions.optJSONArray("subscriptions");
+        if (rows == null) return 0;
         long bestUpdatedAt = -1;
         double ratio = 0;
         for (int i = 0; i < rows.length(); i++) {
             JSONObject row = rows.optJSONObject(i);
             JSONObject sub = row == null ? null : row.optJSONObject("subscription");
-            if (sub == null) {
-                continue;
-            }
+            if (sub == null) continue;
             String planTitle = titleByPlanId.get(sub.optInt("plan_id", 0));
-            if (!title.equals(planTitle)) {
-                continue;
-            }
+            if (!title.equals(planTitle)) continue;
             long updatedAt = Math.max(sub.optLong("end_time", 0), Math.max(sub.optLong("start_time", 0), sub.optLong("id", 0)));
-            if (updatedAt < bestUpdatedAt) {
-                continue;
-            }
+            if (updatedAt < bestUpdatedAt) continue;
             bestUpdatedAt = updatedAt;
             double total = sub.optDouble("amount_total", 0);
             double used = sub.optDouble("amount_used", 0);
@@ -7722,837 +1973,2267 @@ public class MainActivity extends Activity {
         return ratio;
     }
 
-    private String billingStatus(String value) {
-        if ("success".equals(value)) return "已完成";
-        if ("pending".equals(value)) return "待支付";
-        if ("expired".equals(value)) return "已过期";
-        return "未知";
+    private void renderServiceStatus(LinearLayout panel, JSONObject result) {
+        Object data = result.opt("data");
+        JSONObject dataObj = data instanceof JSONObject ? (JSONObject) data : null;
+        JSONArray items = data instanceof JSONArray ? (JSONArray) data : null;
+        if (items == null && data instanceof JSONObject) {
+            items = ((JSONObject) data).optJSONArray("items");
+        }
+        LinearLayout header = cardPanel();
+        header.addView(UiKit.bold(this, "渠道运行状态"));
+        long refreshedAt = dataObj == null ? 0 : dataObj.optLong("refreshedAt", 0);
+        header.addView(UiKit.text(this, refreshedAt > 0 ? "最后更新：" + formatDateTime(refreshedAt) : "最近状态变化", UiKit.MUTED, 14));
+        panel.addView(header);
+        if (items == null || items.length() == 0) {
+            panel.addView(card("当前没有可展示的服务状态", "服务器尚未配置 Claude、Codex、Gemini、DeepSeek 或 XiaomiMIMO 渠道。"));
+            return;
+        }
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) continue;
+            LinearLayout row = cardPanel();
+            LinearLayout head = UiKit.horizontal(this);
+            head.addView(UiKit.bold(this, item.optString("title", first(item, "name", "service", "model"))), new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView status = UiKit.text(this, serviceToneLabel(item.optString("tone", item.optString("status", ""))), serviceToneColor(item.optString("tone", item.optString("status", ""))), 13);
+            status.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            head.addView(status, new LinearLayout.LayoutParams(UiKit.dp(this, 96), -2));
+            row.addView(head);
+            String subtitle = item.optString("subtitle", "");
+            if (!subtitle.isEmpty()) row.addView(UiKit.text(this, subtitle, UiKit.MUTED, 13));
+            JSONArray history = item.optJSONArray("history");
+            if (history != null && history.length() > 0) row.addView(serviceHistoryDots(history));
+            String meta = "";
+            if (item.optLong("latencyMs", 0) > 0) meta += "延迟 " + item.optLong("latencyMs") + " ms";
+            if (item.optLong("checkedAt", 0) > 0) meta += (meta.isEmpty() ? "" : " · ") + "检测时间 " + formatDateTime(item.optLong("checkedAt"));
+            if (!meta.isEmpty()) row.addView(UiKit.text(this, meta, UiKit.MUTED, 13));
+            String detail = item.optString("detail", "");
+            if (!detail.isEmpty()) row.addView(UiKit.text(this, detail, UiKit.MUTED, 13));
+            panel.addView(row);
+        }
     }
 
     private String serviceToneLabel(String tone) {
-        switch (tone) {
-            case "up": return "运行正常";
-            case "down": return "服务异常";
-            case "maintenance": return "维护中";
-            default: return "状态未知";
-        }
+        String value = tone == null ? "" : tone;
+        if ("up".equals(value) || "ok".equals(value) || "normal".equals(value)) return "运行正常";
+        if ("down".equals(value) || "error".equals(value)) return "服务异常";
+        if ("maintenance".equals(value)) return "维护中";
+        return "状态未知";
     }
 
     private int serviceToneColor(String tone) {
-        switch (tone) {
-            case "up": return MINT;
-            case "down": return Color.rgb(216, 71, 86);
-            case "maintenance": return Color.rgb(214, 144, 44);
-            default: return MUTED;
-        }
+        String value = tone == null ? "" : tone;
+        if ("up".equals(value) || "ok".equals(value) || "normal".equals(value)) return Color.rgb(48, 151, 106);
+        if ("down".equals(value) || "error".equals(value)) return Color.rgb(216, 71, 86);
+        if ("maintenance".equals(value)) return Color.rgb(214, 144, 44);
+        return UiKit.MUTED;
     }
 
     private View serviceHistoryDots(JSONArray history) {
-        LinearLayout row = horizontal();
-        row.setPadding(0, dp(8), 0, dp(6));
+        LinearLayout row = UiKit.horizontal(this);
+        row.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 6));
         for (int i = 0; i < Math.min(history.length(), 24); i++) {
             JSONObject item = history.optJSONObject(i);
             View dot = new View(this);
-            dot.setBackground(round(serviceToneColor(item == null ? "" : item.optString("tone")), dp(4), Color.TRANSPARENT));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(8), dp(8));
-            lp.setMargins(0, 0, dp(5), 0);
+            dot.setBackground(UiKit.round(serviceToneColor(item == null ? "" : item.optString("tone", item.optString("status", ""))), UiKit.dp(this, 4), Color.TRANSPARENT));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(this, 8), UiKit.dp(this, 8));
+            lp.setMargins(0, 0, UiKit.dp(this, 5), 0);
             row.addView(dot, lp);
         }
         return row;
     }
 
-    private void renderUsageDistribution(LinearLayout parent, JSONArray items) {
-        if (items == null || items.length() == 0) {
-            parent.addView(copy("暂无用量记录。"));
-            return;
-        }
-        List<String> labels = new ArrayList<>();
-        List<Double> quotas = new ArrayList<>();
-        double total = 0;
-        for (int i = 0; i < items.length(); i++) {
-            JSONObject item = items.optJSONObject(i);
-            if (item == null) {
-                continue;
-            }
-            double quota = Math.max(0, item.optDouble("quota", 0));
-            if (quota <= 0) {
-                continue;
-            }
-            total += quota;
-            boolean merged = false;
-            String model = item.optString("model_name", item.optString("token_name", "未知模型"));
-            for (int j = 0; j < labels.size(); j++) {
-                if (model.equals(labels.get(j))) {
-                    quotas.set(j, quotas.get(j) + quota);
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) {
-                labels.add(model);
-                quotas.add(quota);
-            }
-        }
-        if (labels.isEmpty() || total <= 0) {
-            parent.addView(copy("暂无用量记录。"));
-            return;
-        }
-        List<Integer> order = new ArrayList<>();
-        for (int i = 0; i < labels.size(); i++) {
-            order.add(i);
-        }
-        order.sort((a, b) -> Double.compare(quotas.get(b), quotas.get(a)));
-        for (int i = 0; i < Math.min(order.size(), 5); i++) {
-            int index = order.get(i);
-            parent.addView(usageRow(labels.get(index), quotas.get(index) / total));
-        }
-    }
-
-    private View usageRow(String label, double ratio) {
-        LinearLayout row = horizontal();
-        row.setPadding(0, dp(8), 0, 0);
-        TextView text = copy(label);
-        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
-        row.addView(progressBar(ratio), new LinearLayout.LayoutParams(dp(132), dp(8)));
-        return row;
-    }
-
-    private View billingRow(String label, double ratio) {
-        LinearLayout row = horizontal();
-        row.setPadding(0, dp(9), 0, 0);
-        row.addView(copy(label), new LinearLayout.LayoutParams(0, -2, 1));
-        row.addView(progressBar(ratio), new LinearLayout.LayoutParams(dp(132), dp(8)));
-        return row;
-    }
-
-    private View progressBar(double ratio) {
-        FrameLayout track = new FrameLayout(this);
-        track.setBackground(round(Color.argb(78, 145, 160, 184), dp(4), Color.TRANSPARENT));
-        View fill = new View(this);
-        fill.setBackground(round(BLUE, dp(4), BLUE));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(Math.max(dp(4), (int) (dp(132) * Math.max(0.04, Math.min(1, ratio)))), dp(8));
-        lp.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
-        track.addView(fill, lp);
-        return track;
-    }
-
     private String formatDateTime(long timestamp) {
         long ms = timestamp > 10000000000L ? timestamp : timestamp * 1000L;
-        java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA);
-        return fmt.format(new java.util.Date(ms));
+        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(new java.util.Date(ms));
     }
 
-    private String selected(Spinner spinner) {
-        Object item = spinner == null ? null : spinner.getSelectedItem();
-        return item == null ? "" : String.valueOf(item);
-    }
-
-    private String selectedCliModelFor(String client) {
-        String value = "claude".equals(client) ? selectedClaudeModel : selectedCodexModel;
-        if (value != null && !value.trim().isEmpty()) {
-            return value.trim();
+    private void renderDevices(LinearLayout panel, JSONArray devices) {
+        String bound = prefs.boundDeviceId();
+        if (!bound.isEmpty()) {
+            JSONObject boundDevice = findDevice(devices, bound);
+            String name = boundDevice == null ? "当前绑定设备" : boundDevice.optString("name", boundDevice.optString("platform", "桌面客户端"));
+            String identifier = boundDevice == null ? bound : first(boundDevice, "identifier", "deviceId", "id", "fingerprint");
+            panel.addView(UiKit.text(this, "设备：" + name, UiKit.MUTED, 14));
+            panel.addView(UiKit.text(this, "标识：" + identifier, UiKit.MUTED, 13));
         }
-        List<String> models = "claude".equals(client) ? claudeModels : codexModels;
-        return models.isEmpty() ? "" : models.get(0);
-    }
-
-    private String trim(EditText editText) {
-        return editText.getText().toString().trim();
-    }
-
-    private String enc(String value) throws Exception {
-        return URLEncoder.encode(value == null ? "" : value, "UTF-8");
-    }
-
-    private String shortId(String id) {
-        if (id == null || id.length() <= 8) {
-            return id == null ? "" : id;
-        }
-        return id.substring(0, 8);
-    }
-
-    private void installKeyboardLift() {
-        if (shell == null || composerHost == null) {
+        if (devices == null || devices.length() == 0) {
+            panel.addView(UiKit.text(this, "暂无可绑定设备。请确认 PC/Mac 客户端在线。", UiKit.MUTED, 14));
+            panel.addView(deviceActionRow(bound));
             return;
         }
-        shell.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
-            if (shell == null || composerHost == null) {
-                return;
-            }
-            Rect visible = new Rect();
-            shell.getWindowVisibleDisplayFrame(visible);
-            int rootHeight = shell.getRootView().getHeight();
-            int keyboard = Math.max(0, rootHeight - visible.bottom);
-            LinearLayout.LayoutParams lp = composerHost.getLayoutParams() instanceof LinearLayout.LayoutParams
-                    ? (LinearLayout.LayoutParams) composerHost.getLayoutParams()
-                    : null;
-            if (keyboard > dp(120)) {
-                composerHost.setTranslationY(0);
-                composerHost.setPadding(0, 0, 0, dp(6));
-                if (lp != null && lp.bottomMargin != keyboard) {
-                    lp.bottomMargin = keyboard;
-                    composerHost.setLayoutParams(lp);
-                }
-            } else {
-                composerHost.setTranslationY(0);
-                composerHost.setPadding(0, 0, 0, dp(12));
-                if (lp != null && lp.bottomMargin != 0) {
-                    lp.bottomMargin = 0;
-                    composerHost.setLayoutParams(lp);
-                }
-            }
-            if (currentKeyboardHeight != keyboard) {
-                currentKeyboardHeight = keyboard;
-                updateScrollDockPosition();
+        for (int i = 0; i < devices.length(); i++) {
+            JSONObject device = devices.optJSONObject(i);
+            if (device == null) continue;
+            String id = device.optString("id", device.optString("deviceId", ""));
+            String name = device.optString("name", id);
+            String identifier = first(device, "identifier", "deviceId", "id", "fingerprint");
+            LinearLayout button = deviceBindRow(name, identifier);
+            button.setOnClickListener(v -> bindDevice(id));
+            panel.addView(button, centeredButtonLp());
+        }
+        panel.addView(deviceActionRow(bound));
+    }
+
+    private LinearLayout deviceBindRow(String name, String identifier) {
+        LinearLayout row = UiKit.horizontal(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
+        row.setBackground(UiKit.round(Color.argb(150, 255, 255, 255), UiKit.dp(this, 16), UiKit.LINE));
+        TextView label = UiKit.text(this, name == null || name.trim().isEmpty() ? "桌面客户端" : name.trim(), UiKit.INK, 13);
+        label.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(label, new LinearLayout.LayoutParams(0, -1, 1f));
+        TextView id = UiKit.text(this, shortDeviceIdentifier(identifier), UiKit.MUTED, 12);
+        id.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        id.setSingleLine(true);
+        id.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(id, new LinearLayout.LayoutParams(0, -1, 2f));
+        return row;
+    }
+
+    private String shortDeviceIdentifier(String value) {
+        String clean = value == null ? "" : value.trim();
+        if (clean.isEmpty()) return "未识别";
+        return clean.length() > 18 ? clean.substring(0, 18) + "..." : clean;
+    }
+
+    private View deviceActionRow(String bound) {
+        LinearLayout row = UiKit.horizontal(this);
+        Button refresh = UiKit.ghostButton(this, "刷新设备");
+        refresh.setOnClickListener(v -> refreshDevices((LinearLayout) row.getParent()));
+        row.addView(refresh, new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f));
+        if (bound != null && !bound.isEmpty()) {
+            Button unbind = UiKit.ghostButton(this, "解除绑定");
+            unbind.setTextColor(Color.rgb(216, 71, 86));
+            unbind.setOnClickListener(v -> unbindDevice(bound));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f);
+            lp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
+            row.addView(unbind, lp);
+        }
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 42));
+        rowLp.setMargins(0, UiKit.dp(this, 8), 0, 0);
+        row.setLayoutParams(rowLp);
+        return row;
+    }
+
+    private void bindDevice(String deviceId) {
+        network.execute(() -> {
+            try {
+                desktopRepository.bindDevice(deviceId, prefs.appId());
+                prefs.setBoundDeviceId(deviceId);
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "设备已绑定", Toast.LENGTH_SHORT).show();
+                    renderCurrent(false);
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> Toast.makeText(this, "绑定失败：" + message(error), Toast.LENGTH_LONG).show());
             }
         });
     }
 
-    private void installSwipeNavigation() {
-        if (shell == null) {
-            return;
+    private void unbindDevice(String deviceId) {
+        network.execute(() -> {
+            try {
+                desktopRepository.unbindDevice(deviceId, prefs.appId());
+                prefs.setBoundDeviceId("");
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "已解除绑定", Toast.LENGTH_SHORT).show();
+                    renderCurrent(false);
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> Toast.makeText(this, "解除失败：" + message(error), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+            return "2.0.0-native";
         }
-        View.OnTouchListener listener = (v, event) -> {
-            switch (event.getAction()) {
-                case android.view.MotionEvent.ACTION_DOWN:
-                    if (!isTouchInsideActiveInput(event)) {
-                        cancelComposerInputMode();
+    }
+
+    private String jsonPreview(JSONObject json) {
+        String text = json == null ? "{}" : json.toString();
+        if (text.length() > 1200) {
+            return text.substring(0, 1200) + "...";
+        }
+        return text;
+    }
+
+    private String message(Exception error) {
+        return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+    }
+
+    private interface JsonRequest {
+        JSONObject run() throws Exception;
+    }
+
+    private void scrollToBottomNow() {
+        RecyclerView.Adapter<?> rvAdapter = recyclerView.getAdapter();
+        int count = rvAdapter == null ? 0 : rvAdapter.getItemCount();
+        if (count <= 0) return;
+        recyclerView.post(() -> {
+            RecyclerView.LayoutManager manager = recyclerView.getLayoutManager();
+            if (manager instanceof LinearLayoutManager) {
+                LinearLayoutManager linear = (LinearLayoutManager) manager;
+                linear.scrollToPositionWithOffset(count - 1, Math.max(0, recyclerView.getHeight() - recyclerView.getPaddingBottom()));
+                recyclerView.post(() -> {
+                    View last = linear.findViewByPosition(count - 1);
+                    if (last != null) {
+                        int viewportBottom = recyclerView.getHeight() - recyclerView.getPaddingBottom();
+                        int delta = last.getBottom() - viewportBottom;
+                        if (delta != 0) recyclerView.scrollBy(0, delta);
+                    } else {
+                        recyclerView.scrollToPosition(count - 1);
                     }
-                    swipeStartX = event.getX();
-                    swipeStartY = event.getY();
-                    break;
-                case android.view.MotionEvent.ACTION_UP:
-                    handleHorizontalSwipe(event.getX() - swipeStartX, event.getY() - swipeStartY);
-                    break;
-                default:
-                    break;
-            }
-            return false;
-        };
-        shell.setOnTouchListener(listener);
-        if (contentScroll != null) {
-            contentScroll.setOnTouchListener(listener);
-        }
-    }
-
-    private void handleHorizontalSwipe(float dx, float dy) {
-        if (System.currentTimeMillis() < suppressSwipeUntil) {
-            return;
-        }
-        float absX = Math.abs(dx);
-        float absY = Math.abs(dy);
-        if (absX < dp(118) || absX < absY * 2.8f || absY > dp(72)) {
-            return;
-        }
-        String[] items = new String[]{"chat", "image", "codex", "claude"};
-        int current = -1;
-        String effective = "assistants".equals(section) ? "chat" : section;
-        for (int i = 0; i < items.length; i++) {
-            if (items[i].equals(effective)) {
-                current = i;
-                break;
-            }
-        }
-        if (current < 0) {
-            return;
-        }
-        int direction = dx < 0 ? 1 : -1;
-        int next = current + direction;
-        if (next >= 0 && next < items.length) {
-            section = items[next];
-            localAutoScrollEnabled = true;
-            refreshBottomNav();
-            renderSection();
-            lastExitSwipeAt = 0;
-            lastExitSwipeDirection = 0;
-            return;
-        }
-        long now = System.currentTimeMillis();
-        if (lastExitSwipeDirection == direction && now - lastExitSwipeAt < 1800L) {
-            finish();
-            return;
-        }
-        lastExitSwipeDirection = direction;
-        lastExitSwipeAt = now;
-        toast("再次滑动退出应用");
-    }
-
-    private void hideKeyboard(View view) {
-        ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(view.getWindowToken(), 0);
-    }
-
-    private void focusComposerInput() {
-        if (activeInput == null) {
-            return;
-        }
-        cancelComposerKeyboardRequest();
-        EditText target = activeInput;
-        activeInput.setFocusableInTouchMode(true);
-        activeInput.requestFocus();
-        activeInput.setSelection(activeInput.getText().length());
-        pendingComposerKeyboardRunnable = () -> {
-            pendingComposerKeyboardRunnable = null;
-            if (target == activeInput && target.hasFocus()) {
-                showKeyboard(target);
-            }
-        };
-        handler.postDelayed(pendingComposerKeyboardRunnable, 80);
-    }
-
-    private void cancelComposerInputMode() {
-        cancelComposerKeyboardRequest();
-        if (activeInput != null && activeInput.hasFocus()) {
-            hideKeyboard(activeInput);
-            activeInput.clearFocus();
-        }
-    }
-
-    private void cancelComposerKeyboardRequest() {
-        if (pendingComposerKeyboardRunnable != null) {
-            handler.removeCallbacks(pendingComposerKeyboardRunnable);
-            pendingComposerKeyboardRunnable = null;
-        }
-    }
-
-    private boolean isTouchInsideActiveInput(android.view.MotionEvent event) {
-        if (activeInput == null || event == null) {
-            return false;
-        }
-        int[] location = new int[2];
-        activeInput.getLocationOnScreen(location);
-        Rect bounds = new Rect(location[0], location[1], location[0] + activeInput.getWidth(), location[1] + activeInput.getHeight());
-        return bounds.contains((int) event.getRawX(), (int) event.getRawY());
-    }
-
-    private void showKeyboard(View view) {
-        if (view == null || !view.hasFocus()) {
-            return;
-        }
-        ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
-    }
-
-    private void ui(Runnable runnable) {
-        handler.post(runnable);
-    }
-
-    private void resetContentScrollPosition() {
-        if (contentScroll == null) {
-            return;
-        }
-        contentScroll.scrollTo(0, 0);
-        lastContentScrollY = 0;
-    }
-
-    private void scrollToBottom() {
-        if (conversationList != null && conversationList.getVisibility() == View.VISIBLE) {
-            scrollConversationToBottom();
-            return;
-        }
-        scrollToBottomStable(0);
-    }
-
-    private void scrollToBottomStable(int pass) {
-        if (contentScroll == null) {
-            return;
-        }
-        contentScroll.post(() -> {
-            contentScroll.scrollTo(0, contentBottomScrollY(contentScroll));
-            contentScroll.fullScroll(View.FOCUS_DOWN);
-            updateScrollDock();
-            if (pass < 4 && contentScroll != null) {
-                handler.postDelayed(() -> scrollToBottomStable(pass + 1), pass == 0 ? 32L : 80L);
+                });
+            } else {
+                recyclerView.scrollToPosition(count - 1);
             }
         });
     }
 
-    private void scrollToBottomIfLocalAuto() {
-        if (!localAutoScrollEnabled) {
-            return;
+    private void showSessionDialog() {
+        if (!currentSection.isConversation()) return;
+        SectionState state = state();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        final LinearLayout[] sessionListRef = new LinearLayout[1];
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, currentSection.label + " 会话记录"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button create = iconGlyphButton("＋");
+        create.setTextSize(18);
+        create.setOnClickListener(v -> {
+            createSessionForCurrentSection();
+            dialog.dismiss();
+            renderCurrent(true);
+        });
+        titleRow.addView(create, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        if (currentSection.isDesktop()) {
+            Button refresh = iconGlyphButton("⟳");
+            refresh.setOnClickListener(v -> refreshDesktopSessions(currentSection, () -> {
+                if (sessionListRef[0] != null) {
+                    sessionListRef[0].removeAllViews();
+                    renderGroupedSessions(sessionListRef[0], state, dialog);
+                }
+            }));
+            titleRow.addView(refresh, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
         }
-        scrollToBottom();
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(UiKit.gap(this, 12));
+        ScrollView listScroll = new ScrollView(this);
+        listScroll.setClipToPadding(false);
+        LinearLayout list = UiKit.vertical(this);
+        sessionListRef[0] = list;
+        listScroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        renderGroupedSessions(list, state, dialog);
+        if (currentSection.isDesktop()) {
+            refreshDesktopSessions(currentSection, () -> {
+                list.removeAllViews();
+                renderGroupedSessions(list, state, dialog);
+            });
+        }
+        panel.addView(listScroll, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 420)));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
     }
 
-    private void updateScrollDock() {
-        if (scrollDock == null || contentScroll == null || content == null) {
+    private void renderGroupedSessions(LinearLayout list, SectionState state, Dialog dialog) {
+        LinkedHashMap<String, List<ChatSession>> groups = new LinkedHashMap<>();
+        for (ChatSession session : state.sessions) {
+            String key;
+            if (currentSection.isDesktop()) {
+                key = session.projectLabel == null || session.projectLabel.trim().isEmpty() ? "本机项目" : session.projectLabel.trim();
+            } else {
+                key = session.assistantLabel == null || session.assistantLabel.trim().isEmpty() ? currentSection.label : session.assistantLabel.trim();
+            }
+            groups.computeIfAbsent(key, ignored -> new ArrayList<>()).add(session);
+        }
+        if (groups.isEmpty()) {
+            list.addView(UiKit.text(this, "暂无会话记录", UiKit.MUTED, 14));
             return;
         }
-        if (conversationList != null && conversationList.getVisibility() == View.VISIBLE) {
-            if (!isScrollableConversationSection() || conversationAdapter == null || conversationAdapter.getItemCount() == 0) {
-                scrollDock.setVisibility(View.GONE);
+        int groupCount = 0;
+        for (Map.Entry<String, List<ChatSession>> entry : groups.entrySet()) {
+            if (currentSection.isDesktop() && groupCount >= 3) break;
+            TextView group = UiKit.text(this, currentSection.isDesktop() ? shortProjectTitle(entry.getKey()) : entry.getKey(), UiKit.MUTED, 13);
+            group.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            LinearLayout.LayoutParams groupLp = new LinearLayout.LayoutParams(-1, -2);
+            groupLp.setMargins(0, groupCount == 0 ? 0 : UiKit.dp(this, 12), 0, UiKit.dp(this, 4));
+            list.addView(group, groupLp);
+            List<ChatSession> sessions = entry.getValue();
+            int limit = currentSection.isDesktop() ? Math.min(5, sessions.size()) : sessions.size();
+            for (int i = 0; i < limit; i++) {
+                ChatSession session = sessions.get(i);
+                View row = sessionRow(session, state, dialog);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46));
+                lp.setMargins(0, UiKit.dp(this, 6), 0, 0);
+                list.addView(row, lp);
+            }
+            groupCount++;
+        }
+    }
+
+    private View sessionRow(ChatSession session, SectionState state, Dialog dialog) {
+        boolean selected = state.current() == session;
+        LinearLayout row = UiKit.horizontal(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
+        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        TextView title = UiKit.text(this, sessionPreviewTitle(session), selected ? UiKit.BLUE : UiKit.INK, 14);
+        title.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(title, new LinearLayout.LayoutParams(0, -1, 1f));
+        TextView date = UiKit.text(this, sessionLatestDate(session), UiKit.MUTED, 12);
+        date.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        date.setSingleLine(true);
+        LinearLayout.LayoutParams dateLp = new LinearLayout.LayoutParams(UiKit.dp(this, 82), -1);
+        dateLp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
+        row.addView(date, dateLp);
+        row.setOnClickListener(v -> {
+            int index = state.sessions.indexOf(session);
+            if (index >= 0) state.selectedIndex = index;
+            state.selectedSessionId = session.id;
+            dialog.dismiss();
+            renderCurrent(true);
+        });
+        row.setOnLongClickListener(v -> {
+            showSessionActions(state, session, dialog, v);
+            return true;
+        });
+        return row;
+    }
+
+    private String sessionPreviewTitle(ChatSession session) {
+        if (session != null && session.messages != null) {
+            for (ChatMessage message : session.messages) {
+                if (message == null || message.log) continue;
+                String clean = cleanSessionPreviewText(message.text);
+                if (!clean.isEmpty()) return clean;
+            }
+        }
+        String fallback = session == null ? "" : (session.title == null ? "" : session.title.trim());
+        return fallback.isEmpty() ? "新会话" : fallback;
+    }
+
+    private String cleanSessionPreviewText(String text) {
+        if (text == null) return "";
+        StringBuilder out = new StringBuilder();
+        for (String line : text.split("\\n")) {
+            String clean = line.trim();
+            if (clean.isEmpty()) continue;
+            if (isImageText(clean)) continue;
+            if (clean.startsWith("附件：")) continue;
+            if (clean.startsWith("```")) continue;
+            if (out.length() > 0) out.append(' ');
+            out.append(clean.replace('|', ' '));
+            if (out.length() >= 80) break;
+        }
+        String clean = out.toString().replaceAll("\\s+", " ").trim();
+        return clean.isEmpty() ? "附件消息" : clean;
+    }
+
+    private String sessionLatestDate(ChatSession session) {
+        long latest = 0L;
+        if (session != null && session.messages != null) {
+            for (ChatMessage message : session.messages) {
+                if (message != null) latest = Math.max(latest, message.timestamp);
+            }
+        }
+        if (latest <= 0) return "--";
+        long ms = latest > 10000000000L ? latest : latest * 1000L;
+        return new java.text.SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).format(new java.util.Date(ms));
+    }
+
+    private String shortProjectTitle(String value) {
+        String clean = value == null ? "" : value.trim();
+        if (clean.length() <= 28) return clean.isEmpty() ? "本机项目" : clean;
+        return "..." + clean.substring(clean.length() - 28);
+    }
+
+    private void createSessionForCurrentSection() {
+        if (!currentSection.isConversation()) return;
+        SectionState state = state();
+        ChatSession base = state.current();
+        ChatSession session = new ChatSession(
+                currentSection.id + "-new-" + System.currentTimeMillis(),
+                "新会话",
+                base.assistantLabel.isEmpty() ? currentSection.label : base.assistantLabel,
+                base.projectLabel,
+                new ArrayList<>()
+        );
+        state.sessions.add(0, session);
+        state.selectedIndex = 0;
+        state.selectedSessionId = session.id;
+    }
+
+    private void showSessionActions(SectionState state, ChatSession session, Dialog parent, View anchor) {
+        showActionPopup(anchor, Arrays.asList("重命名", "置顶", "删除"), action -> {
+            if ("重命名".equals(action)) renameSession(session, parent);
+            if ("置顶".equals(action)) {
+                state.deletedSessionIds.remove(session.id);
+                state.pinnedSessionIds.remove(session.id);
+                state.pinnedSessionIds.add(session.id);
+                state.sessions.remove(session);
+                state.sessions.add(0, session);
+                state.selectedIndex = 0;
+                state.selectedSessionId = session.id;
+                parent.dismiss();
+                renderCurrent(true);
+            }
+            if ("删除".equals(action)) {
+                state.deletedSessionIds.add(session.id);
+                state.pinnedSessionIds.remove(session.id);
+                state.renamedSessionTitles.remove(session.id);
+                state.sessions.remove(session);
+                state.selectedIndex = Math.max(0, Math.min(state.selectedIndex, state.sessions.size() - 1));
+                state.selectedSessionId = state.sessions.isEmpty() ? "" : state.sessions.get(state.selectedIndex).id;
+                parent.dismiss();
+                renderCurrent(true);
+            }
+        });
+    }
+
+    private void renameSession(ChatSession session, Dialog parent) {
+        EditText input = input("会话名称");
+        input.setText(session.title);
+        showInputDialog("重命名", input, value -> {
+            String title = value.trim().isEmpty() ? session.title : value.trim();
+            session.title = title;
+            state().renamedSessionTitles.put(session.id, title);
+            parent.dismiss();
+            renderCurrent(true);
+        });
+    }
+
+    private FrameLayout modalOverlay() {
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(Color.TRANSPARENT);
+        return overlay;
+    }
+
+    private LinearLayout modalPanel() {
+        LinearLayout panel = UiKit.vertical(this);
+        panel.setPadding(UiKit.dp(this, 28), UiKit.dp(this, 24), UiKit.dp(this, 28), UiKit.dp(this, 28));
+        panel.setBackground(UiKit.round(Color.WHITE, UiKit.dp(this, 22), UiKit.LINE));
+        return panel;
+    }
+
+    private JSONObject findDevice(JSONArray devices, String id) {
+        if (devices == null || id == null) return null;
+        for (int i = 0; i < devices.length(); i++) {
+            JSONObject item = devices.optJSONObject(i);
+            if (item == null) continue;
+            String itemId = item.optString("id", item.optString("deviceId", ""));
+            if (id.equals(itemId)) return item;
+        }
+        return null;
+    }
+
+    private FrameLayout.LayoutParams centeredModalLp() {
+        View anchor = composerView == null ? null : composerView.lastActionAnchor();
+        if (anchor != null && anchor.isShown()) {
+            FrameLayout.LayoutParams anchored = new FrameLayout.LayoutParams(UiKit.dp(this, 330), -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            anchored.topMargin = UiKit.dp(this, 18);
+            anchored.setMargins(UiKit.dp(this, 16), anchored.topMargin, UiKit.dp(this, 16), 0);
+            return anchored;
+        }
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(UiKit.dp(this, 330), -2, Gravity.CENTER);
+        lp.setMargins(UiKit.dp(this, 16), 0, UiKit.dp(this, 16), 0);
+        return lp;
+    }
+
+    private FrameLayout.LayoutParams plainCenteredModalLp() {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(UiKit.dp(this, 330), -2, Gravity.CENTER);
+        lp.setMargins(UiKit.dp(this, 16), 0, UiKit.dp(this, 16), 0);
+        return lp;
+    }
+
+    private FrameLayout.LayoutParams inputModalLp() {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(UiKit.dp(this, 330), -2, Gravity.CENTER_HORIZONTAL | Gravity.TOP);
+        lp.setMargins(UiKit.dp(this, 16), UiKit.dp(this, 120), UiKit.dp(this, 16), 0);
+        return lp;
+    }
+
+    private void adjustInputDialogForKeyboard(FrameLayout overlay, View panel) {
+        if (overlay == null || panel == null || !(panel.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        Rect visible = new Rect();
+        overlay.getWindowVisibleDisplayFrame(visible);
+        int[] rootPos = new int[2];
+        overlay.getLocationOnScreen(rootPos);
+        int visibleTop = Math.max(0, visible.top - rootPos[1]);
+        int visibleBottom = visible.bottom - rootPos[1];
+        if (visibleBottom <= visibleTop) visibleBottom = overlay.getHeight();
+        int available = Math.max(UiKit.dp(this, 180), visibleBottom - visibleTop - UiKit.dp(this, 32));
+        panel.measure(
+                View.MeasureSpec.makeMeasureSpec(Math.max(1, overlay.getWidth() - UiKit.dp(this, 32)), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST));
+        shrinkScrollContentIfNeeded(panel, available);
+        panel.measure(
+                View.MeasureSpec.makeMeasureSpec(Math.max(1, overlay.getWidth() - UiKit.dp(this, 32)), View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST));
+        int panelHeight = Math.min(panel.getMeasuredHeight(), available);
+        int top = visibleTop + Math.max(UiKit.dp(this, 16), (available - panelHeight) / 2);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) panel.getLayoutParams();
+        lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        lp.topMargin = top;
+        lp.height = panel.getMeasuredHeight() > available ? available : -2;
+        panel.setLayoutParams(lp);
+    }
+
+    private void showDialogOverlay(Dialog dialog, View content) {
+        hideKeyboard();
+        Runnable show = () -> {
+            View anchor = composerView == null ? null : composerView.lastActionAnchor();
+            boolean anchored = !"plain_modal".equals(content.getTag()) && !"input_modal".equals(content.getTag()) && anchor != null && anchor.isShown();
+            if (content instanceof FrameLayout && ((FrameLayout) content).getChildCount() > 0 && anchored) {
+                ((FrameLayout) content).getChildAt(0).setAlpha(0f);
+            }
+            dialog.setContentView(content);
+            Window window = dialog.getWindow();
+            if (window != null) {
+                window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            }
+            dialog.show();
+            Window shown = dialog.getWindow();
+            if (shown != null) {
+                shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+                shown.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+                applyWindowBlur(shown);
+            }
+            if (content instanceof FrameLayout && anchored) {
+                content.post(() -> adjustAnchoredDialog((FrameLayout) content));
+                content.postDelayed(() -> adjustAnchoredDialog((FrameLayout) content), 180);
+                content.postDelayed(() -> adjustAnchoredDialog((FrameLayout) content), 360);
+            }
+            if ("input_modal".equals(content.getTag()) && content instanceof FrameLayout) {
+                FrameLayout overlay = (FrameLayout) content;
+                View panel = overlay.getChildCount() > 0 ? overlay.getChildAt(0) : null;
+                if (panel != null) {
+                    overlay.post(() -> adjustInputDialogForKeyboard(overlay, panel));
+                    overlay.postDelayed(() -> adjustInputDialogForKeyboard(overlay, panel), 180);
+                    overlay.postDelayed(() -> adjustInputDialogForKeyboard(overlay, panel), 360);
+                }
+            }
+        };
+        View anchor = composerView == null ? null : composerView.lastActionAnchor();
+        if (!"plain_modal".equals(content.getTag()) && !"input_modal".equals(content.getTag()) && keyboardOpen && anchor != null && anchor.isShown()) {
+            mainHandler.postDelayed(show, 220);
+        } else {
+            show.run();
+        }
+    }
+
+    private void showInputDialog(String title, EditText input, TextHandler handler) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, title), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(input, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46)));
+        Button save = UiKit.ghostButton(this, "保存");
+        save.setOnClickListener(v -> {
+            handler.onText(input.getText().toString());
+            dialog.dismiss();
+        });
+        panel.addView(save, centeredButtonLp());
+        overlay.setTag("input_modal");
+        overlay.addView(panel, inputModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+        input.postDelayed(() -> {
+            input.requestFocus();
+            InputMethodManager manager = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (manager != null) manager.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+        }, 160);
+    }
+
+    private void showActionPopup(View anchor, List<String> actions, ChoiceHandler handler) {
+        FrameLayout dim = new FrameLayout(this);
+        dim.setBackgroundColor(Color.TRANSPARENT);
+        LinearLayout panel = UiKit.vertical(this);
+        panel.setPadding(UiKit.dp(this, 8), UiKit.dp(this, 8), UiKit.dp(this, 8), UiKit.dp(this, 8));
+        panel.setBackground(UiKit.round(Color.WHITE, UiKit.dp(this, 16), UiKit.LINE));
+        PopupWindow popup = new PopupWindow(dim, WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, true);
+        popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        popup.setOutsideTouchable(true);
+        dim.setOnClickListener(v -> popup.dismiss());
+        panel.setOnClickListener(v -> { });
+        for (String action : actions) {
+            TextView row = UiKit.text(this, action, "删除".equals(action) ? Color.rgb(216, 71, 86) : UiKit.INK, 14);
+            row.setGravity(Gravity.CENTER);
+            row.setPadding(0, 0, 0, 0);
+            row.setOnClickListener(v -> {
+                popup.dismiss();
+                handler.onChoice(action);
+            });
+            panel.addView(row, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 36)));
+        }
+        panel.measure(View.MeasureSpec.makeMeasureSpec(UiKit.dp(this, 160), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED);
+        int popupHeight = Math.max(panel.getMeasuredHeight(), UiKit.dp(this, 44));
+        int[] pos = new int[2];
+        anchor.getLocationOnScreen(pos);
+        int gap = Math.max(UiKit.dp(this, 44), anchor.getHeight()) + UiKit.dp(this, 12);
+        int y = pos[1] - popupHeight - gap;
+        if (y < UiKit.dp(this, 18)) y = pos[1] + anchor.getHeight() + gap;
+        int maxY = getResources().getDisplayMetrics().heightPixels - popupHeight - UiKit.dp(this, 18);
+        y = Math.max(UiKit.dp(this, 18), Math.min(y, maxY));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(UiKit.dp(this, 128), -2, Gravity.LEFT | Gravity.TOP);
+        lp.leftMargin = Math.max(UiKit.dp(this, 8), Math.min(pos[0], getResources().getDisplayMetrics().widthPixels - UiKit.dp(this, 140)));
+        lp.topMargin = y;
+        dim.addView(panel, lp);
+        popup.showAtLocation(anchor, Gravity.NO_GRAVITY, 0, 0);
+    }
+
+    private void refreshDesktopSessions(AppSection section) {
+        refreshDesktopSessions(section, null);
+    }
+
+    private void refreshDesktopSessions(AppSection section, Runnable afterRefresh) {
+        SectionState targetState = states.get(section);
+        if (targetState == null) return;
+        network.execute(() -> {
+            try {
+                JSONArray rows = desktopRepository.sessions(prefs.boundDeviceId());
+                List<ChatSession> parsed = new ArrayList<>();
+                for (int i = 0; i < rows.length(); i++) {
+                    JSONObject item = rows.optJSONObject(i);
+                    if (item == null || !section.id.equals(item.optString("client"))) {
+                        continue;
+                    }
+                    parsed.add(desktopSessionFromJson(section, item));
+                }
+                if (parsed.isEmpty()) return;
+                mainHandler.post(() -> {
+                    String selectedId = targetState.current().id;
+                    if (!targetState.selectedSessionId.isEmpty()) {
+                        selectedId = targetState.selectedSessionId;
+                    }
+                    List<ChatSession> nextSessions = applyDesktopSessionOverrides(targetState, parsed);
+                    targetState.sessions.clear();
+                    targetState.sessions.addAll(limitDesktopSessions(nextSessions));
+                    int nextIndex = 0;
+                    for (int i = 0; i < targetState.sessions.size(); i++) {
+                        if (targetState.sessions.get(i).id.equals(selectedId)) {
+                            nextIndex = i;
+                            break;
+                        }
+                    }
+                    targetState.selectedIndex = nextIndex;
+                    targetState.selectedSessionId = targetState.sessions.isEmpty() ? "" : targetState.sessions.get(nextIndex).id;
+                    if (currentSection == section) {
+                        renderCurrent(false);
+                    }
+                    if (afterRefresh != null) {
+                        afterRefresh.run();
+                    }
+                });
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private ChatSession desktopSessionFromJson(AppSection section, JSONObject item) {
+        String id = first(item, "sessionId", "id", "conversationId");
+        if (id.isEmpty()) id = section.id + "-" + Math.abs(item.toString().hashCode());
+        String project = first(item, "projectPath", "cwd", "workspace", "projectName");
+        String title = first(item, "title", "name", "projectName");
+        if (title.isEmpty()) title = project.isEmpty() ? "未命名会话" : project;
+        List<ChatMessage> messages = desktopTimeline(section, item);
+        if (messages.isEmpty()) {
+            messages.add(new ChatMessage("assistant", "已加载桌面端会话：" + title, System.currentTimeMillis()));
+        }
+        return new ChatSession(id, title, section.label, project, messages);
+    }
+
+    private List<ChatSession> limitDesktopSessions(List<ChatSession> source) {
+        LinkedHashMap<String, List<ChatSession>> grouped = new LinkedHashMap<>();
+        for (ChatSession session : source) {
+            String project = session.projectLabel == null || session.projectLabel.isEmpty() ? "本机项目" : session.projectLabel;
+            if (!grouped.containsKey(project) && grouped.size() >= 3) continue;
+            List<ChatSession> rows = grouped.computeIfAbsent(project, key -> new ArrayList<>());
+            if (rows.size() < 5) rows.add(session);
+        }
+        List<ChatSession> out = new ArrayList<>();
+        for (List<ChatSession> rows : grouped.values()) out.addAll(rows);
+        return out;
+    }
+
+    private List<ChatSession> applyDesktopSessionOverrides(SectionState state, List<ChatSession> source) {
+        List<ChatSession> rows = new ArrayList<>();
+        for (ChatSession session : source) {
+            if (state.deletedSessionIds.contains(session.id)) continue;
+            String renamed = state.renamedSessionTitles.get(session.id);
+            if (renamed != null && !renamed.trim().isEmpty()) session.title = renamed.trim();
+            rows.add(session);
+        }
+        rows.sort((a, b) -> {
+            int ap = pinnedOrder(state, a.id);
+            int bp = pinnedOrder(state, b.id);
+            if (ap != bp) return Integer.compare(ap, bp);
+            return 0;
+        });
+        return rows;
+    }
+
+    private int pinnedOrder(SectionState state, String sessionId) {
+        int index = 0;
+        for (String id : state.pinnedSessionIds) {
+            if (id.equals(sessionId)) return index;
+            index++;
+        }
+        return 100000 + index;
+    }
+
+    private List<ChatMessage> desktopTimeline(AppSection section, JSONObject item) {
+        List<DesktopTimelineRow> rows = new ArrayList<>();
+        collectDesktopRows(section, rows, item.optJSONArray("messages"), false);
+        collectDesktopRows(section, rows, item.optJSONArray("logs"), true);
+        rows.sort((a, b) -> {
+            int byTime = Long.compare(a.timestamp, b.timestamp);
+            if (byTime != 0) return byTime;
+            int byPriority = Integer.compare(a.priority, b.priority);
+            if (byPriority != 0) return byPriority;
+            return Integer.compare(a.index, b.index);
+        });
+        LinkedHashMap<String, DesktopTimelineRow> rowsByStableKey = new LinkedHashMap<>();
+        List<DesktopTimelineRow> uniqueRows = new ArrayList<>();
+        for (DesktopTimelineRow row : rows) {
+            if (!row.stableKey.isEmpty() && rowsByStableKey.containsKey(row.stableKey)) {
+                continue;
+            }
+            boolean duplicate = false;
+            for (DesktopTimelineRow existing : uniqueRows) {
+                if (row.duplicates(existing)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                continue;
+            }
+            uniqueRows.add(row);
+            if (!row.stableKey.isEmpty()) {
+                rowsByStableKey.put(row.stableKey, row);
+            }
+        }
+        List<ChatMessage> out = new ArrayList<>();
+        for (DesktopTimelineRow row : uniqueRows) {
+            out.add(row.message);
+        }
+        return out;
+    }
+
+    private void collectDesktopRows(AppSection section, List<DesktopTimelineRow> out, JSONArray rows, boolean log) {
+        if (rows == null) return;
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            if (item == null) continue;
+            String role = item.optString("role", log ? "assistant" : "assistant");
+            if (!"user".equals(role)) role = "assistant";
+            String text = first(item, "text", "content", "body", "message", "title");
+            if (text.isEmpty()) continue;
+            long timestamp = normalizeTimestamp(item.optLong("timestamp", item.optLong("createdAt", System.currentTimeMillis())));
+            String stableId = first(item, "id", "messageId", "eventId");
+            if (stableId.isEmpty()) {
+                String jobId = first(item, "jobId", "job_id");
+                if (!jobId.isEmpty()) stableId = (log ? "log:" : "message:") + jobId + ":" + role + ":" + normalizeForKey(text);
+            }
+            if (log) {
+                String title = first(item, "title", "type", "phase");
+                String command = first(item, "command");
+                String type = first(item, "type");
+                if (isLowValueDesktopLog(section, title, type, text)) continue;
+                String logTitle = desktopLogTitle(section, title, type, command, text);
+                StringBuilder body = new StringBuilder();
+                body.append(logTitle);
+                if (!command.isEmpty()) body.append("\n\n```bash\n").append(command).append("\n```");
+                String path = first(item, "path", "file", "filePath", "cwd", "workspace");
+                if (!path.isEmpty()) body.append("\n\n文件：`").append(path).append("`");
+                if (!command.isEmpty() && looksLikeCommandJson(text)) {
+                    // The command is already rendered as a code block above; Codex often repeats it in JSON body.
+                } else if (looksLikeCodeLog(type, text)) {
+                    body.append("\n\n```").append(codeLanguageForLog(type, text)).append("\n").append(text).append("\n```");
+                } else {
+                    body.append("\n\n").append(text);
+                }
+                ChatMessage message = ChatMessage.log(body.toString(), timestamp);
+                out.add(new DesktopTimelineRow(message, stableId, timestamp, 1, i));
+            } else {
+                ChatMessage message = new ChatMessage(role, text, timestamp);
+                out.add(new DesktopTimelineRow(message, stableId, timestamp, "user".equals(role) ? 0 : 2, i));
+            }
+        }
+    }
+
+    private String normalizeForKey(String value) {
+        return (value == null ? "" : value).trim().replaceAll("\\s+", " ");
+    }
+
+    private boolean looksLikeCommandJson(String text) {
+        String clean = text == null ? "" : text.trim();
+        return clean.startsWith("{") && clean.endsWith("}") && clean.contains("\"command\"");
+    }
+
+    private long normalizeTimestamp(long value) {
+        if (value <= 0) return System.currentTimeMillis();
+        return value > 10000000000L ? value : value * 1000L;
+    }
+
+    private String first(JSONObject item, String... keys) {
+        for (String key : keys) {
+            String value = item.optString(key, "").trim();
+            if (!value.isEmpty()) return value;
+        }
+        return "";
+    }
+
+    private void showModelDialog() {
+        if (!currentSection.isConversation() || currentSection == AppSection.IMAGE) return;
+        SectionState state = state();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "模型"), new LinearLayout.LayoutParams(0, -2, 1f));
+        EditText search = searchInput("搜索模型");
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 34), 1f);
+        searchLp.setMargins(UiKit.dp(this, 8), 0, UiKit.dp(this, 8), 0);
+        titleRow.addView(search, searchLp);
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        FlowTagLayout filters = new FlowTagLayout(this);
+        filters.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 4));
+        LinearLayout list = UiKit.vertical(this);
+        List<String> providers = modelProviders(state.availableModels);
+        final String[] selectedProvider = new String[]{"全部"};
+        for (String provider : providers) {
+            TextView chip = filterChip(provider, provider.equals(selectedProvider[0]));
+            chip.setOnClickListener(v -> {
+                selectedProvider[0] = provider;
+                for (int i = 0; i < filters.getChildCount(); i++) {
+                    TextView item = (TextView) filters.getChildAt(i);
+                    item.setBackground(UiKit.round(item.getText().toString().equals(provider) ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 13), UiKit.LINE));
+                    item.setTextColor(item.getText().toString().equals(provider) ? UiKit.BLUE : UiKit.MUTED);
+                }
+                renderModelRows(list, state, selectedProvider[0], search.getText().toString(), dialog);
+            });
+            filters.addView(chip, filterLp());
+        }
+        onSearchChanged(search, () -> renderModelRows(list, state, selectedProvider[0], search.getText().toString(), dialog));
+        panel.addView(filters, new LinearLayout.LayoutParams(-1, -2));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 390)));
+        renderModelRows(list, state, selectedProvider[0], "", dialog);
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private List<String> modelProviders(List<String> models) {
+        List<String> found = new ArrayList<>();
+        for (String model : models) addUnique(found, providerForModel(model));
+        List<String> order = new ArrayList<>(Arrays.asList("OpenAI", "Gemini", "DeepSeek", "Qwen", "Claude", "其他"));
+        if (currentSection == AppSection.CLAUDE) {
+            order.remove("Claude");
+            order.add(0, "Claude");
+        }
+        List<String> providers = new ArrayList<>();
+        providers.add("全部");
+        for (String item : order) {
+            if (found.contains(item)) providers.add(item);
+        }
+        for (String item : found) {
+            if (!providers.contains(item)) providers.add(item);
+        }
+        return providers;
+    }
+
+    private String providerForModel(String model) {
+        String value = model == null ? "" : model.toLowerCase(Locale.ROOT);
+        if (value.contains("claude")) return "Claude";
+        if (value.contains("deepseek")) return "DeepSeek";
+        if (value.contains("mimo")) return "Mimo";
+        if (value.contains("gemini")) return "Gemini";
+        if (value.contains("grok")) return "Grok";
+        if (value.contains("qwen") || value.contains("通义")) return "Qwen";
+        if (value.contains("gpt") || value.contains("openai") || value.contains("codex") || value.contains("o1") || value.contains("o3") || value.contains("o4")) return "OpenAI";
+        return "其他";
+    }
+
+    private TextView filterChip(String text, boolean selected) {
+        TextView chip = UiKit.text(this, text, selected ? UiKit.BLUE : UiKit.MUTED, 12);
+        chip.setGravity(Gravity.CENTER);
+        chip.setSingleLine(true);
+        chip.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
+        chip.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 13), UiKit.LINE));
+        return chip;
+    }
+
+    private boolean looksLikeCodeLog(String type, String text) {
+        String cleanType = type == null ? "" : type.toLowerCase(Locale.ROOT);
+        String clean = text == null ? "" : text;
+        return cleanType.contains("file") || cleanType.contains("patch") || cleanType.contains("diff")
+                || clean.contains("```") || clean.contains("class ") || clean.contains("function ")
+                || clean.contains("import ") || clean.contains("package ") || clean.contains("@@");
+    }
+
+    private String codeLanguageForLog(String type, String text) {
+        String value = (type == null ? "" : type.toLowerCase(Locale.ROOT)) + " " + (text == null ? "" : text.toLowerCase(Locale.ROOT));
+        if (value.contains("diff") || value.contains("@@")) return "diff";
+        if (value.contains("json")) return "json";
+        if (value.contains("java")) return "java";
+        if (value.contains("kotlin") || value.contains(".kt")) return "kotlin";
+        if (value.contains("typescript") || value.contains(".ts")) return "typescript";
+        if (value.contains("javascript") || value.contains(".js")) return "javascript";
+        return "";
+    }
+
+    private LinearLayout.LayoutParams filterLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, UiKit.dp(this, 30));
+        lp.setMargins(0, UiKit.dp(this, 8), UiKit.dp(this, 6), UiKit.dp(this, 8));
+        return lp;
+    }
+
+    private void renderModelRows(LinearLayout list, SectionState state, String provider, String search, Dialog dialog) {
+        list.removeAllViews();
+        List<String> models = new ArrayList<>(state.availableModels);
+        models.sort((a, b) -> {
+            int fav = Boolean.compare(state.favoriteModels.contains(b), state.favoriteModels.contains(a));
+            if (fav != 0) return fav;
+            return a.compareToIgnoreCase(b);
+        });
+        for (String model : models) {
+            if (!"全部".equals(provider) && !providerForModel(model).equals(provider)) continue;
+            if (!matchesSearch(model, search)) continue;
+            boolean selected = model.equals(state.selectedModel);
+            LinearLayout row = UiKit.horizontal(this);
+            row.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+            row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+            TextView name = UiKit.text(this, model, selected ? UiKit.BLUE : UiKit.INK, 14);
+            name.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            name.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
+            row.addView(name, new LinearLayout.LayoutParams(0, -1, 1f));
+            TextView favorite = UiKit.text(this, state.favoriteModels.contains(model) ? "★" : "☆", state.favoriteModels.contains(model) ? Color.rgb(214, 144, 44) : UiKit.MUTED, 18);
+            favorite.setGravity(Gravity.CENTER);
+            favorite.setOnClickListener(v -> {
+                if (state.favoriteModels.contains(model)) state.favoriteModels.remove(model);
+                else state.favoriteModels.add(model);
+                renderModelRows(list, state, provider, search, dialog);
+            });
+            row.addView(favorite, new LinearLayout.LayoutParams(UiKit.dp(this, 42), -1));
+            name.setOnClickListener(v -> {
+                state.selectedModel = model;
+                composerView.updateState(composerStateFor(state.current(), state));
+                dialog.dismiss();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44));
+            lp.setMargins(0, UiKit.dp(this, 7), 0, 0);
+            list.addView(row, lp);
+        }
+    }
+
+    private void showAssistantDialog() {
+        if (currentSection != AppSection.CHAT && currentSection != AppSection.IMAGE) return;
+        SectionState state = state();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "助手"), new LinearLayout.LayoutParams(0, -2, 1f));
+        EditText search = searchInput("搜索助手");
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 34), 1f);
+        searchLp.setMargins(UiKit.dp(this, 8), 0, UiKit.dp(this, 8), 0);
+        titleRow.addView(search, searchLp);
+        Button create = iconGlyphButton("＋");
+        create.setTextSize(18);
+        create.setOnClickListener(v -> {
+            dialog.dismiss();
+            showAssistantEditor();
+        });
+        titleRow.addView(create, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(UiKit.gap(this, 10));
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = UiKit.vertical(this);
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        onSearchChanged(search, () -> renderAssistantRows(list, state, dialog, search.getText().toString()));
+        renderAssistantRows(list, state, dialog, "");
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 390)));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private TextView assistantRow(String value, boolean selected) {
+        TextView row = UiKit.text(this, value, selected ? UiKit.BLUE : UiKit.INK, 14);
+        row.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        row.setSingleLine(true);
+        row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
+        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        return row;
+    }
+
+    private View assistantRow(String value, boolean selected, SectionState state, Dialog dialog) {
+        LinearLayout row = UiKit.horizontal(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        TextView name = UiKit.text(this, value, selected ? UiKit.BLUE : UiKit.INK, 14);
+        name.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        name.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
+        row.addView(name, new LinearLayout.LayoutParams(0, -1, 1f));
+        Button favorite = iconGlyphButton(state.favoriteAssistants.contains(value) ? "★" : "☆");
+        favorite.setTextSize(16);
+        favorite.setOnClickListener(v -> {
+            if (state.favoriteAssistants.contains(value)) state.favoriteAssistants.remove(value);
+            else state.favoriteAssistants.add(value);
+            dialog.dismiss();
+            showAssistantDialog();
+        });
+        row.addView(favorite, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        row.setOnClickListener(v -> {
+            selectAssistant(value);
+            dialog.dismiss();
+        });
+        row.setOnLongClickListener(v -> {
+            showAssistantActions(value, dialog, v);
+            return true;
+        });
+        return row;
+    }
+
+    private void selectAssistant(String value) {
+        SectionState state = state();
+        ChatSession session = new ChatSession(
+                currentSection.id + "-" + value + "-" + System.currentTimeMillis(),
+                value,
+                value,
+                currentSection == AppSection.IMAGE ? "图片生成" : "聊天",
+                new ArrayList<>()
+        );
+        state.sessions.add(0, session);
+        state.selectedIndex = 0;
+        state.selectedSessionId = session.id;
+        state.selectedSessionId = session.id;
+        renderCurrent(true);
+    }
+
+    private void showAssistantActions(String name, Dialog parent, View anchor) {
+        showActionPopup(anchor, Arrays.asList("编辑", "分享", "删除"), action -> {
+            if ("编辑".equals(action)) {
+                parent.dismiss();
+                showAssistantEditor(name);
+            } else if ("分享".equals(action)) {
+                shareText("助手：" + name);
+            } else if ("删除".equals(action)) {
+                SectionState state = state();
+                state.availableAssistants.remove(name);
+                state.assistantOrders.remove(name);
+                chatAssistantPrompts.remove(name);
+                imageAssistantPrompts.remove(name);
+                parent.dismiss();
+                renderCurrent(false);
+            }
+        });
+    }
+
+    private void refreshModels() {
+        network.execute(() -> {
+            try {
+                JSONObject envelope = apiClient.get("/api/pricing");
+                JSONArray data = envelope.optJSONArray("data");
+                if (data == null) return;
+                List<String> chat = new ArrayList<>();
+                List<String> codex = new ArrayList<>();
+                List<String> claude = new ArrayList<>();
+                for (int i = 0; i < data.length(); i++) {
+                    JSONObject item = data.optJSONObject(i);
+                    String model = item == null ? "" : item.optString("model_name", item.optString("model", "")).trim();
+                    if (model.isEmpty()) continue;
+                    String n = model.toLowerCase(Locale.ROOT);
+                    if (!n.contains("image") && !n.contains("midjourney") && !n.contains("dall") && !n.contains("stable")) {
+                        addUnique(chat, model);
+                    }
+                    if (n.startsWith("gpt-") || n.contains("codex") || n.startsWith("deepseek") || n.startsWith("mimo")) {
+                        addUnique(codex, model);
+                    }
+                    if (n.startsWith("claude") || n.startsWith("deepseek") || n.startsWith("mimo")) {
+                        addUnique(claude, model);
+                    }
+                }
+                mainHandler.post(() -> {
+                    replaceModels(AppSection.CHAT, chat);
+                    replaceModels(AppSection.CODEX, codex);
+                    replaceModels(AppSection.CLAUDE, claude);
+                    if (currentSection.isConversation()) composerView.updateState(composerStateFor(state().current(), state()));
+                });
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void refreshAssistants() {
+        network.execute(() -> {
+            try {
+                String query = prefs.boundDeviceId().isEmpty() ? "" : "?device_id=" + ApiClient.enc(prefs.boundDeviceId());
+                JSONObject envelope = apiClient.get("/api/mobile/desktop-assistants" + query);
+                JSONArray data = envelope.optJSONArray("data");
+                List<String> chat = new ArrayList<>();
+                List<String> image = new ArrayList<>();
+                Map<String, String> chatPrompts = new HashMap<>();
+                Map<String, String> imagePrompts = new HashMap<>();
+                if (data != null) {
+                    for (int i = 0; i < data.length(); i++) {
+                        JSONObject item = data.optJSONObject(i);
+                        if (item == null) continue;
+                        String name = first(item, "name", "title", "assistantName");
+                        if (name.isEmpty()) continue;
+                        String scope = item.optString("scope", "chat");
+                        String prompt = item.optString("prompt", "");
+                        if ("draw".equals(scope) || "image".equals(scope)) {
+                            addUnique(image, name);
+                            imagePrompts.put(name, prompt);
+                        } else {
+                            addUnique(chat, name);
+                            chatPrompts.put(name, prompt);
+                        }
+                    }
+                }
+                mainHandler.post(() -> {
+                    chatAssistantPrompts.putAll(chatPrompts);
+                    imageAssistantPrompts.putAll(imagePrompts);
+                    replaceAssistants(AppSection.CHAT, chat);
+                    replaceAssistants(AppSection.IMAGE, image);
+                });
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void replaceModels(AppSection section, List<String> values) {
+        SectionState target = states.get(section);
+        if (target == null || values.isEmpty()) return;
+        target.availableModels.clear();
+        target.availableModels.addAll(values);
+        if (!target.availableModels.contains(target.selectedModel)) {
+            target.selectedModel = target.availableModels.get(0);
+        }
+    }
+
+    private void replaceAssistants(AppSection section, List<String> values) {
+        SectionState target = states.get(section);
+        if (target == null || values.isEmpty()) {
+            ensureBuiltInAssistants(section);
+            return;
+        }
+        target.availableAssistants.clear();
+        target.availableAssistants.addAll(values);
+        for (String value : values) {
+            if (!target.assistantOrders.containsKey(value)) target.assistantOrders.put(value, 100);
+        }
+        target.availableAssistants.sort(Comparator.comparingInt(value -> target.assistantOrders.getOrDefault(value, 100)));
+        target.availableAssistants.add("＋ 新建助手");
+    }
+
+    private void ensureBuiltInAssistants(AppSection section) {
+        SectionState target = states.get(section);
+        if (target == null) return;
+        Map<String, String> prompts = section == AppSection.IMAGE ? imageAssistantPrompts : chatAssistantPrompts;
+        if (section == AppSection.IMAGE) {
+            target.availableAssistants.removeIf(this::isLegacyImageAssistantName);
+            for (ChatSession session : target.sessions) {
+                if (isLegacyImageAssistantName(session.assistantLabel)) {
+                    session.assistantLabel = ImageAssistantCatalog.builtIns().get(0).name;
+                }
+            }
+            for (ImageAssistantCatalog.Assistant item : ImageAssistantCatalog.builtIns()) {
+                if (!target.availableAssistants.contains(item.name)) target.availableAssistants.add(item.name);
+                if (!target.assistantOrders.containsKey(item.name)) target.assistantOrders.put(item.name, 100);
+                if (!prompts.containsKey(item.name)) prompts.put(item.name, item.prompt);
+            }
+        } else {
+            List<String> defaults = Arrays.asList("通用助手", "文档助手", "代码助手", "翻译助手", "总结助手", "搜索助手");
+            for (String name : defaults) {
+                if (!target.availableAssistants.contains(name)) target.availableAssistants.add(name);
+                if (!target.assistantOrders.containsKey(name)) target.assistantOrders.put(name, 100);
+                if (!prompts.containsKey(name)) prompts.put(name, defaultAssistantPrompt(section, name));
+            }
+        }
+        target.availableAssistants.remove("＋ 新建助手");
+        target.availableAssistants.sort(Comparator.comparingInt(value -> target.assistantOrders.getOrDefault(value, 100)));
+        target.availableAssistants.add("＋ 新建助手");
+    }
+
+    private String defaultAssistantPrompt(AppSection section, String name) {
+        if (section == AppSection.IMAGE) {
+            if (name.contains("写实")) return "生成写实、自然、光影准确的图片，优先保证主体清晰和构图稳定。";
+            if (name.contains("海报")) return "生成适合电商和宣传用途的图片，强调商品主体、留白、视觉层级和可读性。";
+            if (name.contains("头像")) return "生成适合作为头像的图片，主体居中，背景简洁，风格统一。";
+            if (name.contains("编辑")) return "基于用户提供的图片进行编辑，尽量保留原图主体和结构。";
+            if (name.contains("风格")) return "根据用户描述进行风格迁移，保持主体可识别并统一画面风格。";
+            return "根据用户提示生成高质量图片，明确主体、风格、构图、光线和细节。";
+        }
+        if (name.contains("文档")) return "你是文档处理助手，擅长总结、改写、提炼结构和生成正式文档。";
+        if (name.contains("代码")) return "你是代码助手，优先给出可执行、可验证、边界清晰的工程方案。";
+        if (name.contains("翻译")) return "你是翻译助手，保持原意准确，语言自然，必要时解释关键术语。";
+        if (name.contains("总结")) return "你是总结助手，提炼重点、结论、风险和下一步行动。";
+        if (name.contains("搜索")) return "你是搜索助手，优先核对事实，给出清晰来源和判断。";
+        return "你是 OneAPI Android Chat 助手，回答清晰、直接、可执行。";
+    }
+
+    private boolean isLegacyImageAssistantName(String name) {
+        if (name == null) return false;
+        String clean = name.trim();
+        return clean.equals("Image")
+                || clean.equals("通用生图")
+                || clean.equals("写实摄影")
+                || clean.equals("电商海报")
+                || clean.equals("头像设计")
+                || clean.equals("图像编辑")
+                || clean.equals("风格迁移");
+    }
+
+    private void addUnique(List<String> list, String value) {
+        if (!list.contains(value)) list.add(value);
+    }
+
+    private void showAssistantEditor() {
+        showAssistantEditor("");
+    }
+
+    private void showAssistantEditor(String existingName) {
+        String editing = existingName == null ? "" : existingName.trim();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, editing.isEmpty() ? "新建助手" : "编辑助手"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        EditText name = input("助手名称");
+        name.setText(editing);
+        EditText sort = input("排序");
+        sort.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_SIGNED);
+        sort.setText(String.valueOf(state().assistantOrders.getOrDefault(editing, 100)));
+        EditText prompt = input("助手提示词");
+        prompt.setText(currentSection == AppSection.IMAGE
+                ? imageAssistantPrompts.getOrDefault(editing, "")
+                : chatAssistantPrompts.getOrDefault(editing, ""));
+        prompt.setSingleLine(false);
+        prompt.setMinLines(4);
+        panel.addView(labelRow("名称", name));
+        panel.addView(labelRow("排序", sort));
+        panel.addView(labelRow("提示词", prompt, UiKit.dp(this, 120)));
+        Button save = UiKit.ghostButton(this, "保存");
+        save.setOnClickListener(v -> {
+            String cleanName = name.getText().toString().trim();
+            if (cleanName.isEmpty()) {
+                Toast.makeText(this, "请输入助手名称", Toast.LENGTH_SHORT).show();
                 return;
             }
-            scrollDock.removeAllViews();
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_top, "聊天记录顶部", () -> {
-                localAutoScrollEnabled = false;
-                scrollConversationToTop();
-            }));
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_top, "当前气泡顶部", () -> scrollCurrentConversationItem(true)));
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_bottom, "当前气泡底部", () -> scrollCurrentConversationItem(false)));
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_bottom, "最新聊天记录", () -> {
-                localAutoScrollEnabled = true;
-                scrollConversationToBottom();
-            }));
-            scrollDock.setVisibility(View.VISIBLE);
-            updateScrollDockPosition();
-            return;
-        }
-        if (!isScrollableConversationSection() || content.getChildCount() == 0) {
-            scrollDock.setVisibility(View.GONE);
-            return;
-        }
-        scrollDock.removeAllViews();
-        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_top, "聊天记录顶部", () -> {
-            localAutoScrollEnabled = false;
-            if (contentScroll != null) {
-                contentScroll.smoothScrollTo(0, 0);
+            SectionState state = state();
+            if (!editing.isEmpty() && !editing.equals(cleanName)) {
+                state.availableAssistants.remove(editing);
+                state.assistantOrders.remove(editing);
+                for (ChatSession item : state.sessions) {
+                    if (editing.equals(item.assistantLabel)) {
+                        item.assistantLabel = cleanName;
+                        if (editing.equals(item.title)) item.title = cleanName;
+                    }
+                }
             }
-        }));
-        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_top, "当前气泡顶部", () -> scrollCurrentContentChild(true)));
-        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_bottom, "当前气泡底部", () -> scrollCurrentContentChild(false)));
-        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_bottom, "最新聊天记录", () -> {
-            localAutoScrollEnabled = true;
-            scrollToBottom();
-        }));
-        scrollDock.setVisibility(View.VISIBLE);
-        updateScrollDockPosition();
+            if (!state.availableAssistants.contains(cleanName)) {
+                state.availableAssistants.add(Math.max(0, state.availableAssistants.size() - 1), cleanName);
+            }
+            int order = 100;
+            try {
+                order = Integer.parseInt(sort.getText().toString().trim());
+            } catch (Exception ignored) {
+            }
+            state.assistantOrders.put(cleanName, order);
+            state.availableAssistants.remove("＋ 新建助手");
+            state.availableAssistants.sort(Comparator.comparingInt(value -> state.assistantOrders.getOrDefault(value, 100)));
+            state.availableAssistants.add("＋ 新建助手");
+            if (currentSection == AppSection.IMAGE) {
+                if (!editing.isEmpty() && !editing.equals(cleanName)) imageAssistantPrompts.remove(editing);
+                imageAssistantPrompts.put(cleanName, prompt.getText().toString());
+            } else {
+                if (!editing.isEmpty() && !editing.equals(cleanName)) chatAssistantPrompts.remove(editing);
+                chatAssistantPrompts.put(cleanName, prompt.getText().toString());
+            }
+            if (editing.isEmpty()) {
+                ChatSession session = new ChatSession(
+                        currentSection.id + "-" + cleanName + "-" + System.currentTimeMillis(),
+                        cleanName,
+                        cleanName,
+                        currentSection == AppSection.IMAGE ? "图片生成" : "聊天",
+                        new ArrayList<>()
+                );
+        state.sessions.add(0, session);
+        state.selectedIndex = 0;
+        state.selectedSessionId = session.id;
+            }
+            dialog.dismiss();
+            renderCurrent(true);
+        });
+        panel.addView(save, centeredButtonLp());
+        overlay.addView(panel, plainCenteredModalLp());
+        overlay.setTag("plain_modal");
+        overlay.setOnClickListener(v -> { });
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
     }
 
-    private void updateScrollDockPosition() {
-        if (scrollDock == null || shell == null) {
+    private void renderAssistantRows(LinearLayout list, SectionState state, Dialog dialog, String search) {
+        list.removeAllViews();
+        List<String> assistants = new ArrayList<>(state.availableAssistants);
+        assistants.remove("＋ 新建助手");
+        assistants.sort((a, b) -> {
+            int fav = Boolean.compare(state.favoriteAssistants.contains(b), state.favoriteAssistants.contains(a));
+            if (fav != 0) return fav;
+            return Integer.compare(state.assistantOrders.getOrDefault(a, 100), state.assistantOrders.getOrDefault(b, 100));
+        });
+        for (String value : assistants) {
+            if (!matchesSearch(value, search)) continue;
+            View row = assistantRow(value, state.current().assistantLabel.equals(value), state, dialog);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44));
+            lp.setMargins(0, UiKit.dp(this, 7), 0, 0);
+            list.addView(row, lp);
+        }
+        if (list.getChildCount() == 0) {
+            list.addView(UiKit.text(this, "没有匹配的助手", UiKit.MUTED, 14));
+        }
+    }
+
+    private boolean isLowValueDesktopLog(AppSection section, String title, String type, String text) {
+        if (section != AppSection.CODEX) return false;
+        String value = ((title == null ? "" : title) + " " + (type == null ? "" : type) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
+        return value.contains("输出已结束")
+                || value.contains("已完成本次回复")
+                || value.contains("completed response")
+                || value.contains("output ended")
+                || value.contains("finish_reason")
+                || value.trim().equals("complete")
+                || value.trim().equals("done");
+    }
+
+    private String desktopLogTitle(AppSection section, String title, String type, String command, String text) {
+        String raw = ((title == null ? "" : title) + " " + (type == null ? "" : type) + " " + (command == null ? "" : command) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
+        if (section == AppSection.CODEX) {
+            if (raw.contains("shell_command") || raw.contains("shell") || raw.contains("bash") || raw.contains("powershell") || raw.contains("cmd.exe")) {
+                return "正在执行 shell_command";
+            }
+            if (raw.contains("apply_patch") || raw.contains("patch")) return "正在修改文件";
+            if (raw.contains("read") || raw.contains("open") || raw.contains("cat") || raw.contains("rg ") || raw.contains("grep")) return "正在读取项目文件";
+            if (raw.contains("tool") || raw.contains("function")) return "正在执行工具";
+            if (raw.contains("error") || raw.contains("失败")) return "执行失败";
+            return title == null || title.trim().isEmpty() ? "执行日志" : title.trim();
+        }
+        if (title != null && !title.trim().isEmpty()) return title.trim();
+        if (type != null && !type.trim().isEmpty()) return type.trim();
+        return "执行日志";
+    }
+
+    private void showImageSizeDialog() {
+        if (currentSection != AppSection.IMAGE) return;
+        SectionState state = state();
+        showChoice("图片尺寸", Arrays.asList("正方形", "竖版", "横版"), imageSizeLabel(state.imageSize), value -> {
+            state.imageSize = imageSizeValue(value);
+            composerView.updateState(composerStateFor(state.current(), state));
+        });
+    }
+
+    private void showImageQualityDialog() {
+        if (currentSection != AppSection.IMAGE) return;
+        SectionState state = state();
+        showChoice("图片质量", Arrays.asList("低", "中", "高", "自动"), imageQualityLabel(state.imageQuality), value -> {
+            state.imageQuality = imageQualityValue(value);
+            composerView.updateState(composerStateFor(state.current(), state));
+        });
+    }
+
+    private String imageSizeLabel(String value) {
+        if ("1024x1536".equals(value)) return "竖版";
+        if ("1536x1024".equals(value)) return "横版";
+        return "正方形";
+    }
+
+    private String imageSizeValue(String label) {
+        if ("竖版".equals(label)) return "1024x1536";
+        if ("横版".equals(label)) return "1536x1024";
+        return "1024x1024";
+    }
+
+    private String imageQualityLabel(String value) {
+        if ("low".equals(value)) return "低";
+        if ("high".equals(value)) return "高";
+        if ("auto".equals(value)) return "自动";
+        return "中";
+    }
+
+    private String imageQualityValue(String label) {
+        if ("低".equals(label)) return "low";
+        if ("高".equals(label)) return "high";
+        if ("自动".equals(label)) return "auto";
+        return "medium";
+    }
+
+    private void showReasoningDialog() {
+        if (!currentSection.isConversation() || currentSection == AppSection.IMAGE) return;
+        SectionState state = state();
+        showChoice("Thinking", Arrays.asList("关闭思考", "低", "中", "高"), state.selectedReasoning, value -> {
+            state.selectedReasoning = value;
+            composerView.updateState(composerStateFor(state.current(), state));
+        });
+    }
+
+    private void showContextDialog() {
+        if (currentSection != AppSection.CHAT) return;
+        SectionState state = state();
+        showChoice("上下文", Arrays.asList("自动", "短上下文", "长上下文"), state.contextWindow, value -> {
+            state.contextWindow = value;
+            composerView.updateState(composerStateFor(state.current(), state));
+        });
+    }
+
+    private void showChoice(String title, List<String> options, String current, ChoiceHandler handler) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, title), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(UiKit.gap(this, 10));
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = UiKit.vertical(this);
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        for (String value : options) {
+            boolean selected = value.equals(current);
+            TextView row = UiKit.text(this, value, selected ? UiKit.BLUE : UiKit.INK, 14);
+            row.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+            row.setSingleLine(true);
+            row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
+            row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+            row.setOnClickListener(v -> {
+                handler.onChoice(value);
+                dialog.dismiss();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44));
+            lp.setMargins(0, UiKit.dp(this, 7), 0, 0);
+            list.addView(row, lp);
+        }
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, Math.min(UiKit.dp(this, 420), Math.max(UiKit.dp(this, 120), options.size() * UiKit.dp(this, 52)))));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void showSkillDialog() {
+        if (!currentSection.isDesktop()) {
+            Toast.makeText(this, "当前标签不需要 Skill", Toast.LENGTH_SHORT).show();
             return;
         }
-        FrameLayout.LayoutParams lp = scrollDock.getLayoutParams() instanceof FrameLayout.LayoutParams
-                ? (FrameLayout.LayoutParams) scrollDock.getLayoutParams()
-                : new FrameLayout.LayoutParams(dp(24), -2);
-        lp.gravity = Gravity.RIGHT | Gravity.TOP;
-        lp.setMargins(0, 0, dp(5), 0);
-        int shellHeight = shell.getHeight();
-        int dockHeight = scrollDock.getHeight() > 0 ? scrollDock.getHeight() : dp(108);
-        int top = dp(88);
-        int bottom = shellHeight - dp(170);
-        if (contentFrame != null && composerHost != null && shellHeight > 0) {
-            int[] shellLocation = new int[2];
-            int[] contentLocation = new int[2];
-            int[] composerLocation = new int[2];
-            shell.getLocationOnScreen(shellLocation);
-            contentFrame.getLocationOnScreen(contentLocation);
-            composerHost.getLocationOnScreen(composerLocation);
-            top = Math.max(0, contentLocation[1] - shellLocation[1]);
-            bottom = Math.max(top + dp(80), composerLocation[1] - shellLocation[1]);
-        } else if (currentKeyboardHeight > dp(120) && shellHeight > 0) {
-            bottom = Math.max(top + dp(80), shellHeight - currentKeyboardHeight - dp(120));
+        SectionState state = state();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, currentSection.label + " 扩展"), new LinearLayout.LayoutParams(0, -2, 1f));
+        EditText search = searchInput("搜索扩展");
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 34), 1f);
+        searchLp.setMargins(UiKit.dp(this, 8), 0, UiKit.dp(this, 8), 0);
+        titleRow.addView(search, searchLp);
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+
+        FlowTagLayout filters = new FlowTagLayout(this);
+        filters.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 4));
+
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = UiKit.vertical(this);
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        ensureDefaultCommands(state);
+        List<String> choices = new ArrayList<>(state.availableSkills);
+        final String[] selectedKind = new String[]{"全部"};
+        for (String label : Arrays.asList("全部", "Skill", "Plugin", "Command")) {
+            TextView chip = filterChip(label, label.equals(selectedKind[0]));
+            chip.setOnClickListener(v -> {
+                selectedKind[0] = label;
+                for (int i = 0; i < filters.getChildCount(); i++) {
+                    TextView item = (TextView) filters.getChildAt(i);
+                    boolean selected = item.getText().toString().equals(label);
+                    item.setTextColor(selected ? UiKit.BLUE : UiKit.MUTED);
+                    item.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 13), UiKit.LINE));
+                }
+                renderExtensionRows(list, choices, selectedKind[0], search.getText().toString(), state);
+            });
+            filters.addView(chip, filterLp());
         }
-        int targetTop = Math.max(0, (top + bottom - dockHeight) / 2);
-        if (lp.topMargin != targetTop) {
-            lp.topMargin = targetTop;
-            scrollDock.setLayoutParams(lp);
+        panel.addView(filters);
+        onSearchChanged(search, () -> renderExtensionRows(list, choices, selectedKind[0], search.getText().toString(), state));
+        renderExtensionRows(list, choices, selectedKind[0], "", state);
+        refreshExtensions(currentSection, () -> {
+            ensureDefaultCommands(state);
+            choices.clear();
+            choices.addAll(state.availableSkills);
+            renderExtensionRows(list, choices, selectedKind[0], search.getText().toString(), state);
+        });
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 360)));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void renderExtensionRows(LinearLayout list, List<String> choices, String kind, String search, SectionState state) {
+        list.removeAllViews();
+        List<String> sorted = new ArrayList<>(choices);
+        sorted.sort((a, b) -> {
+            int fav = Boolean.compare(state.favoriteExtensions.contains(b), state.favoriteExtensions.contains(a));
+            if (fav != 0) return fav;
+            int kindOrder = Integer.compare(extensionOrder(extensionKind(a, state)), extensionOrder(extensionKind(b, state)));
+            if (kindOrder != 0) return kindOrder;
+            return a.compareToIgnoreCase(b);
+        });
+        for (String choice : sorted) {
+            if (!"全部".equals(kind) && !extensionKind(choice, state).equals(kind)) continue;
+            if (!matchesSearch(choice, search)) continue;
+            LinearLayout row = skillRow(choice, state, () -> renderExtensionRows(list, choices, kind, search, state));
+            row.getChildAt(0).setOnClickListener(v -> {
+                if (state.selectedSkills.contains(choice)) {
+                    state.selectedSkills.remove(choice);
+                } else {
+                    state.selectedSkills.add(choice);
+                }
+                renderExtensionRows(list, choices, kind, search, state);
+                composerView.updateState(composerStateFor(state.current(), state));
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44));
+            lp.setMargins(0, UiKit.dp(this, 7), 0, 0);
+            list.addView(row, lp);
+        }
+        if (list.getChildCount() == 0) {
+            list.addView(UiKit.text(this, "没有匹配的扩展", UiKit.MUTED, 14));
         }
     }
 
-    private boolean isScrollableConversationSection() {
-        return "chat".equals(section)
-                || "image".equals(section)
-                || "assistants".equals(section)
-                || "codex".equals(section)
-                || "claude".equals(section);
+    private String extensionKind(String value) {
+        String clean = value == null ? "" : value.toLowerCase(Locale.ROOT);
+        if (clean.startsWith("plugin:") || clean.contains("plugin")) return "Plugin";
+        if (clean.startsWith("command:") || clean.contains("command") || clean.startsWith("cmd:")) return "Command";
+        return "Skill";
     }
 
-    private ImageButton scrollDockButton(int iconRes, String description, Runnable action) {
-        ImageButton b = new ImageButton(this);
-        b.setImageResource(iconRes);
-        b.setContentDescription(description);
-        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        b.setPadding(dp(6), dp(6), dp(6), dp(6));
-        b.setColorFilter(Color.rgb(61, 92, 114));
-        b.setAlpha(0.72f);
-        b.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        b.setOnClickListener(v -> action.run());
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(24), dp(24));
-        lp.setMargins(0, dp(3), 0, dp(3));
-        b.setLayoutParams(lp);
-        return b;
+    private String extensionKind(String value, SectionState state) {
+        ExtensionRef ref = state == null ? null : state.availableExtensionRefs.get(value);
+        if (ref == null) return extensionKind(value);
+        String kind = ref.kind.toLowerCase(Locale.ROOT);
+        if ("plugin".equals(kind)) return "Plugin";
+        if ("command".equals(kind)) return "Command";
+        return "Skill";
     }
 
-    private void scrollConversationToTop() {
-        if (conversationList == null) {
+    private int extensionOrder(String kind) {
+        if ("Skill".equals(kind)) return 0;
+        if ("Plugin".equals(kind)) return 1;
+        if ("Command".equals(kind)) return 2;
+        return 3;
+    }
+
+    private LinearLayout skillRow(String choice, SectionState state, Runnable refresh) {
+        boolean selected = state.selectedSkills.contains(choice);
+        LinearLayout row = UiKit.horizontal(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        TextView label = UiKit.text(this, (selected ? "✓ " : "  ") + choice, selected ? UiKit.BLUE : UiKit.INK, 14);
+        label.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        label.setSingleLine(true);
+        label.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 8), 0);
+        row.addView(label, new LinearLayout.LayoutParams(0, -1, 1f));
+        TextView favorite = UiKit.text(this, state.favoriteExtensions.contains(choice) ? "★" : "☆", state.favoriteExtensions.contains(choice) ? Color.rgb(214, 144, 44) : UiKit.MUTED, 18);
+        favorite.setGravity(Gravity.CENTER);
+        favorite.setOnClickListener(v -> {
+            if (state.favoriteExtensions.contains(choice)) state.favoriteExtensions.remove(choice);
+            else state.favoriteExtensions.add(choice);
+            if (refresh != null) refresh.run();
+        });
+        row.addView(favorite, new LinearLayout.LayoutParams(UiKit.dp(this, 42), -1));
+        return row;
+    }
+
+    private void ensureDefaultCommands(SectionState state) {
+        for (String command : Arrays.asList("/help", "/status", "/model", "/resume", "/compact", "/clear", "/permissions")) {
+            if (!state.availableSkills.contains(command)) {
+                state.availableSkills.add(command);
+                state.availableExtensionRefs.put(command, new ExtensionRef(command, "command", command, "客户端命令", "command"));
+            }
+        }
+    }
+
+    private void refreshExtensions(AppSection section) {
+        refreshExtensions(section, null);
+    }
+
+    private void refreshExtensions(AppSection section, Runnable afterRefresh) {
+        SectionState target = states.get(section);
+        if (target == null || !section.isDesktop()) return;
+        String deviceId = prefs.boundDeviceId();
+        network.execute(() -> {
+            try {
+                JSONArray data = desktopRepository.extensions(section.id, deviceId);
+                List<String> names = new ArrayList<>();
+                Map<String, ExtensionRef> refs = new LinkedHashMap<>();
+                for (int i = 0; i < data.length(); i++) {
+                    JSONObject item = data.optJSONObject(i);
+                    if (item == null) continue;
+                    String owner = item.optString("client", item.optString("owner", ""));
+                    if (!owner.isEmpty() && !"shared".equals(owner) && !"command".equals(owner) && !section.id.equals(owner)) {
+                        continue;
+                    }
+                    String name = first(item, "name", "id", "title");
+                    String id = first(item, "id", "name", "title");
+                    String kind = item.optString("kind", extensionKind(name).toLowerCase(Locale.ROOT));
+                    if (!name.isEmpty()) {
+                        String label = uniqueExtensionLabel(names, name, kind);
+                        names.add(label);
+                        refs.put(label, new ExtensionRef(id.isEmpty() ? name : id, kind, name, item.optString("description", ""), owner));
+                    }
+                }
+                for (String command : Arrays.asList("/help", "/status", "/model", "/resume", "/compact", "/clear", "/permissions")) {
+                    if (!names.contains(command)) {
+                        names.add(command);
+                        refs.put(command, new ExtensionRef(command, "command", command, "客户端命令", "command"));
+                    }
+                }
+                if (names.isEmpty()) return;
+                mainHandler.post(() -> {
+                    target.availableSkills.clear();
+                    target.availableSkills.addAll(names);
+                    target.availableExtensionRefs.clear();
+                    target.availableExtensionRefs.putAll(refs);
+                    if (currentSection == section) {
+                        composerView.updateState(composerStateFor(target.current(), target));
+                    }
+                    if (afterRefresh != null) afterRefresh.run();
+                });
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private String uniqueExtensionLabel(List<String> existing, String name, String kind) {
+        if (!existing.contains(name)) return name;
+        String label = name + " · " + extensionKind(kind);
+        int index = 2;
+        while (existing.contains(label)) {
+            label = name + " · " + extensionKind(kind) + " " + index;
+            index++;
+        }
+        return label;
+    }
+
+    private void togglePermission() {
+        if (!currentSection.isDesktop()) return;
+        SectionState state = state();
+        state.fullPermission = !state.fullPermission;
+        composerView.updateState(composerStateFor(state.current(), state));
+    }
+
+    private ComposerState composerStateFor(ChatSession session, SectionState state) {
+        boolean enabled = !currentSection.isDesktop() || !prefs.boundDeviceId().isEmpty();
+        return new ComposerState(
+                currentSection.id,
+                projectLabelForComposer(session),
+                currentSection.isDesktop() ? "" : session.assistantLabel,
+                modelLabelForComposer(state),
+                "",
+                "",
+                currentSection == AppSection.IMAGE ? imageSizeLabel(state.imageSize) : "",
+                currentSection == AppSection.IMAGE ? imageQualityLabel(state.imageQuality) : "",
+                new ArrayList<>(state.selectedSkills),
+                state.fullPermission,
+                currentSection.isDesktop(),
+                enabled,
+                currentSection.isDesktop()
+                        ? (enabled ? "向 " + currentSection.label + " 发送任务" : "请先绑定 PC/Mac 客户端")
+                        : "输入消息"
+        );
+    }
+
+    private void sendMessage(String text) {
+        if (!currentSection.isConversation()) return;
+        if (currentSection.isDesktop() && prefs.boundDeviceId().isEmpty()) {
+            Toast.makeText(this, "请先在系统设置中绑定 PC/Mac 客户端", Toast.LENGTH_SHORT).show();
             return;
         }
-        RecyclerView.LayoutManager manager = conversationList.getLayoutManager();
-        if (manager instanceof LinearLayoutManager) {
-            ((LinearLayoutManager) manager).scrollToPositionWithOffset(0, conversationList.getPaddingTop());
-        } else {
-            conversationList.smoothScrollToPosition(0);
-        }
+        AppSection targetSection = currentSection;
+        SectionState state = state();
+        ChatSession session = state.current();
+        long now = System.currentTimeMillis();
+        List<Uri> attachments = new ArrayList<>(selectedAttachments);
+        selectedAttachments.clear();
+        updateAttachmentPreview();
+        session.messages.add(new ChatMessage("user", composeUserMessage(text, attachments), now));
+        ChatMessage progress = new ChatMessage("assistant", progressTextFor(targetSection), now + 1);
+        session.messages.add(progress);
+        composerView.clearInput();
+        composerView.setSending(true);
+        renderCurrent(true);
+        persistSession(targetSection, session);
+        network.execute(() -> {
+            String result;
+            try {
+                if (targetSection == AppSection.CHAT) {
+                    String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
+                    chatController.stream(
+                            state.selectedModel,
+                            (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow,
+                            null,
+                            text,
+                            reasoningValue(state.selectedReasoning),
+                            (fullText, done) -> mainHandler.post(() -> {
+                                progress.text = fullText.trim().isEmpty() ? "正在思考..." : fullText;
+                                if (currentSection == targetSection && state.current() == session) {
+                                    renderCurrent(true);
+                                }
+                                if (done) {
+                                    persistSession(targetSection, session);
+                                    composerView.setSending(false);
+                                }
+                            }));
+                    result = progress.text;
+                } else {
+                    result = networkSend(targetSection, state, session, text, attachments);
+                }
+                if (result.trim().isEmpty()) {
+                    result = "本次没有返回可显示内容。";
+                }
+            } catch (Exception error) {
+                result = "请求失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
+            }
+            String finalResult = result;
+            mainHandler.post(() -> {
+                if (targetSection == AppSection.CHAT && !finalResult.startsWith("请求失败：")) {
+                    return;
+                }
+                progress.text = finalResult;
+                composerView.setSending(false);
+                persistSession(targetSection, session);
+                if (currentSection == targetSection && state.current() == session) {
+                    renderCurrent(true);
+                }
+            });
+        });
     }
 
-    private void scrollCurrentConversationItem(boolean top) {
-        if (conversationList == null || conversationList.getChildCount() == 0) {
-            return;
+    private void editMessage(ConversationDisplayItem item) {
+        List<Uri> embedded = imageUrisFromMessage(item.text);
+        if (!embedded.isEmpty()) {
+            selectedAttachments.clear();
+            selectedAttachments.addAll(embedded);
+            updateAttachmentPreview();
         }
-        int center = conversationList.getHeight() / 2;
-        View target = null;
-        int bestDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < conversationList.getChildCount(); i++) {
-            View child = conversationList.getChildAt(i);
-            int childTop = child.getTop();
-            int childBottom = child.getBottom();
-            if (childTop <= center && childBottom >= center) {
-                target = child;
+        String cleanText = textWithoutImageUris(item.text);
+        composerView.setInputText(cleanText);
+        if (!embedded.isEmpty()) Toast.makeText(this, "已把图片加入输入框附件", Toast.LENGTH_SHORT).show();
+    }
+
+    private String composeUserMessage(String text, List<Uri> attachments) {
+        StringBuilder out = new StringBuilder();
+        if (attachments != null) {
+            for (Uri uri : attachments) {
+                out.append(uri).append('\n');
+                String body = readTextAttachment(uri, 20000);
+                if (body != null && !body.trim().isEmpty()) {
+                    out.append("\n附件：").append(displayName(uri)).append("\n```text\n")
+                            .append(body.trim())
+                            .append("\n```\n");
+                } else {
+                    out.append("附件：").append(displayName(uri)).append("\n");
+                }
+            }
+        }
+        out.append(text == null ? "" : text);
+        return out.toString().trim();
+    }
+
+    private List<Uri> imageUrisFromMessage(String text) {
+        List<Uri> out = new ArrayList<>();
+        if (text == null) return out;
+        for (String line : text.split("\\n")) {
+            if (isImageText(line.trim())) out.add(Uri.parse(line.trim()));
+        }
+        return out;
+    }
+
+    private String textWithoutImageUris(String text) {
+        if (text == null) return "";
+        StringBuilder out = new StringBuilder();
+        for (String line : text.split("\\n")) {
+            if (!isImageText(line.trim())) {
+                if (out.length() > 0) out.append('\n');
+                out.append(line);
+            }
+        }
+        return out.toString().trim();
+    }
+
+    private void deleteMessage(ConversationDisplayItem item) {
+        if (!currentSection.isConversation()) return;
+        SectionState state = state();
+        ChatSession session = state.current();
+        for (int i = session.messages.size() - 1; i >= 0; i--) {
+            ChatMessage message = session.messages.get(i);
+            if (message.timestamp == item.timestamp && message.text.equals(item.text) && message.role.equals(item.role)) {
+                session.messages.remove(i);
                 break;
             }
-            int childCenter = childTop + Math.max(0, child.getHeight()) / 2;
-            int distance = Math.abs(childCenter - center);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                target = child;
+        }
+        persistSession(currentSection, session);
+        renderCurrent(false);
+    }
+
+    private boolean isImageText(String text) {
+        if (text == null) return false;
+        String value = text.trim().toLowerCase(Locale.ROOT);
+        return value.startsWith("content:") || value.startsWith("file:") || value.startsWith("data:image/")
+                || value.endsWith(".png") || value.endsWith(".jpg") || value.endsWith(".jpeg") || value.endsWith(".webp");
+    }
+
+    private String networkSend(AppSection targetSection, SectionState state, ChatSession session, String text, List<Uri> attachments) throws Exception {
+        if (targetSection == AppSection.CHAT) {
+            String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
+            return chatController.send(state.selectedModel, (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow, null, text, reasoningValue(state.selectedReasoning));
+        }
+        if (targetSection == AppSection.IMAGE) {
+            String assistantPrompt = imageAssistantPrompts.getOrDefault(session.assistantLabel, "");
+            String imagePrompt = assistantPrompt.isEmpty() ? text : assistantPrompt + "\n\n用户图片需求：" + text;
+            if (attachments != null && !attachments.isEmpty()) {
+                return imageController.edit(this, attachments.get(0), imagePrompt, state.imageSize, state.imageQuality);
+            }
+            return imageController.generate(imagePrompt, state.imageSize, state.imageQuality, false);
+        }
+        if (targetSection.isDesktop()) {
+            String deviceId = prefs.boundDeviceId();
+            if (deviceId.isEmpty()) {
+                return "请先在设置中绑定 PC/Mac 客户端。";
+            }
+            desktopController.sendJob(
+                    targetSection.id,
+                    deviceId,
+                    session.id,
+                    text,
+                    state.selectedModel,
+                    reasoningValue(state.selectedReasoning),
+                    state.fullPermission ? "full" : "restricted",
+                    extensionRefs(state)
+            );
+            return "已发送到 " + targetSection.label + "。\n\n"
+                    + "| 项目 | 权限 | Skill |\n"
+                    + "| --- | --- | --- |\n"
+                    + "| " + session.projectLabel + " | " + (state.fullPermission ? "全权限" : "受限") + " | " + (state.selectedSkills.isEmpty() ? "未选择" : state.selectedSkills) + " |";
+        }
+        return "";
+    }
+
+    private org.json.JSONArray extensionRefs(SectionState state) throws Exception {
+        org.json.JSONArray refs = new org.json.JSONArray();
+        for (String skill : state.selectedSkills) {
+            ExtensionRef ref = state.availableExtensionRefs.get(skill);
+            String id = ref == null ? skill : ref.id;
+            String kind = ref == null ? "skill" : ref.kind;
+            String name = ref == null ? skill : ref.name;
+            refs.put(new org.json.JSONObject()
+                    .put("id", id)
+                    .put("kind", kind)
+                    .put("name", name));
+        }
+        return refs;
+    }
+
+    private String progressTextFor(AppSection section) {
+        if (section == AppSection.IMAGE) return "正在生成图片...";
+        if (section.isDesktop()) return "正在发送到桌面端...";
+        return "正在思考...";
+    }
+
+    private String desktopAttachmentTags(String text) {
+        String value = text == null ? "" : text;
+        Matcher matcher = MARKDOWN_IMAGE.matcher(value);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(fileReferenceTag(matcher.group(1))));
+        }
+        matcher.appendTail(buffer);
+        StringBuilder out = new StringBuilder();
+        String[] lines = buffer.toString().split("\\n", -1);
+        for (String line : lines) {
+            String clean = line.trim();
+            if (isDesktopImageReference(clean)) {
+                if (out.length() > 0) out.append('\n');
+                out.append(fileReferenceTag(clean));
+            } else {
+                if (out.length() > 0) out.append('\n');
+                out.append(line);
             }
         }
-        if (target == null) {
-            return;
-        }
-        int dy = top
-                ? target.getTop() - conversationList.getPaddingTop()
-                : target.getBottom() - (conversationList.getHeight() - conversationList.getPaddingBottom());
-        conversationList.smoothScrollBy(0, dy);
+        return out.toString();
     }
 
-    private void scrollCurrentContentChild(boolean top) {
-        if (contentScroll == null || content == null || content.getChildCount() == 0) {
-            return;
-        }
-        int center = contentScroll.getScrollY() + contentScroll.getHeight() / 2;
-        View target = null;
-        int bestDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < content.getChildCount(); i++) {
-            View child = content.getChildAt(i);
-            int childTop = child.getTop();
-            int childBottom = child.getBottom();
-            if (childTop <= center && childBottom >= center) {
-                target = child;
-                break;
+    private boolean isDesktopImageReference(String value) {
+        String clean = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        return clean.startsWith("data:image/")
+                || clean.startsWith("content:")
+                || clean.startsWith("file:")
+                || clean.endsWith(".png")
+                || clean.endsWith(".jpg")
+                || clean.endsWith(".jpeg")
+                || clean.endsWith(".webp")
+                || clean.contains("/image/");
+    }
+
+    private String fileReferenceTag(String value) {
+        String name = value == null ? "" : value.trim();
+        int query = name.indexOf('?');
+        if (query > 0) name = name.substring(0, query);
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (slash >= 0 && slash + 1 < name.length()) name = name.substring(slash + 1);
+        if (name.length() > 42) name = name.substring(0, 39) + "...";
+        if (name.isEmpty() || name.startsWith("data:image/")) name = "图片附件";
+        return "`附件：" + name + "`";
+    }
+
+    private String projectLabelForComposer(ChatSession session) {
+        if (currentSection.isDesktop()) return shortFolderLabel(lastPathSegment(session.projectLabel));
+        return "";
+    }
+
+    private String lastPathSegment(String value) {
+        String clean = value == null ? "" : value.trim().replace('\\', '/');
+        while (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+        int index = clean.lastIndexOf('/');
+        return index >= 0 ? clean.substring(index + 1) : clean;
+    }
+
+    private String modelLabelForComposer(SectionState state) {
+        return currentSection == AppSection.IMAGE ? "" : state.selectedModel;
+    }
+
+    private String shortFolderLabel(String value) {
+        String clean = value == null ? "" : value.trim();
+        if (clean.length() <= 8) return clean;
+        return clean.substring(0, 8) + "...";
+    }
+
+    private String reasoningValue(String label) {
+        if ("低".equals(label)) return "low";
+        if ("高".equals(label)) return "high";
+        if ("关闭思考".equals(label)) return "off";
+        return "medium";
+    }
+
+    private SectionState state() {
+        return states.get(currentSection);
+    }
+
+    private void seedState() {
+        long now = System.currentTimeMillis();
+        SectionState chat = new SectionState(
+                Arrays.asList(
+                        new ChatSession("chat-1", "默认聊天", "通用助手", "聊天", messages(now,
+                                new ChatMessage("assistant", "这是新的原生 Android 会话界面。少量消息时保持从顶部开始布局。", now))),
+                        new ChatSession("chat-2", "文档讨论", "文档助手", "项目文件夹 / docs", messages(now,
+                                new ChatMessage("user", "切换到这条会话时助手要自动变成文档助手。", now),
+                                new ChatMessage("assistant", "已按当前会话更新助手标签，不需要先手动切助手。", now + 1)))
+                ),
+                Arrays.asList("搜索", "总结", "翻译")
+        );
+        chat.availableModels.addAll(Arrays.asList("gpt-5.4", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "claude-sonnet-4-6"));
+        states.put(AppSection.CHAT, chat);
+        String defaultImageAssistant = ImageAssistantCatalog.builtIns().get(0).name;
+        SectionState image = new SectionState(
+                Arrays.asList(new ChatSession("image-1", "生图", defaultImageAssistant, "图片生成", messages(now,
+                        new ChatMessage("assistant", "图片生成页会复用同一套稳定 RecyclerView 链路。", now)))),
+                Arrays.asList("写实", "海报", "头像")
+        );
+        image.selectedModel = "gpt-image-2";
+        states.put(AppSection.IMAGE, image);
+        ensureBuiltInAssistants(AppSection.CHAT);
+        ensureBuiltInAssistants(AppSection.IMAGE);
+        SectionState codex = new SectionState(
+                Arrays.asList(
+                        new ChatSession("codex-1", "Android 重构", "Codex", "D:/WorkSpace/NewAPI/OneAPI_Android", messages(now,
+                                new ChatMessage("assistant", "## 当前边界\n- 切标签不销毁输入区\n- 切会话只 submitList\n- 权限切换只更新图标\n\n| 功能 | 处理 |\n| --- | --- |\n| 表格 | 局部横向滚动 |\n| thinking | 独立块结束 |", now))),
+                        new ChatSession("codex-2", "接口联调", "Codex", "D:/WorkSpace/NewAPI/new-api-main", messages(now,
+                                new ChatMessage("assistant", "Codex 的会话和 Skill 状态只保存在 Codex，不会带到 Claude。", now)))
+                ),
+                Arrays.asList("android", "room", "api", "release")
+        );
+        codex.availableModels.addAll(Arrays.asList("gpt-5.4-codex", "gpt-5.4", "deepseek-v4-pro"));
+        codex.selectedModel = "gpt-5.4-codex";
+        states.put(AppSection.CODEX, codex);
+        SectionState claude = new SectionState(
+                Arrays.asList(
+                        new ChatSession("claude-1", "需求整理", "Claude", "D:/WorkSpace/NewAPI/OneAPI_PC_Rebuild", messages(now,
+                                new ChatMessage("assistant", "思考过程\n先识别用户需求边界。\n\n结论先说：Claude 的 Skill 状态独立保存，选择后立即显示在输入框上方。", now))),
+                        new ChatSession("claude-2", "UI 检查", "Claude", "D:/WorkSpace/NewAPI/OneAPI_Android", messages(now,
+                                new ChatMessage("assistant", "| 检查项 | 结果 | 备注 |\n| --- | --- | --- |\n| 标签换行 | 正常 | 从项目文件夹标签开始同一容器流式排列 |\n| 输入法 | 正常 | 滚动按钮按聊天区域重新居中 |", now)))
+                ),
+                Arrays.asList("prd", "review", "ux")
+        );
+        claude.availableModels.addAll(Arrays.asList("claude-sonnet-4-6", "claude-opus-4-5", "deepseek-v4-pro", "mimo-v2.5-pro"));
+        claude.selectedModel = "claude-sonnet-4-6";
+        states.put(AppSection.CLAUDE, claude);
+        states.put(AppSection.SETTINGS, new SectionState(new ArrayList<>(), new ArrayList<>()));
+        states.put(AppSection.WALLET, new SectionState(new ArrayList<>(), new ArrayList<>()));
+        states.put(AppSection.SERVICE, new SectionState(new ArrayList<>(), new ArrayList<>()));
+        states.put(AppSection.SUBSCRIPTIONS, new SectionState(new ArrayList<>(), new ArrayList<>()));
+    }
+
+    private static List<ChatMessage> messages(long now, ChatMessage... messages) {
+        return new ArrayList<>(Arrays.asList(messages));
+    }
+
+    private static final class SectionState {
+        final List<ChatSession> sessions;
+        final List<String> availableSkills;
+        final Map<String, ExtensionRef> availableExtensionRefs = new LinkedHashMap<>();
+        final List<String> availableModels = new ArrayList<>();
+        final List<String> availableAssistants = new ArrayList<>();
+        final Map<String, Integer> assistantOrders = new HashMap<>();
+        final Set<String> favoriteModels = new LinkedHashSet<>();
+        final Set<String> favoriteAssistants = new LinkedHashSet<>();
+        final Set<String> favoriteExtensions = new LinkedHashSet<>();
+        final Set<String> selectedSkills = new LinkedHashSet<>();
+        final Set<String> pinnedSessionIds = new LinkedHashSet<>();
+        final Set<String> deletedSessionIds = new LinkedHashSet<>();
+        final Map<String, String> renamedSessionTitles = new HashMap<>();
+        int selectedIndex;
+        boolean fullPermission;
+        String selectedModel = "gpt-5.4";
+        String selectedReasoning = "中";
+        String contextWindow = "自动";
+        String imageSize = "1024x1024";
+        String imageQuality = "medium";
+        String selectedSessionId = "";
+
+        SectionState(List<ChatSession> sessions, List<String> availableSkills) {
+            this.sessions = new ArrayList<>(sessions);
+            this.availableSkills = new ArrayList<>(availableSkills);
+            for (String skill : this.availableSkills) {
+                availableExtensionRefs.put(skill, new ExtensionRef(skill, inferExtensionKind(skill), skill, "", "shared"));
             }
-            int childCenter = childTop + Math.max(0, child.getHeight()) / 2;
-            int distance = Math.abs(childCenter - center);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                target = child;
-            }
-        }
-        if (target == null) {
-            return;
-        }
-        int nextY = top
-                ? Math.max(0, target.getTop() - dp(8))
-                : Math.max(0, target.getBottom() - contentScroll.getHeight() + dp(8));
-        nextY = Math.min(nextY, contentBottomScrollY(contentScroll));
-        contentScroll.smoothScrollTo(0, nextY);
-    }
-
-    private void scrollToBottomOnce(String key) {
-        if (key == null || !autoScrolledSections.add(key)) {
-            return;
-        }
-        scrollToBottom();
-    }
-
-    private void toast(String message) {
-        android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show();
-    }
-
-    private void setSending(boolean running) {
-        requestRunning = running;
-        if (running) {
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        } else {
-            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        }
-        syncSendButton();
-    }
-
-    private void syncSendButton() {
-        if (activeSendButton == null) {
-            return;
-        }
-        activeSendButton.setImageResource(requestRunning ? R.drawable.ic_stop_square : R.drawable.ic_send_plane);
-        activeSendButton.setContentDescription(requestRunning ? "停止" : "发送");
-        activeSendButton.setBackground(new ColorDrawable(Color.TRANSPARENT));
-    }
-
-    private int dp(int value) {
-        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
-    }
-
-    private LinearLayout.LayoutParams compactFullButtonLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(42));
-        lp.setMargins(0, dp(6), 0, 0);
-        return lp;
-    }
-
-    private LinearLayout.LayoutParams compactCenteredButtonLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(150), dp(42));
-        lp.gravity = Gravity.CENTER_HORIZONTAL;
-        lp.setMargins(0, dp(6), 0, 0);
-        return lp;
-    }
-
-    private class FlowLayout extends ViewGroup {
-        FlowLayout(Context context) {
-            super(context);
-            setClipToPadding(false);
-            setClipChildren(false);
-        }
-
-        @Override
-        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-            int widthLimit = Math.max(0, MeasureSpec.getSize(widthMeasureSpec) - getPaddingLeft() - getPaddingRight());
-            int usedWidth = 0;
-            int lineHeight = 0;
-            int totalHeight = getPaddingTop() + getPaddingBottom();
-            int maxWidth = getPaddingLeft() + getPaddingRight();
-            for (int i = 0; i < getChildCount(); i++) {
-                View child = getChildAt(i);
-                if (child.getVisibility() == View.GONE) {
-                    continue;
+            for (ChatSession session : this.sessions) {
+                if (!session.assistantLabel.isEmpty() && !availableAssistants.contains(session.assistantLabel)) {
+                    availableAssistants.add(session.assistantLabel);
+                    assistantOrders.put(session.assistantLabel, 100);
                 }
-                measureChildWithMargins(child, widthMeasureSpec, 0, heightMeasureSpec, totalHeight);
-                MarginLayoutParams lp = childMarginLayoutParams(child);
-                int childWidth = child.getMeasuredWidth() + lp.leftMargin + lp.rightMargin;
-                int childHeight = child.getMeasuredHeight() + lp.topMargin + lp.bottomMargin;
-                if (usedWidth > 0 && usedWidth + childWidth > widthLimit) {
-                    totalHeight += lineHeight;
-                    maxWidth = Math.max(maxWidth, getPaddingLeft() + getPaddingRight() + usedWidth);
-                    usedWidth = 0;
-                    lineHeight = 0;
-                }
-                usedWidth += childWidth;
-                lineHeight = Math.max(lineHeight, childHeight);
-            }
-            totalHeight += lineHeight;
-            maxWidth = Math.max(maxWidth, getPaddingLeft() + getPaddingRight() + usedWidth);
-            setMeasuredDimension(resolveSize(maxWidth, widthMeasureSpec), resolveSize(totalHeight, heightMeasureSpec));
-        }
-
-        @Override
-        protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
-            int widthLimit = Math.max(0, right - left - getPaddingLeft() - getPaddingRight());
-            int x = getPaddingLeft();
-            int y = getPaddingTop();
-            int lineHeight = 0;
-            for (int i = 0; i < getChildCount(); i++) {
-                View child = getChildAt(i);
-                if (child.getVisibility() == View.GONE) {
-                    continue;
-                }
-                MarginLayoutParams lp = childMarginLayoutParams(child);
-                int childWidth = child.getMeasuredWidth();
-                int childHeight = child.getMeasuredHeight();
-                int requiredWidth = lp.leftMargin + childWidth + lp.rightMargin;
-                if (x > getPaddingLeft() && x - getPaddingLeft() + requiredWidth > widthLimit) {
-                    x = getPaddingLeft();
-                    y += lineHeight;
-                    lineHeight = 0;
-                }
-                int childLeft = x + lp.leftMargin;
-                int childTop = y + lp.topMargin;
-                child.layout(childLeft, childTop, childLeft + childWidth, childTop + childHeight);
-                x += requiredWidth;
-                lineHeight = Math.max(lineHeight, lp.topMargin + childHeight + lp.bottomMargin);
             }
         }
 
-        private MarginLayoutParams childMarginLayoutParams(View child) {
-            ViewGroup.LayoutParams raw = child.getLayoutParams();
-            if (raw instanceof MarginLayoutParams) {
-                return (MarginLayoutParams) raw;
+        ChatSession current() {
+            if (sessions.isEmpty()) {
+                return new ChatSession("empty", "空会话", "", "", new ArrayList<>());
             }
-            return new MarginLayoutParams(raw == null ? generateDefaultLayoutParams() : raw);
-        }
-
-        @Override
-        protected ViewGroup.LayoutParams generateDefaultLayoutParams() {
-            MarginLayoutParams lp = new MarginLayoutParams(-2, -2);
-            lp.setMargins(0, 0, dp(8), dp(6));
-            return lp;
-        }
-
-        @Override
-        public ViewGroup.LayoutParams generateLayoutParams(android.util.AttributeSet attrs) {
-            return new MarginLayoutParams(getContext(), attrs);
-        }
-
-        @Override
-        protected ViewGroup.LayoutParams generateLayoutParams(ViewGroup.LayoutParams p) {
-            return new MarginLayoutParams(p);
-        }
-
-        @Override
-        protected boolean checkLayoutParams(ViewGroup.LayoutParams p) {
-            return p instanceof MarginLayoutParams;
+            if (!selectedSessionId.isEmpty()) {
+                for (int i = 0; i < sessions.size(); i++) {
+                    if (selectedSessionId.equals(sessions.get(i).id)) {
+                        selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+            selectedIndex = Math.max(0, Math.min(selectedIndex, sessions.size() - 1));
+            ChatSession selected = sessions.get(selectedIndex);
+            selectedSessionId = selected.id;
+            return selected;
         }
     }
 
-    private static class ConversationUiItem {
-        static final int TYPE_MESSAGE = 1;
-        static final int TYPE_IMAGE = 2;
-        static final int TYPE_LOG = 3;
-        static final int TYPE_LOAD_EARLIER = 4;
-        static final int TYPE_EMPTY = 5;
-        static final int TYPE_LOADING = 6;
+    private static String inferExtensionKind(String value) {
+        String clean = value == null ? "" : value.toLowerCase(Locale.ROOT);
+        if (clean.startsWith("/") || clean.startsWith("command:") || clean.startsWith("cmd:")) return "command";
+        if (clean.startsWith("plugin:") || clean.contains("plugin")) return "plugin";
+        return "skill";
+    }
 
-        final int type;
-        final long stableId;
-        final String mode;
+    private static final class ExtensionRef {
+        final String id;
+        final String kind;
+        final String name;
+        final String description;
+        final String client;
+
+        ExtensionRef(String id, String kind, String name, String description, String client) {
+            this.id = id == null ? "" : id;
+            this.kind = kind == null || kind.trim().isEmpty() ? "skill" : kind.trim().toLowerCase(Locale.ROOT);
+            this.name = name == null ? this.id : name;
+            this.description = description == null ? "" : description;
+            this.client = client == null ? "" : client;
+        }
+    }
+
+    private interface ChoiceHandler {
+        void onChoice(String value);
+    }
+
+    private interface TextHandler {
+        void onText(String value);
+    }
+
+    private static class SimpleSeekListener implements SeekBar.OnSeekBarChangeListener {
+        interface Change {
+            void onChange(int progress);
+        }
+
+        private final Change change;
+
+        SimpleSeekListener(Change change) {
+            this.change = change;
+        }
+
+        @Override
+        public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+            if (fromUser && change != null) change.onChange(progress);
+        }
+
+        @Override
+        public void onStartTrackingTouch(SeekBar seekBar) {
+        }
+
+        @Override
+        public void onStopTrackingTouch(SeekBar seekBar) {
+            if (change != null) change.onChange(seekBar.getProgress());
+        }
+    }
+
+    private static final class ChatSession {
+        final String id;
+        String title;
+        String assistantLabel;
+        final String projectLabel;
+        final List<ChatMessage> messages;
+
+        ChatSession(String id, String title, String assistantLabel, String projectLabel, List<ChatMessage> messages) {
+            this.id = id;
+            this.title = title;
+            this.assistantLabel = assistantLabel;
+            this.projectLabel = projectLabel;
+            this.messages = messages;
+        }
+    }
+
+    private static final class ChatMessage {
         final String role;
-        final String text;
+        String text;
         final long timestamp;
-        final int messageIndex;
-        final JSONObject log;
-        final Runnable action;
+        final boolean log;
 
-        private ConversationUiItem(int type, long stableId, String mode, String role, String text, long timestamp, int messageIndex, JSONObject log, Runnable action) {
-            this.type = type;
-            this.stableId = stableId;
-            this.mode = mode == null ? "" : mode;
-            this.role = role == null ? "" : role;
-            this.text = text == null ? "" : text;
+        ChatMessage(String role, String text, long timestamp) {
+            this.role = role;
+            this.text = text;
             this.timestamp = timestamp;
-            this.messageIndex = messageIndex;
+            this.log = false;
+        }
+
+        private ChatMessage(String role, String text, long timestamp, boolean log) {
+            this.role = role;
+            this.text = text;
+            this.timestamp = timestamp;
             this.log = log;
-            this.action = action;
         }
 
-        static ConversationUiItem message(String mode, String role, String text, long timestamp, int index) {
-            return new ConversationUiItem(TYPE_MESSAGE, stableId(mode, role, text, timestamp, index), mode, role, text, timestamp, index, null, null);
-        }
-
-        static ConversationUiItem image(String mode, String role, String source, long timestamp, int index) {
-            return new ConversationUiItem(TYPE_IMAGE, stableId(mode, role, source, timestamp, index), mode, role, source, timestamp, index, null, null);
-        }
-
-        static ConversationUiItem log(String mode, JSONObject log, int index) {
-            String key = log == null ? "" : log.optString("id", log.optString("eventId", ""));
-            return new ConversationUiItem(TYPE_LOG, stableId(mode, "log", key, log == null ? 0 : log.optLong("timestamp", 0), index), mode, "", "", 0, index, log, null);
-        }
-
-        static ConversationUiItem loadEarlier(String text, Runnable action) {
-            return new ConversationUiItem(TYPE_LOAD_EARLIER, stableId("load", "", text, 0, 0), "", "", text, 0, -1, null, action);
-        }
-
-        static ConversationUiItem empty(String text) {
-            return new ConversationUiItem(TYPE_EMPTY, stableId("empty", "", text, 0, 0), "", "", text, 0, -1, null, null);
-        }
-
-        static ConversationUiItem loading(String text) {
-            return new ConversationUiItem(TYPE_LOADING, stableId("loading", "", text, 0, 0), "", "", text, 0, -1, null, null);
-        }
-
-        private static long stableId(String mode, String role, String text, long timestamp, int index) {
-            String key = mode + "|" + role + "|" + timestamp + "|" + index + "|" + (text == null ? "" : text);
-            return key.hashCode();
+        static ChatMessage log(String text, long timestamp) {
+            return new ChatMessage("assistant", text, timestamp, true);
         }
     }
 
-    private class ConversationAdapter extends RecyclerView.Adapter<ConversationAdapter.Holder> {
-        private final List<ConversationUiItem> items = new ArrayList<>();
+    private static final class DesktopTimelineRow {
+        final ChatMessage message;
+        final String stableKey;
+        final long timestamp;
+        final int priority;
+        final int index;
 
-        ConversationAdapter() {
-            setHasStableIds(false);
+        DesktopTimelineRow(ChatMessage message, String stableKey, long timestamp, int priority, int index) {
+            this.message = message;
+            this.stableKey = stableKey == null ? "" : stableKey.trim();
+            this.timestamp = timestamp;
+            this.priority = priority;
+            this.index = index;
         }
 
-        void setItems(List<ConversationUiItem> next) {
-            items.clear();
-            if (next != null) {
-                items.addAll(next);
+        boolean duplicates(DesktopTimelineRow other) {
+            if (other == null || message == null || other.message == null) return false;
+            if (message.log != other.message.log) return false;
+            if (!message.role.equals(other.message.role)) return false;
+            String text = normalizedText(message.text);
+            String otherText = normalizedText(other.message.text);
+            if (text.isEmpty() || !text.equals(otherText)) return false;
+            return Math.abs(timestamp - other.timestamp) <= duplicateWindowMs(other);
+        }
+
+        private long duplicateWindowMs(DesktopTimelineRow other) {
+            if (message != null && !message.log && "user".equals(message.role)
+                    && (stableKey.contains(":prompt") || (other != null && other.stableKey.contains(":prompt")))) {
+                return 300000L;
             }
-            notifyDataSetChanged();
+            return 3000L;
         }
 
-        @Override
-        public long getItemId(int position) {
-            return position >= 0 && position < items.size() ? items.get(position).stableId : RecyclerView.NO_ID;
-        }
-
-        @Override
-        public int getItemViewType(int position) {
-            return items.get(position).type;
-        }
-
-        @Override
-        public Holder onCreateViewHolder(android.view.ViewGroup parent, int viewType) {
-            FrameLayout frame = new FrameLayout(MainActivity.this);
-            frame.setLayoutParams(new RecyclerView.LayoutParams(-1, -2));
-            frame.setClipToPadding(false);
-            frame.setClipChildren(false);
-            return new Holder(frame);
-        }
-
-        @Override
-        public void onBindViewHolder(Holder holder, int position) {
-            ConversationUiItem item = items.get(position);
-            clearFrame(holder.frame);
-            View child;
-            if (item.type == ConversationUiItem.TYPE_IMAGE) {
-                child = imageResultBubble(item.text, item.timestamp, item.mode, item.messageIndex, item.role);
-            } else if (item.type == ConversationUiItem.TYPE_LOG) {
-                child = logRowView(item.log);
-            } else if (item.type == ConversationUiItem.TYPE_LOAD_EARLIER) {
-                child = loadEarlierButton(item.text, item.action == null ? () -> { } : item.action);
-            } else if (item.type == ConversationUiItem.TYPE_EMPTY) {
-                child = card(label(section), item.text);
-            } else if (item.type == ConversationUiItem.TYPE_LOADING) {
-                child = loadingCard(item.text);
-            } else {
-                child = messageBubble(item.role, item.text, item.timestamp, recyclerMessageMode(item), item.messageIndex);
-            }
-            if (child != null) {
-                holder.frame.addView(child, frameLayoutParamsForRecyclerChild(child));
-            }
-        }
-
-        private String recyclerMessageMode(ConversationUiItem item) {
-            String mode = item == null || item.mode == null ? "" : item.mode;
-            if ("user".equals(item == null ? "" : item.role) || mode.endsWith(":plain") || mode.endsWith(":native")) {
-                return mode;
-            }
-            return mode + ":native";
-        }
-
-        private FrameLayout.LayoutParams frameLayoutParamsForRecyclerChild(View child) {
-            ViewGroup.LayoutParams raw = child.getLayoutParams();
-            int width = raw == null ? -1 : raw.width;
-            int height = raw == null ? -2 : raw.height;
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width, height);
-            if (raw instanceof ViewGroup.MarginLayoutParams) {
-                ViewGroup.MarginLayoutParams margins = (ViewGroup.MarginLayoutParams) raw;
-                lp.setMargins(margins.leftMargin, margins.topMargin, margins.rightMargin, margins.bottomMargin);
-            } else {
-                lp.setMargins(0, dp(6), 0, dp(6));
-            }
-            return lp;
-        }
-
-        @Override
-        public void onViewRecycled(Holder holder) {
-            clearFrame(holder.frame);
-        }
-
-        @Override
-        public int getItemCount() {
-            return items.size();
-        }
-
-        private void clearFrame(FrameLayout frame) {
-            destroyWebViews(frame);
-            frame.removeAllViews();
-        }
-
-        class Holder extends RecyclerView.ViewHolder {
-            final FrameLayout frame;
-
-            Holder(FrameLayout frame) {
-                super(frame);
-                this.frame = frame;
-            }
+        private String normalizedText(String value) {
+            String text = value == null ? "" : value.trim().replaceAll("\\s+", " ");
+            return text.length() > 240 ? text.substring(0, 240) : text;
         }
     }
 }

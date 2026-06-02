@@ -19,8 +19,8 @@ android {
         applicationId 'center.oneapi.mobile'
         minSdk 26
         targetSdk 35
-        versionCode 10
-        versionName '1.0.9'
+        versionCode 20
+        versionName '2.0.0-native'
     }
 
     splits {
@@ -36,6 +36,9 @@ android {
         release {
             signingConfig signingConfigs.release
         }
+        debug {
+            signingConfig signingConfigs.release
+        }
     }
 
     compileOptions {
@@ -46,9 +49,10 @@ android {
 
 dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'androidx.core:core:1.13.1'
     implementation 'androidx.room:room-runtime:2.6.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     annotationProcessor 'androidx.room:room-compiler:2.6.1'
-    implementation 'androidx.paging:paging-runtime:3.3.2'
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
