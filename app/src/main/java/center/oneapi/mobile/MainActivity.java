@@ -26,10 +26,14 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
+import android.text.Spannable;
+import android.text.SpannableString;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
@@ -41,16 +45,27 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 import android.widget.TextView;
+
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+
+import center.oneapi.mobile.data.ConversationRepository;
+import center.oneapi.mobile.data.ConversationSessionEntity;
+import center.oneapi.mobile.data.ConversationMessageEntity;
+import center.oneapi.mobile.data.OneApiRoomDatabase;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -91,8 +106,8 @@ public class MainActivity extends Activity {
     private static final int LINE = Color.argb(88, 145, 160, 184);
     private static final int GLASS = Color.argb(205, 255, 255, 255);
     private static final int GLASS_SOFT = Color.argb(158, 255, 255, 255);
-    private static final int INITIAL_RENDER_ITEM_COUNT = 40;
-    private static final int RENDER_PAGE_INCREMENT = 40;
+    private static final int INITIAL_RENDER_ITEM_COUNT = 24;
+    private static final int RENDER_PAGE_INCREMENT = 24;
     private static final int RENDER_CHUNK_SIZE = 6;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -101,9 +116,12 @@ public class MainActivity extends Activity {
 
     private FrameLayout shell;
     private LinearLayout root;
+    private FrameLayout contentFrame;
     private LinearLayout content;
     private LinearLayout composerHost;
     private LinearLayout scrollDock;
+    private RecyclerView conversationList;
+    private ConversationAdapter conversationAdapter;
     private View loadingOverlay;
     private LinearLayout topNav;
     private TextView navMenuSeparator;
@@ -118,7 +136,8 @@ public class MainActivity extends Activity {
     private Spinner permissionSpinner;
     private ImageButton activeSendButton;
     private LinearLayout attachmentPreviewHost;
-    private LinearLayout extensionPreviewHost;
+    private FlowLayout extensionPreviewHost;
+    private View extensionPrimaryTag;
     private LinearLayout logDetailHost;
     private String activeComposerMode = "";
     private String selectedCliModel = "";
@@ -143,6 +162,7 @@ public class MainActivity extends Activity {
     private boolean desktopSessionsRefreshRunning = false;
     private boolean localAutoScrollEnabled = true;
     private boolean scrollDockDirectionDown = true;
+    private int currentKeyboardHeight = 0;
     private int lastContentScrollY = 0;
     private long lastCliRefreshAt = 0L;
     private float swipeStartX = 0f;
@@ -165,10 +185,12 @@ public class MainActivity extends Activity {
     private final Set<String> autoScrolledSections = new HashSet<>();
     private final Set<String> expandedLogIds = new HashSet<>();
     private final List<Uri> selectedAttachmentUris = new ArrayList<>();
-    private final List<JSONObject> selectedExtensionRefs = new ArrayList<>();
+    private final Map<String, List<JSONObject>> selectedExtensionRefsByClient = new HashMap<>();
     private final Map<String, String> markdownHtmlCache = new LinkedHashMap<>();
     private View activeBubbleActions;
     private int renderGeneration = 0;
+    private final List<ConversationUiItem> currentConversationItems = new ArrayList<>();
+    private int currentConversationGeneration = 0;
 
     private String section = "chat";
     private String boundDeviceId = "";
@@ -326,7 +348,22 @@ public class MainActivity extends Activity {
         content = vertical();
         content.setPadding(dp(18), dp(12), dp(18), dp(18));
         scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        contentFrame = new FrameLayout(this);
+        contentFrame.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        conversationList = new RecyclerView(this);
+        conversationList.setClipToPadding(false);
+        conversationList.setClipChildren(false);
+        conversationList.setPadding(dp(18), dp(12), dp(18), dp(18));
+        LinearLayoutManager conversationLayout = new LinearLayoutManager(this);
+        conversationLayout.setStackFromEnd(false);
+        conversationList.setLayoutManager(conversationLayout);
+        conversationList.setItemAnimator(null);
+        conversationList.setHasFixedSize(false);
+        conversationAdapter = new ConversationAdapter();
+        conversationList.setAdapter(conversationAdapter);
+        conversationList.setVisibility(View.GONE);
+        contentFrame.addView(conversationList, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(contentFrame, new LinearLayout.LayoutParams(-1, 0, 1));
         composerHost = vertical();
         composerHost.setPadding(0, 0, 0, dp(12));
         composerHost.setBackground(round(Color.argb(224, 255, 255, 255), dp(18), Color.TRANSPARENT));
@@ -335,10 +372,11 @@ public class MainActivity extends Activity {
         scrollDock = vertical();
         scrollDock.setVisibility(View.GONE);
         scrollDock.setPadding(0, 0, 0, 0);
-        FrameLayout.LayoutParams dockLp = new FrameLayout.LayoutParams(dp(42), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        dockLp.setMargins(0, 0, dp(10), 0);
+        FrameLayout.LayoutParams dockLp = new FrameLayout.LayoutParams(dp(24), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        dockLp.setMargins(0, 0, dp(5), 0);
         shell.addView(scrollDock, dockLp);
         setContentView(shell);
+        syncLocalConversationStoresToRoom();
         refreshBottomNav();
         renderSection();
         refreshModels();
@@ -463,11 +501,37 @@ public class MainActivity extends Activity {
         resetContentScrollPosition();
         activeBubbleActions = null;
         cliProjectTagView = null;
+        prepareSectionHost(targetSection);
         clearContainer(content);
         clearContainer(composerHost);
-        content.addView(centerLoadingView("正在加载" + label(targetSection) + "..."));
+        if (isConversationSection(targetSection)) {
+            showConversationLoading("正在加载" + label(targetSection) + "...");
+        } else {
+            content.addView(centerLoadingView("正在加载" + label(targetSection) + "..."));
+        }
         updateScrollDock();
-        handler.post(() -> renderSectionBody(targetSection, generation));
+        renderSectionBody(targetSection, generation);
+    }
+
+    private boolean isConversationSection(String value) {
+        return "chat".equals(value)
+                || "image".equals(value)
+                || "assistants".equals(value)
+                || "codex".equals(value)
+                || "claude".equals(value);
+    }
+
+    private void prepareSectionHost(String targetSection) {
+        boolean conversation = isConversationSection(targetSection);
+        if (contentScroll != null) {
+            contentScroll.setVisibility(conversation ? View.GONE : View.VISIBLE);
+        }
+        if (conversationList != null) {
+            conversationList.setVisibility(conversation ? View.VISIBLE : View.GONE);
+        }
+        if (!conversation) {
+            submitConversationItems(new ArrayList<>(), false);
+        }
     }
 
     private void renderSectionBody(String targetSection, int generation) {
@@ -501,7 +565,18 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             clearContainer(content);
             clearContainer(composerHost);
-            content.addView(messageBubble("assistant", "页面渲染失败，请切换标签后重试。"));
+            if (isConversationSection(targetSection)) {
+                submitConversationItems(listConversationItem(ConversationUiItem.empty("页面渲染失败，请切换标签后重试。")), false);
+                if ("codex".equals(targetSection) || "claude".equals(targetSection)) {
+                    renderCliComposerOnly(targetSection);
+                } else if ("chat".equals(targetSection)) {
+                    composerHost.addView(composer("输入消息", "chat", this::sendChatMessage));
+                } else if ("image".equals(targetSection)) {
+                    composerHost.addView(composer("描述要生成或编辑的图片", "image", this::sendImageMessage));
+                }
+            } else {
+                content.addView(messageBubble("assistant", "页面渲染失败，请切换标签后重试。"));
+            }
         }
         updateScrollDock();
     }
@@ -538,17 +613,50 @@ public class MainActivity extends Activity {
         int startIndex = Math.max(0, messages.length() - visibleCount);
         if (messages.length() == 0) {
             hidePageLoading();
-            content.addView(card(label(mode), "暂无聊天记录。点击会话记录可切换历史会话，或直接输入开始新会话。"));
+            submitConversationItems(listConversationItem(ConversationUiItem.empty("暂无聊天记录。点击会话记录可切换历史会话，或直接输入开始新会话。")), false);
             updateScrollDock();
             return;
         }
+        List<ConversationUiItem> items = new ArrayList<>();
         if (startIndex > 0) {
-            content.addView(loadEarlierButton("加载更早聊天记录（剩余 " + startIndex + " 条）", () -> {
+            items.add(ConversationUiItem.loadEarlier("加载更早聊天记录（剩余 " + startIndex + " 条）", () -> {
                 localVisibleMessageCounts.put(mode, visibleCount + RENDER_PAGE_INCREMENT);
                 renderLocalConversationNow(mode, false);
             }));
         }
-        handler.post(() -> renderLocalConversationChunk(mode, messages, startIndex, startIndex, generation, scrollLatest));
+        for (int i = startIndex; i < messages.length(); i++) {
+            JSONObject item = messages.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            String type = item.optString("type", "text");
+            String role = item.optString("role", "assistant");
+            String text = cleanDisplayText(item.optString("text", ""));
+            if (text.isEmpty()) {
+                continue;
+            }
+            long timestamp = item.optLong("timestamp", 0);
+            if ("image".equals(type)) {
+                items.add(ConversationUiItem.image(mode, role, text, timestamp, i));
+            } else {
+                String renderMode = (!"user".equals(role) && i < messages.length() - 3) ? mode + ":plain" : mode;
+                items.add(ConversationUiItem.message(renderMode, role, text, timestamp, i));
+            }
+        }
+        if (generation != renderGeneration) {
+            return;
+        }
+        hidePageLoading();
+        if (scrollLatest) {
+            localAutoScrollEnabled = true;
+        }
+        submitConversationItems(items, scrollLatest);
+    }
+
+    private List<ConversationUiItem> listConversationItem(ConversationUiItem item) {
+        List<ConversationUiItem> items = new ArrayList<>();
+        items.add(item);
+        return items;
     }
 
     private void renderLocalConversationChunk(String mode, JSONArray messages, int startIndex, int index, int generation, boolean scrollLatest) {
@@ -693,6 +801,69 @@ public class MainActivity extends Activity {
         if (loadingOverlay != null && loadingOverlay.getParent() instanceof FrameLayout) {
             ((FrameLayout) loadingOverlay.getParent()).removeView(loadingOverlay);
         }
+    }
+
+    private void showConversationLoading(String text) {
+        List<ConversationUiItem> items = new ArrayList<>();
+        items.add(ConversationUiItem.loading(text));
+        submitConversationItems(items, false);
+    }
+
+    private void submitConversationItems(List<ConversationUiItem> items, boolean scrollLatest) {
+        currentConversationItems.clear();
+        if (items != null) {
+            currentConversationItems.addAll(items);
+        }
+        if (conversationAdapter != null) {
+            conversationAdapter.setItems(currentConversationItems);
+        }
+        if (conversationList != null) {
+            conversationList.requestLayout();
+            conversationList.invalidate();
+            conversationList.post(() -> {
+                conversationList.requestLayout();
+                conversationList.invalidate();
+                updateScrollDock();
+            });
+        }
+        if (scrollLatest) {
+            scrollConversationToBottom();
+        }
+        updateScrollDock();
+    }
+
+    private void appendConversationItem(ConversationUiItem item, boolean scrollLatest) {
+        if (item == null) {
+            return;
+        }
+        currentConversationItems.add(item);
+        if (conversationAdapter != null) {
+            conversationAdapter.setItems(currentConversationItems);
+        }
+        if (conversationList != null) {
+            conversationList.requestLayout();
+            conversationList.invalidate();
+        }
+        if (scrollLatest) {
+            scrollConversationToBottom();
+        }
+    }
+
+    private void scrollConversationToBottom() {
+        if (conversationList == null || conversationAdapter == null || conversationAdapter.getItemCount() == 0) {
+            return;
+        }
+        int position = conversationAdapter.getItemCount() - 1;
+        conversationList.post(() -> {
+            conversationList.scrollToPosition(position);
+            conversationList.postDelayed(() -> conversationList.scrollToPosition(position), 40L);
+            conversationList.postDelayed(() -> conversationList.scrollToPosition(position), 120L);
+            conversationList.postDelayed(() -> conversationList.scrollToPosition(position), 280L);
+            conversationList.postDelayed(() -> {
+                conversationList.scrollToPosition(position);
+                updateScrollDock();
+            }, 520L);
+        });
     }
 
     private void renderPlaceholder(String name) {
@@ -1082,18 +1253,24 @@ public class MainActivity extends Activity {
         }
 
         interactionBar = vertical();
-        content.addView(interactionBar);
         timeline = vertical();
-        content.addView(timeline);
         JSONArray cached = cliTimelineCache.get(client);
         if (cached == null || cached.length() == 0) {
-            timeline.addView(loadingCard("正在同步客户端会话记录..."));
+            showConversationLoading("正在同步客户端会话记录...");
             cliTimelineSignatures.put(client, "loading:" + System.currentTimeMillis());
         } else {
             renderTimeline(cached, true);
         }
         composerHost.addView(composer("输入要执行的任务", client, () -> sendCliJob(client)));
         pollSessionsOnce(false);
+    }
+
+    private void renderCliComposerOnly(String client) {
+        if (composerHost == null || !"codex".equals(client) && !"claude".equals(client)) {
+            return;
+        }
+        clearContainer(composerHost);
+        composerHost.addView(composer("输入要执行的任务", client, () -> sendCliJob(client)));
     }
 
     private View composer(String hint, String mode, Runnable sendAction) {
@@ -1109,16 +1286,20 @@ public class MainActivity extends Activity {
         attachmentPreviewHost = horizontal();
         attachmentPreviewHost.setPadding(0, 0, 0, dp(8));
         box.addView(attachmentPreviewHost);
-        extensionPreviewHost = horizontal();
-        extensionPreviewHost.setPadding(0, 0, 0, dp(8));
-        box.addView(extensionPreviewHost);
         renderAttachmentPreview();
-        renderExtensionPreview();
+        extensionPreviewHost = new FlowLayout(this);
+        extensionPreviewHost.setPadding(0, 0, 0, dp(6));
+        extensionPrimaryTag = null;
         if ("chat".equals(mode) || "image".equals(mode)) {
-            box.addView(currentAssistantTag(mode));
+            extensionPrimaryTag = currentAssistantTag(mode);
         } else if ("codex".equals(mode) || "claude".equals(mode)) {
-            box.addView(currentCliProjectTag(mode));
+            extensionPrimaryTag = currentCliProjectTag(mode);
         }
+        if (extensionPrimaryTag != null) {
+            extensionPreviewHost.addView(extensionPrimaryTag);
+        }
+        box.addView(extensionPreviewHost, new LinearLayout.LayoutParams(-1, -2));
+        renderExtensionPreview();
         activeInput = input(hint);
         if ("assistants".equals(section)) {
             activeInput.setBackground(round(Color.argb(18, 255, 255, 255), dp(14), LINE));
@@ -1267,10 +1448,13 @@ public class MainActivity extends Activity {
         }
         if ("codex".equals(mode) || "claude".equals(mode)) {
             addToolButton(left, R.drawable.tool_history, "会话记录", () -> showRecentSessions(mode));
-            addToolButton(left, selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority, "权限模式", () -> {
+            final ImageButton[] permissionButton = new ImageButton[1];
+            permissionButton[0] = addToolButton(left, selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority, "权限模式", () -> {
                 selectedPermission = selectedPermission.contains("全权限") ? "受限模式" : "全权限模式";
                 prefs.edit().putString("selected_permission", selectedPermission).apply();
-                renderSection();
+                if (permissionButton[0] != null) {
+                    permissionButton[0].setImageResource(selectedPermission.contains("全权限") ? R.drawable.tool_authority : R.drawable.tool_noauthority);
+                }
             });
             addToolButton(left, R.drawable.tool_module, "模型选择", () -> showModelChoice("模型选择", "codex".equals(mode) ? codexModels : claudeModels, selectedCliModelFor(mode), mode, value -> {
                 if ("codex".equals(mode)) {
@@ -1289,7 +1473,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void addToolButton(LinearLayout row, int iconRes, String description, Runnable action) {
+    private ImageButton addToolButton(LinearLayout row, int iconRes, String description, Runnable action) {
         ImageButton button = new ImageButton(this);
         button.setImageResource(iconRes);
         button.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
@@ -1301,6 +1485,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(34), dp(34));
         lp.setMargins(0, 0, dp(8), 0);
         row.addView(button, lp);
+        return button;
     }
 
     private void renderAttachmentPreview() {
@@ -1444,13 +1629,21 @@ public class MainActivity extends Activity {
             return;
         }
         extensionPreviewHost.removeAllViews();
-        if (selectedExtensionRefs.isEmpty()) {
-            extensionPreviewHost.setVisibility(View.GONE);
+        if (extensionPrimaryTag != null) {
+            extensionPreviewHost.addView(extensionPrimaryTag);
+        }
+        if (!"codex".equals(activeComposerMode) && !"claude".equals(activeComposerMode)) {
+            extensionPreviewHost.setVisibility(extensionPrimaryTag == null ? View.GONE : View.VISIBLE);
+            return;
+        }
+        List<JSONObject> refs = extensionRefsFor(activeComposerMode);
+        if (refs.isEmpty()) {
+            extensionPreviewHost.setVisibility(extensionPrimaryTag == null ? View.GONE : View.VISIBLE);
             return;
         }
         extensionPreviewHost.setVisibility(View.VISIBLE);
-        for (int i = 0; i < selectedExtensionRefs.size(); i++) {
-            JSONObject ref = selectedExtensionRefs.get(i);
+        for (int i = 0; i < refs.size(); i++) {
+            JSONObject ref = refs.get(i);
             LinearLayout tag = horizontal();
             tag.setGravity(Gravity.CENTER_VERTICAL);
             tag.setPadding(dp(9), 0, dp(5), 0);
@@ -1462,9 +1655,11 @@ public class MainActivity extends Activity {
             Button remove = iconButton("×");
             remove.setTextSize(13);
             final int index = i;
+            final String client = activeComposerMode;
             remove.setOnClickListener(v -> {
-                if (index >= 0 && index < selectedExtensionRefs.size()) {
-                    selectedExtensionRefs.remove(index);
+                List<JSONObject> activeRefs = extensionRefsFor(client);
+                if (index >= 0 && index < activeRefs.size()) {
+                    activeRefs.remove(index);
                     renderExtensionPreview();
                 }
             });
@@ -1475,19 +1670,30 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void addExtensionRef(String kind, String name) {
+    private List<JSONObject> extensionRefsFor(String client) {
+        String key = "claude".equals(client) ? "claude" : "codex";
+        List<JSONObject> refs = selectedExtensionRefsByClient.get(key);
+        if (refs == null) {
+            refs = new ArrayList<>();
+            selectedExtensionRefsByClient.put(key, refs);
+        }
+        return refs;
+    }
+
+    private void addExtensionRef(String client, String kind, String name) {
         String normalized = name == null ? "" : name.trim();
         if (normalized.isEmpty() || "默认".equals(normalized)) {
             return;
         }
-        for (JSONObject ref : selectedExtensionRefs) {
+        List<JSONObject> refs = extensionRefsFor(client);
+        for (JSONObject ref : refs) {
             if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
                 renderExtensionPreview();
                 return;
             }
         }
         try {
-            selectedExtensionRefs.add(new JSONObject().put("kind", kind).put("id", normalized).put("name", normalized));
+            refs.add(new JSONObject().put("kind", kind).put("id", normalized).put("name", normalized));
             renderExtensionPreview();
         } catch (Exception ignored) {
         }
@@ -1875,6 +2081,82 @@ public class MainActivity extends Activity {
             localConversationRootCache.remove(mode);
         }
         prefs.edit().putString(mode + "_conversation_store", raw).apply();
+        syncLocalConversationStoreToRoom(mode, root);
+    }
+
+    private void syncLocalConversationStoresToRoom() {
+        syncLocalConversationStoreToRoom("chat", localConversationStore("chat"));
+        syncLocalConversationStoreToRoom("image", localConversationStore("image"));
+    }
+
+    private void syncLocalConversationStoreToRoom(String mode, JSONObject root) {
+        if (mode == null || root == null) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                JSONArray sessions = root.optJSONArray("sessions");
+                if (sessions == null) {
+                    return;
+                }
+                for (int i = 0; i < sessions.length(); i++) {
+                    JSONObject source = sessions.optJSONObject(i);
+                    if (source == null) {
+                        continue;
+                    }
+                    String sessionId = source.optString("id", "").trim();
+                    if (sessionId.isEmpty()) {
+                        continue;
+                    }
+                    ConversationSessionEntity session = new ConversationSessionEntity();
+                    session.sessionId = sessionId;
+                    session.mode = mode;
+                    session.groupName = cleanDisplayText(source.optString("group", localConversationGroup(mode)));
+                    session.title = cleanDisplayText(source.optString("title", "新会话"));
+                    session.updatedAt = source.optLong("updatedAt", 0);
+                    session.preview = localSessionPreview(source);
+                    JSONArray messages = source.optJSONArray("messages");
+                    List<ConversationMessageEntity> rows = new ArrayList<>();
+                    if (messages != null) {
+                        for (int j = 0; j < messages.length(); j++) {
+                            JSONObject item = messages.optJSONObject(j);
+                            if (item == null) {
+                                continue;
+                            }
+                            ConversationMessageEntity row = new ConversationMessageEntity();
+                            row.messageId = sessionId + ":" + j + ":" + item.optLong("timestamp", 0);
+                            row.sessionId = sessionId;
+                            row.mode = mode;
+                            row.kind = "message";
+                            row.role = item.optString("role", "");
+                            row.contentType = item.optString("type", "text");
+                            row.text = cleanDisplayText(item.optString("text", ""));
+                            row.timestamp = item.optLong("timestamp", 0);
+                            row.sortIndex = j;
+                            row.rawJson = item.toString();
+                            rows.add(row);
+                        }
+                    }
+                    OneApiRoomDatabase.get(this).conversationDao().replaceSessionMessages(session, rows);
+                }
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private String localSessionPreview(JSONObject session) {
+        JSONArray messages = session == null ? null : session.optJSONArray("messages");
+        if (messages == null) {
+            return "";
+        }
+        for (int i = messages.length() - 1; i >= 0; i--) {
+            JSONObject item = messages.optJSONObject(i);
+            String text = item == null ? "" : cleanDisplayText(item.optString("text", ""));
+            if (!text.isEmpty()) {
+                return text.substring(0, Math.min(120, text.length()));
+            }
+        }
+        return "";
     }
 
     private JSONObject findLocalSession(JSONObject root, String id) {
@@ -2044,14 +2326,15 @@ public class MainActivity extends Activity {
             String preview = imageSourceForBubble(uri);
             if (!preview.isEmpty()) {
                 appendLocalConversation("chat", "user", "image", preview);
-                content.addView(imageResultBubble(preview, System.currentTimeMillis(), "chat", -1, "user"));
+                appendConversationItem(ConversationUiItem.image("chat", "user", preview, System.currentTimeMillis(), -1), true);
             }
         }
         appendLocalConversation("chat", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "chat", -1));
+        appendConversationItem(ConversationUiItem.message("chat", "user", prompt, System.currentTimeMillis(), -1), true);
         long assistantStartedAt = System.currentTimeMillis();
         LinearLayout live = addStreamingBubble("assistant", assistantStartedAt);
         updateStreamingBubble(live, "正在思考...", assistantStartedAt, false);
+        appendConversationItem(ConversationUiItem.message("chat:plain", "assistant", "正在思考...", assistantStartedAt, -1), true);
         localAutoScrollEnabled = true;
         scrollToBottom();
         runNetwork(() -> {
@@ -2095,7 +2378,7 @@ public class MainActivity extends Activity {
                     replaceStreamingBubble(live, text, assistantStartedAt);
                     appendLocalConversation("chat", "assistant", "text", text);
                 }
-                scrollToBottomIfLocalAuto();
+                renderLocalConversationNow("chat", true);
             });
         });
     }
@@ -2161,12 +2444,13 @@ public class MainActivity extends Activity {
             String preview = imageSourceForBubble(uri);
             if (!preview.isEmpty()) {
                 appendLocalConversation("image", "user", "image", preview);
-                content.addView(imageResultBubble(preview, System.currentTimeMillis(), "image", -1, "user"));
+                appendConversationItem(ConversationUiItem.image("image", "user", preview, System.currentTimeMillis(), -1), true);
             }
         }
         int userIndex = appendLocalConversation("image", "user", "text", prompt);
-        content.addView(messageBubble("user", prompt, System.currentTimeMillis(), "image", userIndex));
+        appendConversationItem(ConversationUiItem.message("image", "user", prompt, System.currentTimeMillis(), userIndex), true);
         LinearLayout progress = addImageProgressBubble();
+        appendConversationItem(ConversationUiItem.message("image:plain", "assistant", "正在生成图片...", System.currentTimeMillis(), -1), true);
         localAutoScrollEnabled = true;
         scrollToBottom();
         runNetwork(() -> {
@@ -2192,7 +2476,7 @@ public class MainActivity extends Activity {
                 String result = text.isEmpty() ? "模型没有返回可展示的图片。" : text;
                 int assistantIndex = appendLocalConversation("image", "assistant", result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/") ? "image" : "text", result);
                 renderImageResult(progress, result, System.currentTimeMillis(), "image", assistantIndex);
-                scrollToBottomIfLocalAuto();
+                renderLocalConversationNow("image", true);
             });
         });
     }
@@ -3206,7 +3490,7 @@ public class MainActivity extends Activity {
             body.put("reasoningEffort", reasoningValue(selectedReasoning));
             body.put("permissionMode", selectedPermission.contains("全权限") ? "full" : "restricted");
             JSONArray extensionRefs = new JSONArray();
-            for (JSONObject ref : selectedExtensionRefs) {
+            for (JSONObject ref : extensionRefsFor(client)) {
                 extensionRefs.put(new JSONObject()
                         .put("id", ref.optString("id", ref.optString("name")))
                         .put("kind", ref.optString("kind", "skill"))
@@ -3419,6 +3703,50 @@ public class MainActivity extends Activity {
         pollSessionsOnce(true);
     }
 
+    private void renderSelectedCliSession(String client, JSONObject session) {
+        if (client.equals(section)) {
+            showConversationLoading("正在加载选中的会话...");
+            renderCliComposerOnly(client);
+        }
+        executor.execute(() -> {
+            try {
+                JSONArray events = eventsForCliSession(session);
+                ui(() -> {
+                    cliTimelineCache.put(client, events);
+                    cliTimelineSignatures.put(client, "");
+                    timelineVisibleItemCounts.put(client, INITIAL_RENDER_ITEM_COUNT);
+                    if (client.equals(section)) {
+                        renderTimeline(events, true);
+                        renderCliComposerOnly(client);
+                    }
+                });
+            } catch (Exception ignored) {
+                ui(this::renderSection);
+            }
+        });
+    }
+
+    private JSONArray eventsForCliSession(JSONObject session) throws Exception {
+        List<JSONObject> rows = new ArrayList<>();
+        collectRows(rows, session == null ? null : session.optJSONArray("messages"), "message");
+        collectPurposes(rows, session);
+        collectRows(rows, session == null ? null : session.optJSONArray("logs"), "log");
+        rows.sort(Comparator.comparingLong(o -> o.optLong("timestamp")));
+        JSONArray out = new JSONArray();
+        Set<String> seen = new HashSet<>();
+        for (JSONObject row : rows) {
+            if (shouldHideLog(row)) {
+                continue;
+            }
+            String key = logDedupeKey(row);
+            if (!key.isEmpty() && !seen.add(key)) {
+                continue;
+            }
+            out.put(row);
+        }
+        return out;
+    }
+
     private JSONArray mergedEventsForClient(JSONArray sessions, String client) throws Exception {
         List<JSONObject> rows = new ArrayList<>();
         String selectedSessionId = selectedCliSessionIds.get(client);
@@ -3531,36 +3859,58 @@ public class MainActivity extends Activity {
     }
 
     private void renderTimeline(JSONArray events, boolean scrollLatest) {
-        if (timeline == null) {
+        if (conversationList == null) {
             return;
         }
         int generation = ++renderGeneration;
         String targetClient = section;
-        showPageLoading("正在加载聊天记录...");
+        hidePageLoading();
         resetContentScrollPosition();
         if (scrollLatest) {
             localAutoScrollEnabled = true;
         }
-        clearContainer(timeline);
+        if (timeline != null) {
+            clearContainer(timeline);
+        }
         if (interactionBar != null) {
             clearContainer(interactionBar);
         }
         if (events == null || events.length() == 0) {
             hidePageLoading();
-            timeline.addView(card(label(targetClient), "暂无可显示的会话内容。请先在会话记录中选择其他会话，或从输入框发起新任务。"));
+            submitConversationItems(listConversationItem(ConversationUiItem.empty("暂无可显示的会话内容。请先在会话记录中选择其他会话，或从输入框发起新任务。")), false);
             updateScrollDock();
             return;
         }
         int visibleCount = timelineVisibleItemCounts.getOrDefault(targetClient, INITIAL_RENDER_ITEM_COUNT);
         int startIndex = Math.max(0, events.length() - visibleCount);
+        List<ConversationUiItem> items = new ArrayList<>();
         if (startIndex > 0) {
-            timeline.addView(loadEarlierButton("加载更早执行记录（剩余 " + startIndex + " 条）", () -> {
+            items.add(ConversationUiItem.loadEarlier("加载更早执行记录（剩余 " + startIndex + " 条）", () -> {
                 timelineVisibleItemCounts.put(targetClient, visibleCount + RENDER_PAGE_INCREMENT);
                 JSONArray cached = cliTimelineCache.get(targetClient);
                 renderTimeline(cached == null ? events : cached, false);
             }));
         }
-        handler.post(() -> renderTimelineChunk(events, startIndex, generation, scrollLatest, targetClient));
+        for (int i = startIndex; i < events.length(); i++) {
+            JSONObject e = events.optJSONObject(i);
+            if (e == null) {
+                continue;
+            }
+            if ("message".equals(e.optString("_kind"))) {
+                String text = compactLocalFileReferences(cleanDisplayText(e.optString("text")));
+                if (!text.isEmpty()) {
+                    long timestamp = e.optLong("timestamp", e.optLong("createdAt", 0));
+                    items.add(ConversationUiItem.message(targetClient, e.optString("role"), text, timestamp, i));
+                }
+            } else if (!shouldHideLog(e)) {
+                items.add(ConversationUiItem.log(targetClient, e, i));
+            }
+        }
+        if (generation != renderGeneration || !targetClient.equals(section)) {
+            return;
+        }
+        hidePageLoading();
+        submitConversationItems(items, scrollLatest);
     }
 
     private void renderTimelineChunk(JSONArray events, int index, int generation, boolean scrollLatest, String targetClient) {
@@ -3577,7 +3927,7 @@ public class MainActivity extends Activity {
                 String text = compactLocalFileReferences(cleanDisplayText(e.optString("text")));
                 if (!text.isEmpty()) {
                     long timestamp = e.optLong("timestamp", e.optLong("createdAt", 0));
-                    timeline.addView(messageBubble(e.optString("role"), text, timestamp, targetClient + ":plain", -1));
+                    timeline.addView(messageBubble(e.optString("role"), text, timestamp, targetClient, -1));
                 }
             } else {
                 addLogRow(e);
@@ -3607,8 +3957,15 @@ public class MainActivity extends Activity {
     }
 
     private void addLogRow(JSONObject e) {
+        View row = logRowView(e);
+        if (row != null && timeline != null) {
+            timeline.addView(row);
+        }
+    }
+
+    private View logRowView(JSONObject e) {
         if (shouldHideLog(e)) {
-            return;
+            return null;
         }
         String title = cleanDisplayText(e.optString("title", e.optString("type")));
         String body = cleanDisplayText(e.optString("body"));
@@ -3616,7 +3973,7 @@ public class MainActivity extends Activity {
         String command = compactCommand(rawCommand);
         String preview = logPreview(e, body, rawCommand, command);
         if (title.trim().isEmpty() && body.trim().isEmpty() && command.trim().isEmpty()) {
-            return;
+            return null;
         }
         if (title.equals(body) && command.trim().isEmpty()) {
             body = "";
@@ -3706,9 +4063,15 @@ public class MainActivity extends Activity {
         }
         String interactionId = e.optString("interactionId");
         if (!interactionId.isEmpty() && "pending".equals(e.optString("interactionStatus", "pending"))) {
-            renderInteraction(e);
+            LinearLayout actions = horizontal();
+            actions.addView(actionButton("允许", e, "approve"), new LinearLayout.LayoutParams(0, dp(42), 1));
+            actions.addView(actionButton("拒绝", e, "reject"), new LinearLayout.LayoutParams(0, dp(42), 1));
+            actions.addView(actionButton("总是允许", e, "approve_always"), new LinearLayout.LayoutParams(0, dp(42), 1));
+            LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(-1, -2);
+            actionLp.setMargins(0, dp(8), 0, 0);
+            row.addView(actions, actionLp);
         }
-        timeline.addView(row);
+        return row;
     }
 
     private String logRowId(JSONObject e) {
@@ -3932,9 +4295,13 @@ public class MainActivity extends Activity {
         box.setBackground(round(user ? Color.WHITE : GLASS, dp(16), user ? LINE : LINE));
         String rawMode = mode == null ? "" : mode;
         boolean forcePlain = rawMode.endsWith(":plain");
+        boolean nativeRich = rawMode.endsWith(":native");
         String actionMode = forcePlain ? rawMode.substring(0, rawMode.length() - ":plain".length()) : rawMode;
+        actionMode = nativeRich ? actionMode.substring(0, actionMode.length() - ":native".length()) : actionMode;
         String clean = cleanDisplayText(text);
-        if (!forcePlain && !user && ("chat".equals(actionMode) || actionMode.isEmpty()) && shouldRenderRichText(clean)) {
+        if (nativeRich && !forcePlain && !user && shouldRenderRichText(clean)) {
+            addNativeMarkdownContent(box, clean, () -> toggleActionRows(box));
+        } else if (!forcePlain && !user && ("chat".equals(actionMode) || actionMode.isEmpty()) && shouldRenderRichText(clean)) {
             addRichAssistantContent(box, clean, () -> toggleActionRows(box));
         } else {
             addPlainMessageContent(box, clean, user, () -> toggleActionRows(box));
@@ -3968,16 +4335,39 @@ public class MainActivity extends Activity {
 
     private String[] splitThinkingBlock(String text) {
         String clean = cleanDisplayText(text);
-        if (!clean.startsWith("思考过程\n")) {
+        String lower = clean.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("<thinking>")) {
+            int end = lower.indexOf("</thinking>");
+            if (end > "<thinking>".length()) {
+                return new String[]{
+                        clean.substring("<thinking>".length(), end).trim(),
+                        clean.substring(end + "</thinking>".length()).trim()
+                };
+            }
+        }
+        String prefix = "";
+        if (clean.startsWith("思考过程\n")) {
+            prefix = "思考过程\n";
+        } else if (lower.startsWith("thinking:\n")) {
+            prefix = clean.substring(0, "thinking:\n".length());
+        } else if (lower.startsWith("thinking：\n")) {
+            prefix = clean.substring(0, "thinking：\n".length());
+        } else if (lower.startsWith("thinking:")) {
+            prefix = clean.substring(0, "thinking:".length());
+        } else if (lower.startsWith("thinking：")) {
+            prefix = clean.substring(0, "thinking：".length());
+        }
+        if (prefix.isEmpty()) {
             return new String[]{"", clean};
         }
-        int split = clean.indexOf("\n\n");
-        if (split <= "思考过程\n".length()) {
-            return new String[]{clean.substring("思考过程\n".length()).trim(), ""};
+        String rest = clean.substring(prefix.length()).trim();
+        int split = rest.indexOf("\n\n");
+        if (split < 0) {
+            return new String[]{rest, ""};
         }
         return new String[]{
-                clean.substring("思考过程\n".length(), split).trim(),
-                clean.substring(split + 2).trim()
+                rest.substring(0, split).trim(),
+                rest.substring(split + 2).trim()
         };
     }
 
@@ -3996,6 +4386,269 @@ public class MainActivity extends Activity {
                 || clean.contains("**")
                 || clean.contains("|")
                 || clean.toLowerCase(Locale.ROOT).contains("mermaid");
+    }
+
+    private void addNativeMarkdownContent(LinearLayout box, String text, Runnable clickAction) {
+        String[] split = splitThinkingBlock(text);
+        if (!split[0].isEmpty()) {
+            addThinkingBlock(box, split[0], clickAction);
+            if (!split[1].isEmpty()) {
+                box.addView(gap(8));
+            }
+        }
+        String body = normalizeMarkdownForRender(split[1].isEmpty() ? text : split[1]);
+        if (body.trim().isEmpty()) {
+            return;
+        }
+        String[] lines = body.split("\\n", -1);
+        StringBuilder paragraph = new StringBuilder();
+        StringBuilder code = new StringBuilder();
+        boolean inCode = false;
+        for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            String rawLine = lines[lineIndex];
+            String line = rawLine == null ? "" : rawLine;
+            String trimmed = line.trim();
+            if (trimmed.startsWith("```")) {
+                if (inCode) {
+                    addNativeMarkdownCode(box, code.toString(), clickAction);
+                    code.setLength(0);
+                    inCode = false;
+                } else {
+                    flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                    inCode = true;
+                }
+                continue;
+            }
+            if (inCode) {
+                code.append(line).append('\n');
+                continue;
+            }
+            if (trimmed.isEmpty()) {
+                flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                continue;
+            }
+            if (isMarkdownTableStart(lines, lineIndex)) {
+                flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                int endIndex = lineIndex + 2;
+                while (endIndex < lines.length && isMarkdownTableDataLine(lines[endIndex])) {
+                    endIndex++;
+                }
+                addNativeMarkdownTable(box, lines, lineIndex, endIndex, clickAction);
+                lineIndex = endIndex - 1;
+                continue;
+            }
+            Matcher heading = Pattern.compile("^(#{1,6})\\s+(.+)$").matcher(trimmed);
+            if (heading.find()) {
+                flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                addNativeMarkdownText(box, styledMarkdownText(heading.group(2)), INK, true, Math.max(15, 21 - heading.group(1).length()), clickAction);
+                continue;
+            }
+            if (trimmed.startsWith(">")) {
+                flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                TextView quote = copy(trimmed.replaceFirst("^>\\s*", ""));
+                quote.setText(styledMarkdownText(String.valueOf(quote.getText())));
+                quote.setTextColor(Color.rgb(70, 88, 120));
+                quote.setTextIsSelectable(true);
+                quote.setBackground(round(Color.argb(28, 54, 104, 240), dp(10), Color.argb(52, 54, 104, 240)));
+                quote.setPadding(dp(10), dp(7), dp(10), dp(7));
+                if (clickAction != null) {
+                    quote.setOnClickListener(v -> clickAction.run());
+                }
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                lp.setMargins(0, dp(4), 0, dp(6));
+                box.addView(quote, lp);
+                continue;
+            }
+            if (trimmed.matches("^[-*+]\\s+.+$")) {
+                flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                addNativeMarkdownText(box, styledMarkdownText("• " + trimmed.replaceFirst("^[-*+]\\s+", "")), INK, false, 14, clickAction);
+                continue;
+            }
+            if (trimmed.matches("^\\d+[\\.、]\\s+.+$")) {
+                flushNativeMarkdownParagraph(box, paragraph, clickAction);
+                addNativeMarkdownText(box, styledMarkdownText(trimmed), INK, false, 14, clickAction);
+                continue;
+            }
+            if (paragraph.length() > 0) {
+                paragraph.append('\n');
+            }
+            paragraph.append(line);
+        }
+        if (inCode && code.length() > 0) {
+            addNativeMarkdownCode(box, code.toString(), clickAction);
+        }
+        flushNativeMarkdownParagraph(box, paragraph, clickAction);
+    }
+
+    private boolean isMarkdownTableStart(String[] lines, int index) {
+        if (lines == null || index < 0 || index + 1 >= lines.length) {
+            return false;
+        }
+        String header = lines[index] == null ? "" : lines[index].trim();
+        String separator = lines[index + 1] == null ? "" : lines[index + 1].trim();
+        return header.contains("|") && markdownTableCells(header).size() >= 2 && isMarkdownTableSeparator(separator);
+    }
+
+    private boolean isMarkdownTableSeparator(String line) {
+        String clean = line == null ? "" : line.trim();
+        if (!clean.contains("|")) {
+            return false;
+        }
+        List<String> cells = markdownTableCells(clean);
+        if (cells.size() < 2) {
+            return false;
+        }
+        for (String cell : cells) {
+            if (!cell.matches(":?-{3,}:?")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isMarkdownTableDataLine(String line) {
+        String clean = line == null ? "" : line.trim();
+        return clean.contains("|") && !clean.isEmpty() && !isMarkdownTableSeparator(clean);
+    }
+
+    private List<String> markdownTableCells(String line) {
+        List<String> out = new ArrayList<>();
+        String clean = line == null ? "" : line.trim();
+        if (clean.startsWith("|")) {
+            clean = clean.substring(1);
+        }
+        if (clean.endsWith("|")) {
+            clean = clean.substring(0, clean.length() - 1);
+        }
+        for (String part : clean.split("\\|", -1)) {
+            out.add(part.trim());
+        }
+        return out;
+    }
+
+    private void addNativeMarkdownTable(LinearLayout box, String[] lines, int start, int end, Runnable clickAction) {
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        TableLayout table = new TableLayout(this);
+        table.setShrinkAllColumns(false);
+        table.setStretchAllColumns(false);
+        List<String> headers = markdownTableCells(lines[start]);
+        addNativeMarkdownTableRow(table, headers, true, clickAction);
+        for (int i = start + 2; i < end; i++) {
+            addNativeMarkdownTableRow(table, markdownTableCells(lines[i]), false, clickAction);
+        }
+        scroll.addView(table, new HorizontalScrollView.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(6), 0, dp(8));
+        box.addView(scroll, lp);
+    }
+
+    private void addNativeMarkdownTableRow(TableLayout table, List<String> cells, boolean header, Runnable clickAction) {
+        TableRow row = new TableRow(this);
+        row.setGravity(Gravity.TOP);
+        for (String cell : cells) {
+            TextView view = copy("");
+            view.setText(styledMarkdownText(cell));
+            view.setTextColor(INK);
+            view.setTextSize(12);
+            view.setTextIsSelectable(true);
+            view.setMaxWidth(nativeTableMaxCellWidth());
+            view.setMinWidth(dp(72));
+            view.setPadding(dp(8), dp(7), dp(8), dp(7));
+            view.setBackground(round(header ? Color.rgb(247, 249, 255) : Color.argb(180, 255, 255, 255), dp(8), Color.rgb(220, 228, 241)));
+            if (header) {
+                view.setTypeface(Typeface.DEFAULT_BOLD);
+            }
+            if (clickAction != null) {
+                view.setOnClickListener(v -> clickAction.run());
+            }
+            TableRow.LayoutParams cellLp = new TableRow.LayoutParams(-2, -2);
+            cellLp.setMargins(0, 0, dp(4), dp(4));
+            row.addView(view, cellLp);
+        }
+        table.addView(row, new TableLayout.LayoutParams(-2, -2));
+    }
+
+    private int nativeTableMaxCellWidth() {
+        int screen = getResources().getDisplayMetrics().widthPixels;
+        int bubbleWidth = Math.max(dp(220), screen - dp(72));
+        return Math.max(dp(120), (int) (bubbleWidth * 0.8f));
+    }
+
+    private void flushNativeMarkdownParagraph(LinearLayout box, StringBuilder paragraph, Runnable clickAction) {
+        if (paragraph.length() == 0) {
+            return;
+        }
+        addNativeMarkdownText(box, styledMarkdownText(paragraph.toString().trim()), INK, false, 14, clickAction);
+        paragraph.setLength(0);
+    }
+
+    private void addNativeMarkdownText(LinearLayout box, CharSequence text, int color, boolean boldText, int sizeSp, Runnable clickAction) {
+        TextView view = copy("");
+        view.setText(text);
+        view.setTextColor(color);
+        view.setTextSize(sizeSp);
+        view.setTextIsSelectable(true);
+        if (boldText) {
+            view.setTypeface(Typeface.DEFAULT_BOLD);
+        }
+        if (clickAction != null) {
+            view.setOnClickListener(v -> clickAction.run());
+        }
+        box.addView(view);
+    }
+
+    private void addNativeMarkdownCode(LinearLayout box, String code, Runnable clickAction) {
+        String clean = cleanDisplayText(code);
+        if (clean.isEmpty()) {
+            return;
+        }
+        TextView view = copy(clean);
+        view.setTypeface(Typeface.MONOSPACE);
+        view.setTextSize(12);
+        view.setTextColor(Color.rgb(31, 41, 55));
+        view.setTextIsSelectable(true);
+        view.setBackground(round(Color.rgb(244, 247, 251), dp(10), Color.rgb(220, 228, 241)));
+        view.setPadding(dp(10), dp(8), dp(10), dp(8));
+        if (clickAction != null) {
+            view.setOnClickListener(v -> clickAction.run());
+        }
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(5), 0, dp(7));
+        box.addView(view, lp);
+    }
+
+    private CharSequence styledMarkdownText(String source) {
+        String value = cleanDisplayText(source);
+        List<int[]> spans = new ArrayList<>();
+        StringBuilder out = new StringBuilder();
+        int i = 0;
+        while (i < value.length()) {
+            int start = value.indexOf("**", i);
+            if (start < 0) {
+                out.append(value.substring(i));
+                break;
+            }
+            int end = value.indexOf("**", start + 2);
+            if (end < 0) {
+                out.append(value.substring(i));
+                break;
+            }
+            out.append(value, i, start);
+            int spanStart = out.length();
+            out.append(value, start + 2, end);
+            spans.add(new int[]{spanStart, out.length()});
+            i = end + 2;
+        }
+        SpannableString styled = new SpannableString(out.toString());
+        for (int[] span : spans) {
+            if (span[1] > span[0]) {
+                styled.setSpan(new StyleSpan(Typeface.BOLD), span[0], span[1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
+        return styled;
     }
 
     private void addRichAssistantContent(LinearLayout box, String text, Runnable clickAction) {
@@ -4087,7 +4740,7 @@ public class MainActivity extends Activity {
     private int estimatedRichHeight(String text) {
         String clean = cleanDisplayText(text);
         int lines = Math.max(2, clean.split("\\n", -1).length + clean.length() / 52);
-        return Math.max(dp(64), Math.min(dp(220), dp(lines * 19)));
+        return Math.max(dp(96), Math.min(dp(900), dp(lines * 22)));
     }
 
     private String markdownHtml(String markdown) {
@@ -4219,7 +4872,7 @@ public class MainActivity extends Activity {
                 return;
             }
             ui(() -> {
-                int targetHeight = Math.max(dp(56), dp(Math.min(height + 10, 1600)));
+                int targetHeight = Math.max(dp(96), dp(Math.min(height + 24, 6000)));
                 web.setLayoutParams(new LinearLayout.LayoutParams(-1, targetHeight));
                 web.requestLayout();
             });
@@ -5290,7 +5943,8 @@ public class MainActivity extends Activity {
             return;
         }
         if (cachedDesktopSessions != null && cachedDesktopSessions.length() > 0) {
-            showRecentSessionsFromArray(client, cachedDesktopSessions);
+            JSONArray snapshot = cachedDesktopSessions;
+            executor.execute(() -> showRecentSessionsFromArray(client, snapshot));
             refreshDesktopSessionsCache(true);
             return;
         }
@@ -5394,6 +6048,7 @@ public class MainActivity extends Activity {
             ui(() -> showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
                 selectedCliSession = value.trim();
                 if (!"暂无会话记录".equals(selectedCliSession)) {
+                    JSONObject chosenSession = null;
                     for (String tab : tabs) {
                         String key = tab + "\n" + selectedCliSession;
                         String id = sessionIdByOption.get(key);
@@ -5404,11 +6059,16 @@ public class MainActivity extends Activity {
                             JSONObject chosen = sessionByOption.get(key);
                             if (chosen != null) {
                                 updateSelectedCliProject(client, chosen);
+                                chosenSession = chosen;
                             }
                             break;
                         }
                     }
-                    renderSection();
+                    if (chosenSession != null) {
+                        renderSelectedCliSession(client, chosenSession);
+                    } else {
+                        renderSection();
+                    }
                     pollSessionsOnce(true);
                 }
             }, null));
@@ -5503,9 +6163,10 @@ public class MainActivity extends Activity {
             tabs.add(title);
             grouped.put(title, list("暂无会话记录"));
         }
-        showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
+        ui(() -> showStackedGroupedChoice(label(client) + " 会话记录", tabs, grouped, selectedCliSession, value -> {
             selectedCliSession = value.trim();
             if (!"暂无会话记录".equals(selectedCliSession)) {
+                JSONObject chosenSession = null;
                 for (String tab : tabs) {
                     String key = tab + "\n" + selectedCliSession;
                     String id = sessionIdByOption.get(key);
@@ -5516,20 +6177,19 @@ public class MainActivity extends Activity {
                         JSONObject chosen = sessionByOption.get(key);
                         if (chosen != null) {
                             updateSelectedCliProject(client, chosen);
-                            try {
-                                JSONArray selectedEvents = mergedEventsForClient(cachedDesktopSessions, client);
-                                cliTimelineCache.put(client, selectedEvents);
-                                cliTimelineSignatures.put(client, "");
-                            } catch (Exception ignored) {
-                            }
+                            chosenSession = chosen;
                         }
                         break;
                     }
                 }
-                renderSection();
+                if (chosenSession != null) {
+                    renderSelectedCliSession(client, chosenSession);
+                } else {
+                    renderSection();
+                }
                 pollSessionsOnce(true);
             }
-        }, null);
+        }, null));
     }
 
     private String cliSessionProjectKey(JSONObject session, String client) {
@@ -5781,11 +6441,127 @@ public class MainActivity extends Activity {
                     tabs.add(tab);
                 }
             }
-            ui(() -> showGroupedChoice("Skill / Plugin / Command", tabs, grouped, selectedSkillPlugin, value -> {
-                selectedSkillPlugin = value;
-                addExtensionRef(kindByName.getOrDefault(value, value.startsWith("/") ? "command" : "skill"), value);
-            }));
+            ui(() -> showExtensionsMultiChoice(client, "Skill / Plugin / Command", tabs, grouped, kindByName));
         });
+    }
+
+    private void showExtensionsMultiChoice(String client, String title, List<String> tabs, Map<String, List<String>> grouped, Map<String, String> kindByName) {
+        if (tabs == null || tabs.isEmpty()) {
+            showChoice(title, list("暂无可选项"), "", value -> { });
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(Color.argb(64, 15, 23, 42));
+        LinearLayout panel = vertical();
+        panel.setBackground(round(Color.rgb(248, 250, 255), dp(18), LINE));
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        LinearLayout titleRow = horizontal();
+        titleRow.addView(bold(title), new LinearLayout.LayoutParams(0, -2, 1));
+        Button close = iconButton("×");
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        panel.addView(titleRow);
+
+        LinearLayout tabPanel = vertical();
+        tabPanel.setPadding(0, dp(8), 0, dp(8));
+        LinearLayout optionsBox = vertical();
+        ScrollView scroller = new ScrollView(this);
+        scroller.setVerticalScrollBarEnabled(false);
+        scroller.addView(optionsBox);
+        final String[] activeTab = {tabs.get(0)};
+        final List<Button> tabButtons = new ArrayList<>();
+        final Runnable[] renderOptions = new Runnable[1];
+        renderOptions[0] = () -> {
+            optionsBox.removeAllViews();
+            for (Button button : tabButtons) {
+                boolean active = activeTab[0].equals(String.valueOf(button.getTag()));
+                button.setTextColor(active ? Color.WHITE : INK);
+                button.setBackground(round(active ? BLUE : Color.argb(120, 255, 255, 255), dp(16), active ? BLUE : LINE));
+            }
+            List<String> values = sortFavoriteOptions(title, grouped.get(activeTab[0]));
+            if (values == null || values.isEmpty()) {
+                optionsBox.addView(copy("暂无可选项"));
+                return;
+            }
+            for (String option : values) {
+                String kind = kindByName.getOrDefault(option, option.startsWith("/") ? "command" : "skill");
+                boolean selected = isExtensionSelected(client, kind, option);
+                Button entry = drawerButton((selected ? "✓ " : "") + option);
+                entry.setTextColor(selected ? BLUE : INK);
+                entry.setBackground(round(selected ? Color.argb(72, 54, 104, 240) : Color.argb(120, 255, 255, 255), dp(16), selected ? Color.argb(110, 54, 104, 240) : LINE));
+                entry.setOnClickListener(v -> {
+                    toggleExtensionRef(client, kind, option);
+                    selectedSkillPlugin = option;
+                    renderOptions[0].run();
+                });
+                optionsBox.addView(entry);
+            }
+        };
+        LinearLayout tabRow = null;
+        for (int i = 0; i < tabs.size(); i++) {
+            if (i % 3 == 0) {
+                tabRow = horizontal();
+                tabPanel.addView(tabRow, new LinearLayout.LayoutParams(-1, dp(36)));
+            }
+            String tab = tabs.get(i);
+            Button button = ghost(tab);
+            button.setSingleLine(true);
+            button.setTag(tab);
+            button.setTextSize(12);
+            button.setOnClickListener(v -> {
+                activeTab[0] = tab;
+                renderOptions[0].run();
+            });
+            tabButtons.add(button);
+            LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(0, dp(34), 1);
+            tabLp.setMargins(0, 0, dp(6), 0);
+            tabRow.addView(button, tabLp);
+        }
+        panel.addView(tabPanel);
+        renderOptions[0].run();
+        panel.addView(scroller, new LinearLayout.LayoutParams(-1, dp(310)));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(312), -2);
+        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        lp.setMargins(dp(18), 0, dp(18), dp(28));
+        overlay.addView(panel, lp);
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        dialog.setContentView(overlay);
+        dialog.show();
+        Window shown = dialog.getWindow();
+        if (shown != null) {
+            shown.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+        }
+    }
+
+    private boolean isExtensionSelected(String client, String kind, String name) {
+        String normalized = name == null ? "" : name.trim();
+        for (JSONObject ref : extensionRefsFor(client)) {
+            if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void toggleExtensionRef(String client, String kind, String name) {
+        String normalized = name == null ? "" : name.trim();
+        if (normalized.isEmpty() || "默认".equals(normalized)) {
+            return;
+        }
+        List<JSONObject> refs = extensionRefsFor(client);
+        for (int i = 0; i < refs.size(); i++) {
+            JSONObject ref = refs.get(i);
+            if (normalized.equals(ref.optString("name")) && kind.equals(ref.optString("kind"))) {
+                refs.remove(i);
+                renderExtensionPreview();
+                return;
+            }
+        }
+        addExtensionRef(client, kind, normalized);
     }
 
     private int appendExtensions(List<String> out, JSONArray data, String kind, String client) {
@@ -7125,6 +7901,10 @@ public class MainActivity extends Activity {
                     composerHost.setLayoutParams(lp);
                 }
             }
+            if (currentKeyboardHeight != keyboard) {
+                currentKeyboardHeight = keyboard;
+                updateScrollDockPosition();
+            }
         });
     }
 
@@ -7264,6 +8044,10 @@ public class MainActivity extends Activity {
     }
 
     private void scrollToBottom() {
+        if (conversationList != null && conversationList.getVisibility() == View.VISIBLE) {
+            scrollConversationToBottom();
+            return;
+        }
         scrollToBottomStable(0);
     }
 
@@ -7292,27 +8076,77 @@ public class MainActivity extends Activity {
         if (scrollDock == null || contentScroll == null || content == null) {
             return;
         }
-        if (!isScrollableConversationSection() || contentBottomScrollY(contentScroll) <= dp(16)) {
+        if (conversationList != null && conversationList.getVisibility() == View.VISIBLE) {
+            if (!isScrollableConversationSection() || conversationAdapter == null || conversationAdapter.getItemCount() == 0) {
+                scrollDock.setVisibility(View.GONE);
+                return;
+            }
+            scrollDock.removeAllViews();
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_top, "聊天记录顶部", () -> {
+                localAutoScrollEnabled = false;
+                scrollConversationToTop();
+            }));
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_top, "当前气泡顶部", () -> scrollCurrentConversationItem(true)));
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_bottom, "当前气泡底部", () -> scrollCurrentConversationItem(false)));
+            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_bottom, "最新聊天记录", () -> {
+                localAutoScrollEnabled = true;
+                scrollConversationToBottom();
+            }));
+            scrollDock.setVisibility(View.VISIBLE);
+            updateScrollDockPosition();
+            return;
+        }
+        if (!isScrollableConversationSection() || content.getChildCount() == 0) {
             scrollDock.setVisibility(View.GONE);
             return;
         }
         scrollDock.removeAllViews();
-        if (scrollDockDirectionDown) {
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_bottom, "最新聊天记录", () -> {
-                localAutoScrollEnabled = true;
-                scrollToBottom();
-            }));
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_bottom, "当前气泡底部", () -> scrollCurrentContentChild(false)));
-        } else {
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_top, "聊天记录顶部", () -> {
-                localAutoScrollEnabled = false;
-                if (contentScroll != null) {
-                    contentScroll.smoothScrollTo(0, 0);
-                }
-            }));
-            scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_top, "当前气泡顶部", () -> scrollCurrentContentChild(true)));
-        }
+        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_top, "聊天记录顶部", () -> {
+            localAutoScrollEnabled = false;
+            if (contentScroll != null) {
+                contentScroll.smoothScrollTo(0, 0);
+            }
+        }));
+        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_top, "当前气泡顶部", () -> scrollCurrentContentChild(true)));
+        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_current_bottom, "当前气泡底部", () -> scrollCurrentContentChild(false)));
+        scrollDock.addView(scrollDockButton(R.drawable.ic_scroll_bottom, "最新聊天记录", () -> {
+            localAutoScrollEnabled = true;
+            scrollToBottom();
+        }));
         scrollDock.setVisibility(View.VISIBLE);
+        updateScrollDockPosition();
+    }
+
+    private void updateScrollDockPosition() {
+        if (scrollDock == null || shell == null) {
+            return;
+        }
+        FrameLayout.LayoutParams lp = scrollDock.getLayoutParams() instanceof FrameLayout.LayoutParams
+                ? (FrameLayout.LayoutParams) scrollDock.getLayoutParams()
+                : new FrameLayout.LayoutParams(dp(24), -2);
+        lp.gravity = Gravity.RIGHT | Gravity.TOP;
+        lp.setMargins(0, 0, dp(5), 0);
+        int shellHeight = shell.getHeight();
+        int dockHeight = scrollDock.getHeight() > 0 ? scrollDock.getHeight() : dp(108);
+        int top = dp(88);
+        int bottom = shellHeight - dp(170);
+        if (contentFrame != null && composerHost != null && shellHeight > 0) {
+            int[] shellLocation = new int[2];
+            int[] contentLocation = new int[2];
+            int[] composerLocation = new int[2];
+            shell.getLocationOnScreen(shellLocation);
+            contentFrame.getLocationOnScreen(contentLocation);
+            composerHost.getLocationOnScreen(composerLocation);
+            top = Math.max(0, contentLocation[1] - shellLocation[1]);
+            bottom = Math.max(top + dp(80), composerLocation[1] - shellLocation[1]);
+        } else if (currentKeyboardHeight > dp(120) && shellHeight > 0) {
+            bottom = Math.max(top + dp(80), shellHeight - currentKeyboardHeight - dp(120));
+        }
+        int targetTop = Math.max(0, (top + bottom - dockHeight) / 2);
+        if (lp.topMargin != targetTop) {
+            lp.topMargin = targetTop;
+            scrollDock.setLayoutParams(lp);
+        }
     }
 
     private boolean isScrollableConversationSection() {
@@ -7328,15 +8162,58 @@ public class MainActivity extends Activity {
         b.setImageResource(iconRes);
         b.setContentDescription(description);
         b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        b.setPadding(dp(7), dp(7), dp(7), dp(7));
+        b.setPadding(dp(6), dp(6), dp(6), dp(6));
         b.setColorFilter(Color.rgb(61, 92, 114));
-        b.setAlpha(0.58f);
-        b.setBackground(round(Color.argb(92, 255, 255, 255), dp(10), Color.argb(80, 145, 160, 184)));
+        b.setAlpha(0.72f);
+        b.setBackground(new ColorDrawable(Color.TRANSPARENT));
         b.setOnClickListener(v -> action.run());
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(36), dp(36));
-        lp.setMargins(0, dp(4), 0, dp(4));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(24), dp(24));
+        lp.setMargins(0, dp(3), 0, dp(3));
         b.setLayoutParams(lp);
         return b;
+    }
+
+    private void scrollConversationToTop() {
+        if (conversationList == null) {
+            return;
+        }
+        RecyclerView.LayoutManager manager = conversationList.getLayoutManager();
+        if (manager instanceof LinearLayoutManager) {
+            ((LinearLayoutManager) manager).scrollToPositionWithOffset(0, conversationList.getPaddingTop());
+        } else {
+            conversationList.smoothScrollToPosition(0);
+        }
+    }
+
+    private void scrollCurrentConversationItem(boolean top) {
+        if (conversationList == null || conversationList.getChildCount() == 0) {
+            return;
+        }
+        int center = conversationList.getHeight() / 2;
+        View target = null;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < conversationList.getChildCount(); i++) {
+            View child = conversationList.getChildAt(i);
+            int childTop = child.getTop();
+            int childBottom = child.getBottom();
+            if (childTop <= center && childBottom >= center) {
+                target = child;
+                break;
+            }
+            int childCenter = childTop + Math.max(0, child.getHeight()) / 2;
+            int distance = Math.abs(childCenter - center);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                target = child;
+            }
+        }
+        if (target == null) {
+            return;
+        }
+        int dy = top
+                ? target.getTop() - conversationList.getPaddingTop()
+                : target.getBottom() - (conversationList.getHeight() - conversationList.getPaddingBottom());
+        conversationList.smoothScrollBy(0, dy);
     }
 
     private void scrollCurrentContentChild(boolean top) {
@@ -7416,5 +8293,266 @@ public class MainActivity extends Activity {
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         lp.setMargins(0, dp(6), 0, 0);
         return lp;
+    }
+
+    private class FlowLayout extends ViewGroup {
+        FlowLayout(Context context) {
+            super(context);
+            setClipToPadding(false);
+            setClipChildren(false);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int widthLimit = Math.max(0, MeasureSpec.getSize(widthMeasureSpec) - getPaddingLeft() - getPaddingRight());
+            int usedWidth = 0;
+            int lineHeight = 0;
+            int totalHeight = getPaddingTop() + getPaddingBottom();
+            int maxWidth = getPaddingLeft() + getPaddingRight();
+            for (int i = 0; i < getChildCount(); i++) {
+                View child = getChildAt(i);
+                if (child.getVisibility() == View.GONE) {
+                    continue;
+                }
+                measureChildWithMargins(child, widthMeasureSpec, 0, heightMeasureSpec, totalHeight);
+                MarginLayoutParams lp = childMarginLayoutParams(child);
+                int childWidth = child.getMeasuredWidth() + lp.leftMargin + lp.rightMargin;
+                int childHeight = child.getMeasuredHeight() + lp.topMargin + lp.bottomMargin;
+                if (usedWidth > 0 && usedWidth + childWidth > widthLimit) {
+                    totalHeight += lineHeight;
+                    maxWidth = Math.max(maxWidth, getPaddingLeft() + getPaddingRight() + usedWidth);
+                    usedWidth = 0;
+                    lineHeight = 0;
+                }
+                usedWidth += childWidth;
+                lineHeight = Math.max(lineHeight, childHeight);
+            }
+            totalHeight += lineHeight;
+            maxWidth = Math.max(maxWidth, getPaddingLeft() + getPaddingRight() + usedWidth);
+            setMeasuredDimension(resolveSize(maxWidth, widthMeasureSpec), resolveSize(totalHeight, heightMeasureSpec));
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+            int widthLimit = Math.max(0, right - left - getPaddingLeft() - getPaddingRight());
+            int x = getPaddingLeft();
+            int y = getPaddingTop();
+            int lineHeight = 0;
+            for (int i = 0; i < getChildCount(); i++) {
+                View child = getChildAt(i);
+                if (child.getVisibility() == View.GONE) {
+                    continue;
+                }
+                MarginLayoutParams lp = childMarginLayoutParams(child);
+                int childWidth = child.getMeasuredWidth();
+                int childHeight = child.getMeasuredHeight();
+                int requiredWidth = lp.leftMargin + childWidth + lp.rightMargin;
+                if (x > getPaddingLeft() && x - getPaddingLeft() + requiredWidth > widthLimit) {
+                    x = getPaddingLeft();
+                    y += lineHeight;
+                    lineHeight = 0;
+                }
+                int childLeft = x + lp.leftMargin;
+                int childTop = y + lp.topMargin;
+                child.layout(childLeft, childTop, childLeft + childWidth, childTop + childHeight);
+                x += requiredWidth;
+                lineHeight = Math.max(lineHeight, lp.topMargin + childHeight + lp.bottomMargin);
+            }
+        }
+
+        private MarginLayoutParams childMarginLayoutParams(View child) {
+            ViewGroup.LayoutParams raw = child.getLayoutParams();
+            if (raw instanceof MarginLayoutParams) {
+                return (MarginLayoutParams) raw;
+            }
+            return new MarginLayoutParams(raw == null ? generateDefaultLayoutParams() : raw);
+        }
+
+        @Override
+        protected ViewGroup.LayoutParams generateDefaultLayoutParams() {
+            MarginLayoutParams lp = new MarginLayoutParams(-2, -2);
+            lp.setMargins(0, 0, dp(8), dp(6));
+            return lp;
+        }
+
+        @Override
+        public ViewGroup.LayoutParams generateLayoutParams(android.util.AttributeSet attrs) {
+            return new MarginLayoutParams(getContext(), attrs);
+        }
+
+        @Override
+        protected ViewGroup.LayoutParams generateLayoutParams(ViewGroup.LayoutParams p) {
+            return new MarginLayoutParams(p);
+        }
+
+        @Override
+        protected boolean checkLayoutParams(ViewGroup.LayoutParams p) {
+            return p instanceof MarginLayoutParams;
+        }
+    }
+
+    private static class ConversationUiItem {
+        static final int TYPE_MESSAGE = 1;
+        static final int TYPE_IMAGE = 2;
+        static final int TYPE_LOG = 3;
+        static final int TYPE_LOAD_EARLIER = 4;
+        static final int TYPE_EMPTY = 5;
+        static final int TYPE_LOADING = 6;
+
+        final int type;
+        final long stableId;
+        final String mode;
+        final String role;
+        final String text;
+        final long timestamp;
+        final int messageIndex;
+        final JSONObject log;
+        final Runnable action;
+
+        private ConversationUiItem(int type, long stableId, String mode, String role, String text, long timestamp, int messageIndex, JSONObject log, Runnable action) {
+            this.type = type;
+            this.stableId = stableId;
+            this.mode = mode == null ? "" : mode;
+            this.role = role == null ? "" : role;
+            this.text = text == null ? "" : text;
+            this.timestamp = timestamp;
+            this.messageIndex = messageIndex;
+            this.log = log;
+            this.action = action;
+        }
+
+        static ConversationUiItem message(String mode, String role, String text, long timestamp, int index) {
+            return new ConversationUiItem(TYPE_MESSAGE, stableId(mode, role, text, timestamp, index), mode, role, text, timestamp, index, null, null);
+        }
+
+        static ConversationUiItem image(String mode, String role, String source, long timestamp, int index) {
+            return new ConversationUiItem(TYPE_IMAGE, stableId(mode, role, source, timestamp, index), mode, role, source, timestamp, index, null, null);
+        }
+
+        static ConversationUiItem log(String mode, JSONObject log, int index) {
+            String key = log == null ? "" : log.optString("id", log.optString("eventId", ""));
+            return new ConversationUiItem(TYPE_LOG, stableId(mode, "log", key, log == null ? 0 : log.optLong("timestamp", 0), index), mode, "", "", 0, index, log, null);
+        }
+
+        static ConversationUiItem loadEarlier(String text, Runnable action) {
+            return new ConversationUiItem(TYPE_LOAD_EARLIER, stableId("load", "", text, 0, 0), "", "", text, 0, -1, null, action);
+        }
+
+        static ConversationUiItem empty(String text) {
+            return new ConversationUiItem(TYPE_EMPTY, stableId("empty", "", text, 0, 0), "", "", text, 0, -1, null, null);
+        }
+
+        static ConversationUiItem loading(String text) {
+            return new ConversationUiItem(TYPE_LOADING, stableId("loading", "", text, 0, 0), "", "", text, 0, -1, null, null);
+        }
+
+        private static long stableId(String mode, String role, String text, long timestamp, int index) {
+            String key = mode + "|" + role + "|" + timestamp + "|" + index + "|" + (text == null ? "" : text);
+            return key.hashCode();
+        }
+    }
+
+    private class ConversationAdapter extends RecyclerView.Adapter<ConversationAdapter.Holder> {
+        private final List<ConversationUiItem> items = new ArrayList<>();
+
+        ConversationAdapter() {
+            setHasStableIds(false);
+        }
+
+        void setItems(List<ConversationUiItem> next) {
+            items.clear();
+            if (next != null) {
+                items.addAll(next);
+            }
+            notifyDataSetChanged();
+        }
+
+        @Override
+        public long getItemId(int position) {
+            return position >= 0 && position < items.size() ? items.get(position).stableId : RecyclerView.NO_ID;
+        }
+
+        @Override
+        public int getItemViewType(int position) {
+            return items.get(position).type;
+        }
+
+        @Override
+        public Holder onCreateViewHolder(android.view.ViewGroup parent, int viewType) {
+            FrameLayout frame = new FrameLayout(MainActivity.this);
+            frame.setLayoutParams(new RecyclerView.LayoutParams(-1, -2));
+            frame.setClipToPadding(false);
+            frame.setClipChildren(false);
+            return new Holder(frame);
+        }
+
+        @Override
+        public void onBindViewHolder(Holder holder, int position) {
+            ConversationUiItem item = items.get(position);
+            clearFrame(holder.frame);
+            View child;
+            if (item.type == ConversationUiItem.TYPE_IMAGE) {
+                child = imageResultBubble(item.text, item.timestamp, item.mode, item.messageIndex, item.role);
+            } else if (item.type == ConversationUiItem.TYPE_LOG) {
+                child = logRowView(item.log);
+            } else if (item.type == ConversationUiItem.TYPE_LOAD_EARLIER) {
+                child = loadEarlierButton(item.text, item.action == null ? () -> { } : item.action);
+            } else if (item.type == ConversationUiItem.TYPE_EMPTY) {
+                child = card(label(section), item.text);
+            } else if (item.type == ConversationUiItem.TYPE_LOADING) {
+                child = loadingCard(item.text);
+            } else {
+                child = messageBubble(item.role, item.text, item.timestamp, recyclerMessageMode(item), item.messageIndex);
+            }
+            if (child != null) {
+                holder.frame.addView(child, frameLayoutParamsForRecyclerChild(child));
+            }
+        }
+
+        private String recyclerMessageMode(ConversationUiItem item) {
+            String mode = item == null || item.mode == null ? "" : item.mode;
+            if ("user".equals(item == null ? "" : item.role) || mode.endsWith(":plain") || mode.endsWith(":native")) {
+                return mode;
+            }
+            return mode + ":native";
+        }
+
+        private FrameLayout.LayoutParams frameLayoutParamsForRecyclerChild(View child) {
+            ViewGroup.LayoutParams raw = child.getLayoutParams();
+            int width = raw == null ? -1 : raw.width;
+            int height = raw == null ? -2 : raw.height;
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width, height);
+            if (raw instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams margins = (ViewGroup.MarginLayoutParams) raw;
+                lp.setMargins(margins.leftMargin, margins.topMargin, margins.rightMargin, margins.bottomMargin);
+            } else {
+                lp.setMargins(0, dp(6), 0, dp(6));
+            }
+            return lp;
+        }
+
+        @Override
+        public void onViewRecycled(Holder holder) {
+            clearFrame(holder.frame);
+        }
+
+        @Override
+        public int getItemCount() {
+            return items.size();
+        }
+
+        private void clearFrame(FrameLayout frame) {
+            destroyWebViews(frame);
+            frame.removeAllViews();
+        }
+
+        class Holder extends RecyclerView.ViewHolder {
+            final FrameLayout frame;
+
+            Holder(FrameLayout frame) {
+                super(frame);
+                this.frame = frame;
+            }
+        }
     }
 }
