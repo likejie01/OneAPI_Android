@@ -21,12 +21,14 @@ public class MarkdownParser {
     public ThinkingSplit splitThinking(String source) {
         String clean = source == null ? "" : source.trim();
         String lower = clean.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("<thinking>")) {
-            int end = lower.indexOf("</thinking>");
-            if (end > "<thinking>".length()) {
+        if (lower.startsWith("<thinking>") || lower.startsWith("<think>")) {
+            String open = lower.startsWith("<thinking>") ? "<thinking>" : "<think>";
+            String close = lower.startsWith("<thinking>") ? "</thinking>" : "</think>";
+            int end = lower.indexOf(close);
+            if (end > open.length()) {
                 return new ThinkingSplit(
-                        clean.substring("<thinking>".length(), end).trim(),
-                        clean.substring(end + "</thinking>".length()).trim());
+                        clean.substring(open.length(), end).trim(),
+                        clean.substring(end + close.length()).trim());
             }
         }
         String prefix = "";

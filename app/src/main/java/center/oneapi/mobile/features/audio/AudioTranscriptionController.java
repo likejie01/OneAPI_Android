@@ -15,6 +15,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import center.oneapi.mobile.core.ApiClient;
@@ -44,7 +45,8 @@ public class AudioTranscriptionController {
 
     private static final int SAMPLE_RATE = 16000;
     private static final int FRAME_BYTES = 6400;
-    private static final long AUTO_STOP_SILENCE_MS = 3000L;
+    private static final long STANDBY_SILENCE_MS = 700L;
+    private static final long AUTO_STOP_SILENCE_MS = 1500L;
     private static final float SPEECH_LEVEL = 0.22f;
 
     private final ApiClient api;
@@ -60,6 +62,9 @@ public class AudioTranscriptionController {
     private ByteArrayOutputStream recordedPcm;
     private volatile boolean autoSubmitRequested;
     private volatile boolean autoSubmitDelivered;
+    private volatile boolean suppressFallbackTranscription;
+    private volatile boolean tencentAudioReady;
+    private final AtomicReference<WebSocket> activeTencentSocket = new AtomicReference<>();
 
     private enum Provider {
         TENCENT,
@@ -83,13 +88,24 @@ public class AudioTranscriptionController {
         finalText.setLength(0);
         autoSubmitRequested = false;
         autoSubmitDelivered = false;
+        suppressFallbackTranscription = false;
+        tencentAudioReady = false;
         activeCallback = callback;
+        provider = Provider.TENCENT;
+        recordedPcm = new ByteArrayOutputStream();
+        running.set(true);
+        startAudioLoop(null, callback);
+        if (callback != null) callback.onReady();
         try {
             status(callback, "步骤1/5：获取腾讯云 ASR 签名地址");
             startTencent(callback);
         } catch (Exception error) {
             status(callback, "腾讯实时链路启动失败，切换小米备用录音：" + cleanMessage(error));
-            startMimoRecording(callback);
+            byte[] pcm;
+            synchronized (this) {
+                pcm = recordedPcm == null ? new byte[0] : recordedPcm.toByteArray();
+            }
+            fallbackAfterTencentFailure(pcm, callback, cleanMessage(error));
         }
     }
 
@@ -99,26 +115,26 @@ public class AudioTranscriptionController {
         url = normalizeTencentUrl(url);
         if (url.trim().isEmpty()) throw new IllegalStateException("服务器未返回腾讯云 ASR 签名地址");
         if (!url.startsWith("wss://")) throw new IllegalStateException("腾讯云 ASR 签名地址无效：" + trimForDisplay(url));
-        provider = Provider.TENCENT;
-        recordedPcm = new ByteArrayOutputStream();
-        running.set(true);
         status(callback, "步骤2/5：连接腾讯云实时 ASR WebSocket");
         Request request = new Request.Builder().url(url).build();
         socket = client.newWebSocket(request, new WebSocketListener() {
+            private final AtomicBoolean audioStarted = new AtomicBoolean(false);
+
             @Override
             public void onOpen(WebSocket webSocket, Response response) {
-                status(callback, "步骤3/5：WebSocket 已连接，开始录音发送音频");
-                startAudioLoop(callback);
-                if (callback != null) callback.onReady();
+                activeTencentSocket.set(webSocket);
+                status(callback, "步骤3/5：WebSocket 已连接，等待腾讯云握手确认");
             }
 
             @Override
             public void onMessage(WebSocket webSocket, String text) {
+                if (handleTencentHandshake(text, webSocket, audioStarted, callback)) return;
                 handleTencentMessage(text, callback);
             }
 
             @Override
             public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                if (!isCurrentTencentSocket(webSocket)) return;
                 running.set(false);
                 stopRecorderOnly();
                 String message = "腾讯实时识别失败：" + websocketFailureMessage(t, response);
@@ -132,11 +148,22 @@ public class AudioTranscriptionController {
 
             @Override
             public void onClosed(WebSocket webSocket, int code, String reason) {
+                if (!isCurrentTencentSocket(webSocket)) return;
                 running.set(false);
                 stopRecorderOnly();
                 if (callback != null) callback.onClosed();
             }
         });
+    }
+
+    private synchronized boolean isCurrentTencentSocket(WebSocket webSocket) {
+        boolean current = activeTencentSocket.compareAndSet(webSocket, null);
+        if (socket == webSocket) {
+            socket = null;
+            current = true;
+        }
+        if (current) tencentAudioReady = false;
+        return current;
     }
 
     public synchronized String stop() {
@@ -145,6 +172,8 @@ public class AudioTranscriptionController {
         if (socket != null) {
             WebSocket closing = socket;
             socket = null;
+            tencentAudioReady = false;
+            activeTencentSocket.compareAndSet(closing, null);
             try {
                 closing.send("{\"type\":\"end\"}");
             } catch (Exception ignored) {
@@ -162,15 +191,19 @@ public class AudioTranscriptionController {
         }
         byte[] pcm = recordedPcm == null ? new byte[0] : recordedPcm.toByteArray();
         recordedPcm = null;
-        if (provider == Provider.MIMO || ((latestText == null || latestText.trim().isEmpty()) && pcm.length > 0)) {
+        if (!suppressFallbackTranscription && (provider == Provider.MIMO || ((latestText == null || latestText.trim().isEmpty()) && pcm.length > 0))) {
             transcribeMimoAsync(pcm, activeCallback, provider == Provider.MIMO ? "小米备用转写" : "腾讯无最终文本，小米备用转写");
         } else if (autoSubmitRequested) {
             deliverAutoSubmit(activeCallback);
         }
+        suppressFallbackTranscription = false;
         return latestText == null ? "" : latestText.trim();
     }
 
-    private void startAudioLoop(Callback callback) {
+    private void startAudioLoop(WebSocket streamSocket, Callback callback) {
+        if (recordThread != null && recordThread.isAlive()) {
+            return;
+        }
         int minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         int bufferSize = Math.max(minBuffer, FRAME_BYTES * 2);
         recorder = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
@@ -178,21 +211,54 @@ public class AudioTranscriptionController {
         recordThread = new Thread(() -> {
             byte[] buffer = new byte[FRAME_BYTES];
             boolean heardSpeech = false;
+            boolean standby = false;
             long lastSpeechAt = System.currentTimeMillis();
             while (running.get()) {
-                int read = recorder == null ? 0 : recorder.read(buffer, 0, buffer.length);
-                if (read > 0 && socket != null) {
+                AudioRecord currentRecorder = recorder;
+                if (currentRecorder == null) break;
+                int read;
+                try {
+                    read = currentRecorder.read(buffer, 0, buffer.length);
+                } catch (Exception error) {
+                    running.set(false);
+                    byte[] pcm;
+                    synchronized (this) {
+                        pcm = recordedPcm == null ? new byte[0] : recordedPcm.toByteArray();
+                    }
+                    fallbackAfterTencentFailure(pcm, callback, "录音读取失败：" + cleanMessage(error));
+                    break;
+                }
+                if (read > 0) {
                     synchronized (this) {
                         if (recordedPcm != null) recordedPcm.write(buffer, 0, read);
                     }
-                    socket.send(ByteString.of(buffer, 0, read));
+                    WebSocket currentSocket = activeTencentSocket.get();
+                    if (provider == Provider.TENCENT && tencentAudioReady && currentSocket != null && (streamSocket == null || currentSocket == streamSocket)) {
+                        boolean sent = currentSocket.send(ByteString.of(buffer, 0, read));
+                        if (!sent) {
+                            running.set(false);
+                            byte[] pcm;
+                            synchronized (this) {
+                                pcm = recordedPcm == null ? new byte[0] : recordedPcm.toByteArray();
+                            }
+                            stopRecorderOnly();
+                            fallbackAfterTencentFailure(pcm, callback, "腾讯实时链路发送音频失败");
+                            break;
+                        }
+                    }
                     float level = level(buffer, read);
                     if (level >= SPEECH_LEVEL) {
                         heardSpeech = true;
+                        standby = false;
                         lastSpeechAt = System.currentTimeMillis();
-                    } else if (heardSpeech && System.currentTimeMillis() - lastSpeechAt >= AUTO_STOP_SILENCE_MS) {
-                        status(callback, "检测到 3 秒静音，自动结束语音输入");
+                    } else if (!standby && System.currentTimeMillis() - lastSpeechAt >= STANDBY_SILENCE_MS) {
+                        standby = true;
+                        if (callback != null) callback.onLevel(0f);
+                    }
+                    if (System.currentTimeMillis() - lastSpeechAt >= AUTO_STOP_SILENCE_MS) {
+                        status(callback, "检测到 1.5 秒静音，结束语音输入");
                         autoSubmitRequested = true;
+                        suppressFallbackTranscription = !heardSpeech;
                         stop();
                         break;
                     }
@@ -208,6 +274,32 @@ public class AudioTranscriptionController {
         recordThread.start();
     }
 
+    private boolean handleTencentHandshake(String payload, WebSocket webSocket, AtomicBoolean audioStarted, Callback callback) {
+        try {
+            JSONObject json = new JSONObject(payload);
+            boolean hasResult = json.has("result") && !json.isNull("result");
+            boolean isFinal = json.optInt("final", 0) == 1;
+            int code = json.optInt("code", 0);
+            if (!hasResult && !isFinal) {
+                if (code == 0) {
+                    if (audioStarted.compareAndSet(false, true)) {
+                        status(callback, "步骤4/5：腾讯云握手成功，开始实时发送 PCM 音频");
+                        tencentAudioReady = true;
+                        if (callback != null) callback.onReady();
+                    }
+                    return true;
+                }
+                String message = json.optString("message", json.optString("error", "握手失败"));
+                running.set(false);
+                activeTencentSocket.compareAndSet(webSocket, null);
+                fallbackAfterTencentFailure(new byte[0], callback, "腾讯握手失败：" + message);
+                return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
     private void startMimoRecording(Callback callback) {
         provider = Provider.MIMO;
         running.set(true);
@@ -219,11 +311,21 @@ public class AudioTranscriptionController {
         recordThread = new Thread(() -> {
             byte[] buffer = new byte[FRAME_BYTES];
             boolean heardSpeech = false;
+            boolean standby = false;
             long lastSpeechAt = System.currentTimeMillis();
             status(callback, "步骤3/5：小米备用链路录音中，停止后上传识别");
             if (callback != null) callback.onReady();
             while (running.get()) {
-                int read = recorder == null ? 0 : recorder.read(buffer, 0, buffer.length);
+                AudioRecord currentRecorder = recorder;
+                if (currentRecorder == null) break;
+                int read;
+                try {
+                    read = currentRecorder.read(buffer, 0, buffer.length);
+                } catch (Exception error) {
+                    running.set(false);
+                    if (callback != null) callback.onError("录音读取失败：" + cleanMessage(error));
+                    break;
+                }
                 if (read > 0) {
                     synchronized (this) {
                         if (recordedPcm != null) recordedPcm.write(buffer, 0, read);
@@ -231,10 +333,16 @@ public class AudioTranscriptionController {
                     float level = level(buffer, read);
                     if (level >= SPEECH_LEVEL) {
                         heardSpeech = true;
+                        standby = false;
                         lastSpeechAt = System.currentTimeMillis();
-                    } else if (heardSpeech && System.currentTimeMillis() - lastSpeechAt >= AUTO_STOP_SILENCE_MS) {
-                        status(callback, "检测到 3 秒静音，自动上传小米 ASR 识别");
+                    } else if (!standby && System.currentTimeMillis() - lastSpeechAt >= STANDBY_SILENCE_MS) {
+                        standby = true;
+                        if (callback != null) callback.onLevel(0f);
+                    }
+                    if (System.currentTimeMillis() - lastSpeechAt >= AUTO_STOP_SILENCE_MS) {
+                        status(callback, "检测到 1.5 秒静音，结束语音输入");
                         autoSubmitRequested = true;
+                        suppressFallbackTranscription = !heardSpeech;
                         stop();
                         break;
                     }
@@ -284,7 +392,10 @@ public class AudioTranscriptionController {
                 String message = json.optString("message", json.optString("error", ""));
                 running.set(false);
                 stopRecorderOnly();
-                byte[] pcm = recordedPcm == null ? new byte[0] : recordedPcm.toByteArray();
+                byte[] pcm;
+                synchronized (this) {
+                    pcm = recordedPcm == null ? new byte[0] : recordedPcm.toByteArray();
+                }
                 if (latestText == null || latestText.trim().isEmpty()) {
                     fallbackAfterTencentFailure(pcm, callback, "腾讯返回错误：" + message);
                 } else if (!message.trim().isEmpty() && callback != null) {
@@ -333,6 +444,8 @@ public class AudioTranscriptionController {
 
     private void fallbackAfterTencentFailure(byte[] pcm, Callback callback, String reason) {
         closeTencentSocketQuietly();
+        running.set(false);
+        stopRecorderOnly();
         String clean = reason == null ? "腾讯实时识别不可用" : reason.trim();
         if (pcm != null && pcm.length > 0) {
             transcribeMimoAsync(pcm, callback, clean + "，改用小米备用转写");
@@ -350,6 +463,8 @@ public class AudioTranscriptionController {
         if (socket == null) return;
         WebSocket closing = socket;
         socket = null;
+        tencentAudioReady = false;
+        activeTencentSocket.compareAndSet(closing, null);
         try {
             closing.close(1000, "fallback");
         } catch (Exception ignored) {

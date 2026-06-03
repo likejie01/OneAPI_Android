@@ -11,29 +11,31 @@ public class ConversationDisplayItem {
     public final String role;
     public final String text;
     public final long timestamp;
+    public final String tokenText;
 
-    private ConversationDisplayItem(long id, int type, String role, String text, long timestamp) {
+    private ConversationDisplayItem(long id, int type, String role, String text, long timestamp, String tokenText) {
         this.id = id;
         this.type = type;
         this.role = role == null ? "" : role;
         this.text = text == null ? "" : text;
         this.timestamp = timestamp;
+        this.tokenText = tokenText == null ? "" : tokenText;
     }
 
-    public static ConversationDisplayItem message(String role, String text, long timestamp, int index) {
-        return new ConversationDisplayItem(stableId("message", role, text, timestamp, index), MESSAGE, role, text, timestamp);
+    public static ConversationDisplayItem message(String role, String text, long timestamp, String tokenText, int index) {
+        return new ConversationDisplayItem(stableId("message", role, "", timestamp, index), MESSAGE, role, text, timestamp, tokenText);
     }
 
     public static ConversationDisplayItem log(String text, long timestamp, int index) {
-        return new ConversationDisplayItem(stableId("log", "", text, timestamp, index), LOG, "", text, timestamp);
+        return new ConversationDisplayItem(stableId("log", "", "", timestamp, index), LOG, "", text, timestamp, "");
     }
 
     public static ConversationDisplayItem loadEarlier(String text) {
-        return new ConversationDisplayItem(stableId("load", "", text, 0, 0), LOAD_EARLIER, "", text, 0);
+        return new ConversationDisplayItem(stableId("load", "", text, 0, 0), LOAD_EARLIER, "", text, 0, "");
     }
 
     public static ConversationDisplayItem empty(String text) {
-        return new ConversationDisplayItem(stableId("empty", "", text, 0, 0), EMPTY, "", text, 0);
+        return new ConversationDisplayItem(stableId("empty", "", text, 0, 0), EMPTY, "", text, 0, "");
     }
 
     private static long stableId(String kind, String role, String text, long timestamp, int index) {

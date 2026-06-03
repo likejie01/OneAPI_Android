@@ -15,9 +15,13 @@ import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 public class ApiClient {
     private final AppPrefs prefs;
+    private final Set<HttpURLConnection> activeConnections = Collections.synchronizedSet(new HashSet<>());
 
     public ApiClient(AppPrefs prefs) {
         this.prefs = prefs;
@@ -34,33 +38,40 @@ public class ApiClient {
     public void postStream(String path, JSONObject body, StreamHandler handler) throws IOException, JSONException {
         ensureBackgroundThread();
         HttpURLConnection connection = (HttpURLConnection) new URL(buildUrl(prefs.server(), path)).openConnection();
-        connection.setRequestMethod("POST");
-        connection.setConnectTimeout(12000);
-        connection.setReadTimeout(180000);
-        connection.setRequestProperty("Accept", "text/event-stream");
-        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        String token = prefs.token();
-        if (!token.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + token);
-        String cookie = prefs.cookie();
-        if (!cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
-        String userId = prefs.userId();
-        if (!userId.isEmpty()) connection.setRequestProperty("New-Api-User", userId);
-        if (body != null) {
-            connection.setDoOutput(true);
-            try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(connection.getOutputStream(), StandardCharsets.UTF_8))) {
-                writer.write(body.toString());
+        activeConnections.add(connection);
+        try {
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(12000);
+            connection.setReadTimeout(180000);
+            connection.setRequestProperty("Accept", "text/event-stream");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            String token = prefs.token();
+            if (!token.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + token);
+            String cookie = prefs.cookie();
+            if (!cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+            String userId = prefs.userId();
+            if (!userId.isEmpty()) connection.setRequestProperty("New-Api-User", userId);
+            if (body != null) {
+                connection.setDoOutput(true);
+                try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(connection.getOutputStream(), StandardCharsets.UTF_8))) {
+                    writer.write(body.toString());
+                }
             }
-        }
-        int code = connection.getResponseCode();
-        if (code < 200 || code >= 400) {
-            String text = read(connection.getErrorStream());
-            throw new IOException(text.trim().isEmpty() ? "HTTP " + code : text);
-        }
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (handler != null) handler.onLine(line);
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 400) {
+                String text = read(connection.getErrorStream());
+                throw new IOException(text.trim().isEmpty() ? "HTTP " + code : text);
             }
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (Thread.currentThread().isInterrupted()) throw new IOException("请求已停止");
+                    if (handler != null) handler.onLine(line);
+                }
+            }
+        } finally {
+            activeConnections.remove(connection);
+            connection.disconnect();
         }
     }
 
@@ -71,40 +82,58 @@ public class ApiClient {
     public JSONObject request(String method, String path, JSONObject body) throws IOException, JSONException {
         ensureBackgroundThread();
         HttpURLConnection connection = (HttpURLConnection) new URL(buildUrl(prefs.server(), path)).openConnection();
-        connection.setRequestMethod(method);
-        connection.setConnectTimeout(12000);
-        connection.setReadTimeout(30000);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        String token = prefs.token();
-        if (!token.isEmpty()) {
-            connection.setRequestProperty("Authorization", "Bearer " + token);
-        }
-        String cookie = prefs.cookie();
-        if (!cookie.isEmpty()) {
-            connection.setRequestProperty("Cookie", cookie);
-        }
-        String userId = prefs.userId();
-        if (!userId.isEmpty()) {
-            connection.setRequestProperty("New-Api-User", userId);
-        }
-        if (body != null) {
-            connection.setDoOutput(true);
-            try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(connection.getOutputStream(), StandardCharsets.UTF_8))) {
-                writer.write(body.toString());
+        activeConnections.add(connection);
+        try {
+            connection.setRequestMethod(method);
+            connection.setConnectTimeout(12000);
+            connection.setReadTimeout(30000);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            String token = prefs.token();
+            if (!token.isEmpty()) {
+                connection.setRequestProperty("Authorization", "Bearer " + token);
             }
+            String cookie = prefs.cookie();
+            if (!cookie.isEmpty()) {
+                connection.setRequestProperty("Cookie", cookie);
+            }
+            String userId = prefs.userId();
+            if (!userId.isEmpty()) {
+                connection.setRequestProperty("New-Api-User", userId);
+            }
+            if (body != null) {
+                connection.setDoOutput(true);
+                try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(connection.getOutputStream(), StandardCharsets.UTF_8))) {
+                    writer.write(body.toString());
+                }
+            }
+            int code = connection.getResponseCode();
+            String setCookie = connection.getHeaderField("Set-Cookie");
+            if (setCookie != null && !setCookie.trim().isEmpty()) {
+                prefs.setCookie(setCookie.split(";", 2)[0]);
+            }
+            String text = read(code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream());
+            JSONObject json = text.trim().isEmpty() ? new JSONObject() : new JSONObject(text);
+            if (code < 200 || code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
+                throw new IOException(errorMessage(json, code));
+            }
+            return json;
+        } finally {
+            activeConnections.remove(connection);
+            connection.disconnect();
         }
-        int code = connection.getResponseCode();
-        String setCookie = connection.getHeaderField("Set-Cookie");
-        if (setCookie != null && !setCookie.trim().isEmpty()) {
-            prefs.setCookie(setCookie.split(";", 2)[0]);
+    }
+
+    public void cancelActiveRequests() {
+        synchronized (activeConnections) {
+            for (HttpURLConnection connection : activeConnections) {
+                try {
+                    connection.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+            activeConnections.clear();
         }
-        String text = read(code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream());
-        JSONObject json = text.trim().isEmpty() ? new JSONObject() : new JSONObject(text);
-        if (code < 200 || code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
-            throw new IOException(errorMessage(json, code));
-        }
-        return json;
     }
 
     public static String buildUrl(String server, String path) {

@@ -26,6 +26,8 @@ public class ComposerView extends LinearLayout {
     public interface Listener {
         void onSend(String text);
 
+        void onStop();
+
         void onHistory();
 
         void onModel();
@@ -52,8 +54,6 @@ public class ComposerView extends LinearLayout {
 
         void onRemoveAttachment(Uri uri);
 
-        void onVoiceModeChanged(boolean voiceMode);
-
         void onVoiceMic();
     }
 
@@ -70,16 +70,16 @@ public class ComposerView extends LinearLayout {
     private final ImageButton permissionButton;
     private final ImageButton skillButton;
     private final ImageButton micButton;
-    private final ImageButton voiceToggleButton;
     private final ImageButton sendButton;
     private final LinearLayout inputRow;
     private Listener listener;
     private ComposerState state;
     private boolean sending;
-    private boolean voiceMode;
+    private boolean voiceListening;
     private boolean keyboardOpen;
     private boolean inputCollapsed;
     private boolean enabled = true;
+    private boolean hasAttachments;
     private View lastActionAnchor;
 
     public ComposerView(Context context) {
@@ -89,7 +89,7 @@ public class ComposerView extends LinearLayout {
         setClipChildren(false);
         int pad = UiKit.dp(context, 10);
         setPadding(pad, UiKit.dp(context, 8), pad, UiKit.dp(context, 12));
-        setBackground(UiKit.glass(context, UiKit.dp(context, 18), UiKit.LINE));
+        setBackground(UiKit.glass(context, UiKit.dp(context, 18), UiKit.line(context)));
 
         tags = new FlowTagLayout(context);
         tags.setPadding(0, 0, 0, UiKit.dp(context, 4));
@@ -141,8 +141,8 @@ public class ComposerView extends LinearLayout {
         input.setMinLines(1);
         input.setMaxLines(5);
         input.setTextSize(15);
-        input.setTextColor(UiKit.INK);
-        input.setHintTextColor(UiKit.MUTED);
+        input.setTextColor(UiKit.ink(context));
+        input.setHintTextColor(UiKit.muted(context));
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setImeOptions(EditorInfo.IME_ACTION_SEND);
         input.setBackgroundColor(Color.TRANSPARENT);
@@ -152,7 +152,7 @@ public class ComposerView extends LinearLayout {
         inputRow.setBackground(UiKit.round(Color.TRANSPARENT, UiKit.dp(context, 14), Color.TRANSPARENT));
         inputRow.addView(input, new LinearLayout.LayoutParams(0, UiKit.dp(context, 68), 1f));
         micButton = UiKit.imageButton(context, R.drawable.ic_voice_mic, "开始语音输入");
-        micButton.setVisibility(GONE);
+        micButton.setVisibility(VISIBLE);
         micButton.setOnClickListener(v -> {
             if (listener != null) listener.onVoiceMic();
         });
@@ -160,22 +160,12 @@ public class ComposerView extends LinearLayout {
         addView(inputRow, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 68)));
         inputRow.setOnClickListener(v -> expandInput(true));
 
-        voiceToggleButton = UiKit.imageButton(context, R.drawable.ic_voice_mic, "切换语音输入");
-        voiceToggleButton.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 8), UiKit.dp(context, 8), UiKit.dp(context, 8));
-        voiceToggleButton.setOnClickListener(v -> {
-            setVoiceMode(!voiceMode);
-            if (listener != null) listener.onVoiceModeChanged(voiceMode);
-        });
         sendButton = UiKit.imageButton(context, R.drawable.ic_send_plane, "发送");
         sendButton.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 8), UiKit.dp(context, 8), UiKit.dp(context, 8));
         LinearLayout bottom = UiKit.horizontal(context);
         bottom.setGravity(Gravity.CENTER_VERTICAL);
         bottom.setOnClickListener(v -> expandInput(true));
         bottom.addView(tools, new LinearLayout.LayoutParams(0, UiKit.dp(context, 38), 1f));
-        FrameLayout voiceWrap = new FrameLayout(context);
-        voiceWrap.setPadding(UiKit.dp(context, 6), 0, 0, 0);
-        voiceWrap.addView(voiceToggleButton, new FrameLayout.LayoutParams(UiKit.dp(context, 38), UiKit.dp(context, 38), Gravity.CENTER));
-        bottom.addView(voiceWrap, new LinearLayout.LayoutParams(UiKit.dp(context, 44), UiKit.dp(context, 38)));
         FrameLayout sendWrap = new FrameLayout(context);
         sendWrap.setPadding(UiKit.dp(context, 8), 0, 0, 0);
         sendWrap.addView(sendButton, new FrameLayout.LayoutParams(UiKit.dp(context, 38), UiKit.dp(context, 38), Gravity.CENTER));
@@ -204,7 +194,7 @@ public class ComposerView extends LinearLayout {
     public void updateState(ComposerState next) {
         state = next;
         enabled = next.enabled;
-        input.setHint(voiceMode ? "点击右侧麦克风说话" : (next.hint.isEmpty() ? "输入消息" : next.hint));
+        input.setHint(next.hint.isEmpty() ? "输入消息" : next.hint);
         boolean chat = "chat".equals(next.sectionId);
         boolean image = "image".equals(next.sectionId);
         boolean desktop = next.desktopMode;
@@ -220,6 +210,7 @@ public class ComposerView extends LinearLayout {
         permissionButton.setContentDescription(next.fullPermission ? "全权限" : "受限");
         setInteractionEnabled(enabled);
         renderTags(next);
+        applyTheme();
     }
 
     public String inputText() {
@@ -241,28 +232,31 @@ public class ComposerView extends LinearLayout {
         this.sending = sending;
         sendButton.setImageResource(sending ? R.drawable.ic_stop_square : R.drawable.ic_send_plane);
         sendButton.setContentDescription(sending ? "停止" : "发送");
-        sendButton.setColorFilter(sending ? Color.rgb(216, 71, 86) : UiKit.INK);
+        applyTheme();
         sendButton.setBackground(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
     }
 
     public void setVoiceMode(boolean enabled) {
-        voiceMode = enabled;
-        if (enabled) expandInput(false);
-        micButton.setVisibility(enabled ? VISIBLE : GONE);
-        voiceToggleButton.setImageResource(enabled ? R.drawable.ic_keyboard_input : R.drawable.ic_voice_mic);
-        voiceToggleButton.setContentDescription(enabled ? "切换键盘输入" : "切换语音输入");
-        input.setHint(enabled ? "点击右侧麦克风说话" : (state == null || state.hint.isEmpty() ? "输入消息" : state.hint));
+        micButton.setVisibility(VISIBLE);
         updateInputBoundary();
     }
 
     public void setVoiceListening(boolean listening) {
-        micButton.setColorFilter(listening ? Color.rgb(48, 151, 106) : UiKit.INK);
+        voiceListening = listening;
+        if (listening) {
+            micButton.setColorFilter(Color.rgb(48, 151, 106));
+        } else if (UiKit.darkTheme(getContext())) {
+            micButton.setColorFilter(UiKit.ink(getContext()));
+        } else {
+            micButton.clearColorFilter();
+        }
         micButton.setBackground(listening
                 ? UiKit.round(Color.argb(92, 181, 226, 203), UiKit.dp(getContext(), 21), Color.rgb(119, 196, 158))
                 : new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
         micButton.setScaleX(listening ? 1.08f : 1f);
         micButton.setScaleY(listening ? 1.08f : 1f);
         micButton.setAlpha(1f);
+        updateInputBoundary();
     }
 
     public void setKeyboardOpen(boolean open) {
@@ -289,6 +283,7 @@ public class ComposerView extends LinearLayout {
     public void updateAttachments(List<Uri> attachments) {
         attachmentRow.removeAllViews();
         List<Uri> safe = attachments == null ? new ArrayList<>() : attachments;
+        hasAttachments = !safe.isEmpty();
         attachmentScroller.setVisibility(safe.isEmpty() ? GONE : VISIBLE);
         for (Uri uri : safe) {
             FrameLayout thumb = new FrameLayout(getContext());
@@ -317,24 +312,28 @@ public class ComposerView extends LinearLayout {
             ImageView image = new ImageView(getContext());
             image.setImageURI(uri);
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            image.setBackground(UiKit.round(Color.WHITE, UiKit.dp(getContext(), 12), UiKit.LINE));
+            image.setBackground(UiKit.round(UiKit.resolve(getContext(), Color.WHITE), UiKit.dp(getContext(), 12), UiKit.line(getContext())));
             return image;
         }
         TextView file = UiKit.text(getContext(), extensionLabel(uri), UiKit.MUTED, 11);
         file.setGravity(Gravity.CENTER);
         file.setSingleLine(true);
         file.setTextColor(fileColor(uri));
-        file.setBackground(UiKit.round(fileBackground(uri), UiKit.dp(getContext(), 12), UiKit.LINE));
+        file.setBackground(UiKit.round(fileBackground(uri), UiKit.dp(getContext(), 12), UiKit.line(getContext())));
         return file;
     }
 
     private void emitSend() {
         expandInput(true);
-        if (!enabled || sending) {
+        if (sending) {
+            if (listener != null) listener.onStop();
+            return;
+        }
+        if (!enabled) {
             return;
         }
         String text = input.getText().toString().trim();
-        if (text.isEmpty()) {
+        if (text.isEmpty() && !hasAttachments) {
             return;
         }
         if (listener != null) {
@@ -367,7 +366,7 @@ public class ComposerView extends LinearLayout {
             tags.addView(tag(shortText(next.assistantLabel, 6), false, "assistant"));
         }
         if (!next.modelLabel.isEmpty()) {
-            tags.addView(tag(next.modelLabel, false, "model"));
+            tags.addView(tag(shortText(next.modelLabel, 8), false, "model"));
         }
         if (!next.sizeLabel.isEmpty()) {
             tags.addView(tag(next.sizeLabel, false, "image"));
@@ -390,9 +389,7 @@ public class ComposerView extends LinearLayout {
         view.setSingleLine(false);
         view.setMaxLines(2);
         view.setGravity(Gravity.CENTER_VERTICAL);
-        int bg = "assistant".equals(kind) ? Color.rgb(238, 248, 244)
-                : strong ? Color.rgb(238, 244, 255) : Color.rgb(247, 249, 252);
-        view.setBackground(UiKit.round(bg, UiKit.dp(getContext(), 13), UiKit.LINE));
+        view.setBackground(UiKit.round(UiKit.tagFill(getContext(), kind, strong), UiKit.dp(getContext(), 13), UiKit.line(getContext())));
         view.setPadding(UiKit.dp(getContext(), 9), UiKit.dp(getContext(), 4), UiKit.dp(getContext(), 9), UiKit.dp(getContext(), 4));
         ViewGroup.MarginLayoutParams lp = new ViewGroup.MarginLayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 0, UiKit.dp(getContext(), 6), UiKit.dp(getContext(), 5));
@@ -404,13 +401,15 @@ public class ComposerView extends LinearLayout {
         LinearLayout row = UiKit.horizontal(getContext());
         row.setGravity(Gravity.CENTER_VERTICAL);
         String kind = extensionKind(text);
-        int bg = "command".equals(kind) ? Color.rgb(249, 243, 235)
-                : "plugin".equals(kind) ? Color.rgb(242, 239, 250)
-                : Color.rgb(238, 244, 255);
         int fg = "command".equals(kind) ? Color.rgb(158, 98, 28)
                 : "plugin".equals(kind) ? Color.rgb(104, 82, 170)
-                : UiKit.BLUE;
-        row.setBackground(UiKit.round(bg, UiKit.dp(getContext(), 13), Color.argb(88, 145, 160, 184)));
+                : UiKit.blue(getContext());
+        if (UiKit.darkTheme(getContext())) {
+            fg = "command".equals(kind) ? Color.rgb(232, 177, 105)
+                    : "plugin".equals(kind) ? Color.rgb(196, 178, 255)
+                    : UiKit.blue(getContext());
+        }
+        row.setBackground(UiKit.round(UiKit.tagFill(getContext(), kind, true), UiKit.dp(getContext(), 13), UiKit.line(getContext())));
         row.setPadding(UiKit.dp(getContext(), 9), UiKit.dp(getContext(), 2), UiKit.dp(getContext(), 4), UiKit.dp(getContext(), 2));
         TextView label = UiKit.text(getContext(), text, fg, 12);
         label.setSingleLine(true);
@@ -444,8 +443,46 @@ public class ComposerView extends LinearLayout {
     }
 
     private void updateInputBoundary() {
-        boolean active = keyboardOpen || voiceMode || input.hasFocus();
-        inputRow.setBackground(UiKit.round(active ? Color.rgb(250, 251, 253) : Color.TRANSPARENT, UiKit.dp(getContext(), 14), Color.TRANSPARENT));
+        boolean active = keyboardOpen || voiceListening || input.hasFocus();
+        inputRow.setBackground(UiKit.round(active ? UiKit.inputFill(getContext()) : Color.TRANSPARENT, UiKit.dp(getContext(), 14), Color.TRANSPARENT));
+    }
+
+    private void applyTheme() {
+        setBackground(UiKit.glass(getContext(), UiKit.dp(getContext(), 18), UiKit.line(getContext())));
+        input.setTextColor(UiKit.ink(getContext()));
+        input.setHintTextColor(UiKit.muted(getContext()));
+        refreshIconColors(this);
+        if (voiceListening) {
+            micButton.setColorFilter(Color.rgb(48, 151, 106));
+        } else if (UiKit.darkTheme(getContext())) {
+            micButton.setColorFilter(UiKit.ink(getContext()));
+        } else {
+            micButton.clearColorFilter();
+        }
+        if (sending) {
+            sendButton.setColorFilter(Color.rgb(216, 71, 86));
+        } else if (!UiKit.darkTheme(getContext())) {
+            sendButton.clearColorFilter();
+        } else {
+            sendButton.setColorFilter(UiKit.ink(getContext()));
+        }
+        updateInputBoundary();
+    }
+
+    private void refreshIconColors(View view) {
+        if (view instanceof ImageButton) {
+            if (UiKit.darkTheme(getContext())) {
+                ((ImageButton) view).setColorFilter(UiKit.ink(getContext()));
+            } else {
+                ((ImageButton) view).clearColorFilter();
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                refreshIconColors(group.getChildAt(i));
+            }
+        }
     }
 
     private void maybeCollapseInput() {
@@ -465,10 +502,8 @@ public class ComposerView extends LinearLayout {
         input.setEnabled(value);
         input.setAlpha(value ? 1f : 0.58f);
         sendButton.setEnabled(value);
-        voiceToggleButton.setEnabled(value);
         micButton.setEnabled(value);
         sendButton.setAlpha(value ? 1f : 0.36f);
-        voiceToggleButton.setAlpha(value ? 1f : 0.36f);
         micButton.setAlpha(value ? 1f : 0.36f);
         for (int i = 0; i < getChildCount(); i++) {
             View child = getChildAt(i);
@@ -500,18 +535,25 @@ public class ComposerView extends LinearLayout {
 
     private int fileBackground(Uri uri) {
         String ext = extensionLabel(uri).toLowerCase(java.util.Locale.ROOT);
+        if (UiKit.darkTheme(getContext())) {
+            if ("pdf".equals(ext)) return UiKit.tagFill(getContext(), "command", true);
+            if ("xlsx".equals(ext) || "xls".equals(ext) || "xlsm".equals(ext)) return UiKit.tagFill(getContext(), "assistant", true);
+            if ("md".equals(ext) || "markd".equals(ext)) return UiKit.tagFill(getContext(), "model", true);
+            if ("json".equals(ext) || "txt".equals(ext)) return UiKit.itemFill(getContext(), false);
+            return UiKit.itemFill(getContext(), false);
+        }
         if ("pdf".equals(ext)) return Color.rgb(255, 241, 242);
-        if ("xlsx".equals(ext) || "xls".equals(ext) || "xlsm".equals(ext)) return Color.rgb(238, 248, 244);
-        if ("md".equals(ext) || "markd".equals(ext)) return Color.rgb(238, 244, 255);
-        if ("json".equals(ext) || "txt".equals(ext)) return Color.rgb(247, 249, 252);
-        return Color.WHITE;
+        if ("xlsx".equals(ext) || "xls".equals(ext) || "xlsm".equals(ext)) return UiKit.tagFill(getContext(), "assistant", true);
+        if ("md".equals(ext) || "markd".equals(ext)) return UiKit.tagFill(getContext(), "model", true);
+        if ("json".equals(ext) || "txt".equals(ext)) return UiKit.itemFill(getContext(), false);
+        return UiKit.itemFill(getContext(), false);
     }
 
     private int fileColor(Uri uri) {
         String ext = extensionLabel(uri).toLowerCase(java.util.Locale.ROOT);
         if ("pdf".equals(ext)) return Color.rgb(185, 54, 72);
         if ("xlsx".equals(ext) || "xls".equals(ext) || "xlsm".equals(ext)) return Color.rgb(48, 151, 106);
-        if ("md".equals(ext) || "markd".equals(ext)) return UiKit.BLUE;
-        return UiKit.MUTED;
+        if ("md".equals(ext) || "markd".equals(ext)) return UiKit.blue(getContext());
+        return UiKit.muted(getContext());
     }
 }

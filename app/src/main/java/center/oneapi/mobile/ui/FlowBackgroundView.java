@@ -24,23 +24,44 @@ public class FlowBackgroundView extends View {
         super.onDraw(canvas);
         float w = Math.max(1, getWidth());
         float h = Math.max(1, getHeight());
+        if (!UiKit.backgroundEffectsEnabled(getContext())) {
+            paint.setShader(null);
+            paint.setColor(UiKit.appBackground(getContext()));
+            canvas.drawRect(0, 0, w, h, paint);
+            return;
+        }
         float cycle = ((System.currentTimeMillis() - startedAt) % 9000L) / 9000f;
         float slow = ((System.currentTimeMillis() - startedAt) % 16000L) / 16000f;
         float theta = (float) (cycle * Math.PI * 2f);
         float drift = (float) Math.sin(slow * Math.PI * 2f);
+        if (UiKit.darkTheme(getContext())) {
+            paint.setShader(new LinearGradient(0, 0, w, h,
+                    new int[]{Color.rgb(5, 8, 13), Color.rgb(9, 14, 23), Color.rgb(7, 11, 17)},
+                    new float[]{0f, 0.48f + drift * 0.08f, 1f},
+                    Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            drawSoftBlob(canvas, w * (0.18f + 0.16f * (float) Math.sin(theta)), h * (0.22f + 0.07f * (float) Math.cos(theta * 0.8f)), w * 0.50f,
+                    Color.argb(86, 32, 62, 144), Color.argb(0, 32, 62, 144));
+            drawSoftBlob(canvas, w * (0.82f + 0.10f * (float) Math.cos(theta * 1.1f)), h * (0.20f + 0.13f * (float) Math.sin(theta)), w * 0.42f,
+                    Color.argb(62, 26, 113, 103), Color.argb(0, 26, 113, 103));
+            drawSoftBlob(canvas, w * (0.50f + 0.10f * (float) Math.cos(theta * 0.7f)), h * (0.80f + 0.05f * (float) Math.sin(theta * 1.3f)), w * 0.52f,
+                    Color.argb(54, 94, 67, 139), Color.argb(0, 94, 67, 139));
+            postInvalidateDelayed(33);
+            return;
+        }
         paint.setShader(new LinearGradient(0, 0, w, h,
-                new int[]{Color.rgb(247, 251, 255), Color.rgb(240, 247, 255), Color.rgb(250, 252, 255)},
-                new float[]{0f, 0.45f + drift * 0.08f, 1f},
+                new int[]{Color.rgb(242, 249, 255), Color.rgb(229, 244, 255), Color.rgb(255, 248, 252)},
+                new float[]{0f, 0.44f + drift * 0.12f, 1f},
                 Shader.TileMode.CLAMP));
         canvas.drawRect(0, 0, w, h, paint);
         drawSoftBlob(canvas, w * (0.18f + 0.16f * (float) Math.sin(theta)), h * (0.22f + 0.07f * (float) Math.cos(theta * 0.8f)), w * 0.50f,
-                Color.argb(92, 196, 216, 252), Color.argb(0, 196, 216, 252));
+                Color.argb(106, 140, 190, 255), Color.argb(0, 140, 190, 255));
         drawSoftBlob(canvas, w * (0.82f + 0.10f * (float) Math.cos(theta * 1.1f)), h * (0.20f + 0.13f * (float) Math.sin(theta)), w * 0.42f,
-                Color.argb(76, 206, 241, 232), Color.argb(0, 206, 241, 232));
+                Color.argb(90, 92, 225, 205), Color.argb(0, 92, 225, 205));
         drawSoftBlob(canvas, w * (0.42f + 0.12f * (float) Math.cos(theta * 0.7f)), h * (0.84f + 0.05f * (float) Math.sin(theta * 1.3f)), w * 0.54f,
-                Color.argb(66, 226, 216, 248), Color.argb(0, 226, 216, 248));
+                Color.argb(78, 198, 150, 255), Color.argb(0, 198, 150, 255));
         drawSoftBlob(canvas, w * (0.68f + 0.08f * (float) Math.sin(theta * 1.4f)), h * (0.62f + 0.08f * (float) Math.cos(theta * 0.9f)), w * 0.34f,
-                Color.argb(44, 255, 232, 196), Color.argb(0, 255, 232, 196));
+                Color.argb(61, 255, 198, 130), Color.argb(0, 255, 198, 130));
         postInvalidateDelayed(33);
     }
 

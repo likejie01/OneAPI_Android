@@ -16,7 +16,7 @@ public class StatusController {
     }
 
     public JSONObject serviceStatus() throws Exception {
-        return api.get("/api/service-status");
+        return api.get("/api/service-status?limit=20");
     }
 
     public JSONObject downloadPackages() throws Exception {

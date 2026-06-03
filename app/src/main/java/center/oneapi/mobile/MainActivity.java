@@ -9,9 +9,11 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Environment;
 import android.os.Handler;
@@ -24,6 +26,7 @@ import android.provider.OpenableColumns;
 import android.text.TextUtils;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -68,6 +71,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -103,11 +108,17 @@ import center.oneapi.mobile.ui.conversation.ScrollDock;
 public class MainActivity extends Activity {
     private static final int REQ_IMAGE = 42;
     private static final int REQ_RECORD_AUDIO = 43;
+    private static final int REQ_CAMERA = 44;
+    private static final int REQ_GALLERY = 45;
+    private static final int REQ_DOCUMENT = 46;
     private final Map<AppSection, SectionState> states = new EnumMap<>(AppSection.class);
     private final List<Uri> selectedAttachments = new ArrayList<>();
+    private Uri pendingCameraUri;
     private final Map<AppSection, LinearLayout> navButtons = new EnumMap<>(AppSection.class);
     private final Map<String, String> chatAssistantPrompts = new HashMap<>();
     private final Map<String, String> imageAssistantPrompts = new HashMap<>();
+    private final Map<String, JSONObject> panelDataCache = new HashMap<>();
+    private final Map<String, Long> panelDataCacheAt = new HashMap<>();
     private AppSection currentSection = AppSection.CHAT;
     private RecyclerView recyclerView;
     private ConversationAdapter adapter;
@@ -119,6 +130,9 @@ public class MainActivity extends Activity {
     private LinearLayout pageContent;
     private LinearLayout aiChatHeader;
     private LinearLayout aiChatTopNav;
+    private Button drawerMenuButton;
+    private AppSection lastAiChatSection = AppSection.CHAT;
+    private FlowBackgroundView flowBackgroundView;
     private AppPrefs prefs;
     private ApiClient apiClient;
     private ChatController chatController;
@@ -140,10 +154,44 @@ public class MainActivity extends Activity {
     };
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private Future<?> activeSendTask;
+    private AtomicBoolean activeSendCancelled;
+    private final Map<AppSection, String> rememberedModelProvider = new EnumMap<>(AppSection.class);
+    private final Map<AppSection, String> rememberedExtensionKind = new EnumMap<>(AppSection.class);
     private boolean keyboardOpen;
+    private int lastKeyboardInset = -1;
     private static final Pattern MARKDOWN_IMAGE = Pattern.compile("!\\[[^\\]]*\\]\\(([^)]+)\\)");
+    private static final long STREAM_SCROLL_INTERVAL_MS = 32L;
+    private static final long STREAM_SCROLL_RESUME_MS = 1000L;
     private boolean voiceListening;
-    private boolean voiceAutoSubmitted;
+    private boolean streamResponseActive;
+    private boolean streamScrollPausedByUser;
+    private boolean streamScrollRunning;
+    private boolean streamScrollProgrammatic;
+    private final Runnable streamScrollTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!streamResponseActive || streamScrollPausedByUser || recyclerView == null || !currentSection.isConversation()) {
+                streamScrollRunning = false;
+                return;
+            }
+            if (!recyclerView.canScrollVertically(1)) {
+                streamScrollRunning = false;
+                return;
+            }
+            streamScrollProgrammatic = true;
+            recyclerView.scrollBy(0, Math.max(1, UiKit.dp(MainActivity.this, 1)));
+            mainHandler.postDelayed(() -> streamScrollProgrammatic = false, 40);
+            mainHandler.postDelayed(this, STREAM_SCROLL_INTERVAL_MS);
+        }
+    };
+    private final Runnable resumeStreamScrollIfAtBottom = () -> {
+        if (!streamResponseActive || recyclerView == null) return;
+        if (!recyclerView.canScrollVertically(1)) {
+            streamScrollPausedByUser = false;
+            requestStreamAutoScroll();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -160,7 +208,9 @@ public class MainActivity extends Activity {
         conversationRepository = new ConversationRepository(this);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         seedState();
+        loadSavedModelSelections();
         buildShell();
+        applySystemBars();
         loadStoredLocalSessions(AppSection.CHAT);
         loadStoredLocalSessions(AppSection.IMAGE);
         switchSection(AppSection.CHAT);
@@ -175,14 +225,41 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         network.shutdownNow();
+        apiClient.cancelActiveRequests();
         mainHandler.removeCallbacks(desktopPoll);
         stopVoiceRecognition();
         super.onDestroy();
     }
 
+    private void applySystemBars() {
+        Window window = getWindow();
+        window.setStatusBarColor(UiKit.systemBar(this));
+        window.setNavigationBarColor(UiKit.systemBar(this));
+        if (drawerMenuButton != null) {
+            drawerMenuButton.setTextColor(UiKit.ink(this));
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            int flags = window.getDecorView().getSystemUiVisibility();
+            if (UiKit.darkTheme(this)) {
+                flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            } else {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (UiKit.darkTheme(this)) {
+                    flags &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                } else {
+                    flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                }
+            }
+            window.getDecorView().setSystemUiVisibility(flags);
+        }
+    }
+
     private void buildShell() {
         FrameLayout root = new FrameLayout(this);
-        root.addView(new FlowBackgroundView(this), new FrameLayout.LayoutParams(-1, -1));
+        flowBackgroundView = new FlowBackgroundView(this);
+        root.addView(flowBackgroundView, new FrameLayout.LayoutParams(-1, -1));
         root.addView(new FrostedOverlayView(this), new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout main = UiKit.vertical(this);
@@ -194,7 +271,7 @@ public class MainActivity extends Activity {
         LinearLayout header = UiKit.horizontal(this);
         aiChatHeader = header;
         header.setPadding(UiKit.dp(this, 18), UiKit.dp(this, 10), UiKit.dp(this, 18), UiKit.dp(this, 6));
-        header.setBackground(UiKit.glass(this, 0, Color.TRANSPARENT));
+        header.setBackground(new ColorDrawable(Color.TRANSPARENT));
         LinearLayout topNav = UiKit.horizontal(this);
         aiChatTopNav = topNav;
         addNav(topNav, AppSection.CHAT, R.drawable.nav_chat);
@@ -207,6 +284,7 @@ public class MainActivity extends Activity {
         addHeaderDot(topNav);
         header.addView(topNav, new LinearLayout.LayoutParams(0, UiKit.dp(this, 42), 1f));
         Button menu = UiKit.ghostButton(this, "☰");
+        drawerMenuButton = menu;
         menu.setContentDescription("打开菜单");
         menu.setTextSize(20);
         menu.setBackground(new ColorDrawable(Color.TRANSPARENT));
@@ -263,6 +341,11 @@ public class MainActivity extends Activity {
             @Override
             public void onSend(String text) {
                 sendMessage(text);
+            }
+
+            @Override
+            public void onStop() {
+                stopActiveSend();
             }
 
             @Override
@@ -336,15 +419,6 @@ public class MainActivity extends Activity {
             }
 
             @Override
-            public void onVoiceModeChanged(boolean voiceMode) {
-                if (voiceMode) {
-                    hideKeyboard();
-                } else {
-                    stopVoiceRecognition();
-                }
-            }
-
-            @Override
             public void onVoiceMic() {
                 toggleVoiceRecognition();
             }
@@ -360,10 +434,34 @@ public class MainActivity extends Activity {
         recyclerView.addOnItemTouchListener(new RecyclerView.SimpleOnItemTouchListener() {
             @Override
             public boolean onInterceptTouchEvent(RecyclerView rv, android.view.MotionEvent event) {
+                if (streamResponseActive && event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                    pauseStreamAutoScroll();
+                }
                 if (keyboardOpen && event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
                     hideKeyboard();
                 }
                 return false;
+            }
+        });
+        recyclerView.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(RecyclerView view, int newState) {
+                if (!streamResponseActive) return;
+                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                    pauseStreamAutoScroll();
+                    return;
+                }
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    mainHandler.removeCallbacks(resumeStreamScrollIfAtBottom);
+                    mainHandler.postDelayed(resumeStreamScrollIfAtBottom, STREAM_SCROLL_RESUME_MS);
+                }
+            }
+
+            @Override
+            public void onScrolled(RecyclerView view, int dx, int dy) {
+                if (!streamResponseActive || streamScrollProgrammatic) return;
+                mainHandler.removeCallbacks(resumeStreamScrollIfAtBottom);
+                mainHandler.postDelayed(resumeStreamScrollIfAtBottom, STREAM_SCROLL_RESUME_MS);
             }
         });
         pageScroll.setOnTouchListener((v, event) -> {
@@ -400,13 +498,12 @@ public class MainActivity extends Activity {
         hideKeyboard();
         composerView.setInputText("");
         composerView.setVoiceListening(true);
-        voiceAutoSubmitted = false;
         network.execute(() -> {
             try {
                 audioTranscriptionController.start(this, new AudioTranscriptionController.Callback() {
                     @Override
                     public void onStatus(String status) {
-                        mainHandler.post(() -> Toast.makeText(MainActivity.this, status, Toast.LENGTH_SHORT).show());
+                        // Keep ASR status silent; the microphone animation is the only in-flow feedback.
                     }
 
                     @Override
@@ -429,7 +526,10 @@ public class MainActivity extends Activity {
 
                     @Override
                     public void onError(String errorMessage) {
-                        mainHandler.post(() -> Toast.makeText(MainActivity.this, "语音识别失败：" + errorMessage, Toast.LENGTH_LONG).show());
+                        mainHandler.post(() -> {
+                            voiceListening = false;
+                            composerView.setVoiceListening(false);
+                        });
                     }
 
                     @Override
@@ -437,11 +537,7 @@ public class MainActivity extends Activity {
                         mainHandler.post(() -> {
                             String clean = text == null ? "" : text.trim();
                             if (clean.isEmpty()) return;
-                            voiceAutoSubmitted = true;
                             composerView.setInputText(clean);
-                            if (currentSection.isConversation()) {
-                                sendMessage(clean);
-                            }
                         });
                     }
 
@@ -457,7 +553,6 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> {
                     voiceListening = false;
                     composerView.setVoiceListening(false);
-                    Toast.makeText(this, "无法开始语音识别：" + message(error), Toast.LENGTH_LONG).show();
                 });
             }
         });
@@ -467,7 +562,7 @@ public class MainActivity extends Activity {
         String text = audioTranscriptionController == null ? "" : audioTranscriptionController.stop();
         voiceListening = false;
         if (composerView != null) composerView.setVoiceListening(false);
-        if (!voiceAutoSubmitted && composerView != null && text != null && !text.trim().isEmpty()) composerView.setInputText(text.trim());
+        if (composerView != null && text != null && !text.trim().isEmpty()) composerView.setInputText(text.trim());
     }
 
     @Override
@@ -489,28 +584,48 @@ public class MainActivity extends Activity {
         root.getLocationOnScreen(pos);
         int visibleBottom = visible.bottom - pos[1];
         int keyboard = Math.max(0, root.getHeight() - visibleBottom);
-        if (keyboard > UiKit.dp(this, 120)) {
-            if (!keyboardOpen) {
-                keyboardOpen = true;
-            }
-            composerView.setTranslationY(-keyboard);
+        boolean open = keyboard > UiKit.dp(this, 120);
+        int inset = open ? keyboard : 0;
+        if (open == keyboardOpen && Math.abs(inset - lastKeyboardInset) < UiKit.dp(this, 6)) {
+            return;
+        }
+        int previousInset = Math.max(0, lastKeyboardInset);
+        int scrollDelta = inset - previousInset;
+        int boundedScrollDelta = scrollDelta;
+        if (!open && scrollDelta < 0 && recyclerView != null) {
+            int remainingBelow = Math.max(0, recyclerView.computeVerticalScrollRange()
+                    - recyclerView.computeVerticalScrollExtent()
+                    - recyclerView.computeVerticalScrollOffset());
+            boundedScrollDelta = -Math.min(-scrollDelta, remainingBelow);
+        }
+        keyboardOpen = open;
+        lastKeyboardInset = inset;
+        if (open) {
+            composerView.setTranslationY(-inset);
             composerView.setKeyboardOpen(true);
-            contentFrame.setPadding(0, 0, 0, keyboard);
-            recyclerView.post(this::scrollToBottomNow);
-            recyclerView.postDelayed(this::scrollToBottomNow, 120);
-            recyclerView.postDelayed(this::scrollToBottomNow, 260);
+            contentFrame.setPadding(0, 0, 0, inset);
         } else {
-            keyboardOpen = false;
             composerView.setTranslationY(0);
             composerView.setKeyboardOpen(false);
             contentFrame.setPadding(0, 0, 0, 0);
+        }
+        if (recyclerView != null && currentSection.isConversation() && boundedScrollDelta != 0) {
+            int finalScrollDelta = boundedScrollDelta;
+            recyclerView.post(() -> recyclerView.scrollBy(0, finalScrollDelta));
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_IMAGE && resultCode == RESULT_OK && data != null) {
+        if (requestCode == REQ_CAMERA && resultCode == RESULT_OK) {
+            if (pendingCameraUri != null) {
+                addPickedAttachments(Arrays.asList(pendingCameraUri), 1);
+                pendingCameraUri = null;
+            }
+            return;
+        }
+        if ((requestCode == REQ_IMAGE || requestCode == REQ_GALLERY || requestCode == REQ_DOCUMENT) && resultCode == RESULT_OK && data != null) {
             List<Uri> picked = new ArrayList<>();
             ClipData clipData = data.getClipData();
             if (clipData != null) {
@@ -521,34 +636,102 @@ public class MainActivity extends Activity {
             } else if (data.getData() != null) {
                 picked.add(data.getData());
             }
-            int limit = currentSection == AppSection.CHAT ? 5 : 1;
-            if (currentSection == AppSection.IMAGE) selectedAttachments.clear();
-            for (Uri uri : picked) {
-                if (selectedAttachments.size() >= limit) break;
-                try {
-                    getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                } catch (Exception ignored) {
-                }
-                selectedAttachments.add(uri);
-            }
-            updateAttachmentPreview();
-            Toast.makeText(this, "已选择 " + selectedAttachments.size() + " 个附件", Toast.LENGTH_SHORT).show();
+            addPickedAttachments(picked, currentSection == AppSection.CHAT ? 5 : 1);
         }
     }
 
+    private void addPickedAttachments(List<Uri> picked, int limit) {
+        if (picked == null || picked.isEmpty()) return;
+        if (currentSection == AppSection.IMAGE) selectedAttachments.clear();
+        for (Uri uri : picked) {
+            if (uri == null || selectedAttachments.size() >= limit) break;
+            try {
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+            selectedAttachments.add(uri);
+        }
+        updateAttachmentPreview();
+        Toast.makeText(this, "已选择 " + selectedAttachments.size() + " 个附件", Toast.LENGTH_SHORT).show();
+    }
+
     private void pickImage() {
+        showAttachmentPicker();
+    }
+
+    private void showAttachmentPicker() {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "添加附件"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        LinearLayout choices = UiKit.horizontal(this);
+        choices.setGravity(Gravity.CENTER);
+        choices.addView(attachmentChoice(R.drawable.ic_attach_camera, "拍照", () -> {
+            dialog.dismiss();
+            openCameraPicker();
+        }), new LinearLayout.LayoutParams(0, UiKit.dp(this, 64), 1f));
+        View gap = new View(this);
+        choices.addView(gap, new LinearLayout.LayoutParams(UiKit.dp(this, 14), 1));
+        choices.addView(attachmentChoice(R.drawable.ic_attach_file, "文件", () -> {
+            dialog.dismiss();
+            openDocumentPicker("*/*", currentSection == AppSection.CHAT, REQ_DOCUMENT);
+        }), new LinearLayout.LayoutParams(0, UiKit.dp(this, 64), 1f));
+        panel.addView(choices, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 74)));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private View attachmentChoice(int icon, String desc, Runnable action) {
+        FrameLayout box = new FrameLayout(this);
+        box.setBackground(UiKit.round(UiKit.chipFill(this, false), UiKit.dp(this, 18), UiKit.line(this)));
+        box.setContentDescription(desc);
+        ImageButton button = UiKit.imageButton(this, icon, desc);
+        button.setClickable(false);
+        button.setFocusable(false);
+        button.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 12), UiKit.dp(this, 12), UiKit.dp(this, 12));
+        FrameLayout.LayoutParams iconLp = new FrameLayout.LayoutParams(UiKit.dp(this, 52), UiKit.dp(this, 52), Gravity.CENTER);
+        box.addView(button, iconLp);
+        box.setOnClickListener(v -> action.run());
+        return box;
+    }
+
+    private void openDocumentPicker(String type, boolean multiple, int requestCode) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, currentSection == AppSection.CHAT);
+        intent.setType(type);
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        startActivityForResult(intent, REQ_IMAGE);
+        startActivityForResult(intent, requestCode);
+    }
+
+    private void openCameraPicker() {
+        try {
+            Intent intent = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+            File dir = new File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "capture");
+            if (!dir.exists()) dir.mkdirs();
+            File file = new File(dir, "oneapi-camera-" + System.currentTimeMillis() + ".jpg");
+            pendingCameraUri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
+            intent.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, pendingCameraUri);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivityForResult(intent, REQ_CAMERA);
+        } catch (Exception error) {
+            Toast.makeText(this, "无法打开相机：" + message(error), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void previewAttachment(Uri uri) {
         String type = getContentResolver().getType(uri);
         String name = displayName(uri).toLowerCase(Locale.ROOT);
-        if (type != null && type.startsWith("image/")) {
+        if ((type != null && type.startsWith("image/")) || name.endsWith(".heic") || name.endsWith(".heif")) {
             showImageAttachmentPreview(uri);
             return;
         }
@@ -725,6 +908,177 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String readableAttachmentContent(Uri uri, int limit) {
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        if (name.endsWith(".xlsx") || name.endsWith(".xlsm") || name.endsWith(".xls")) {
+            String sheet = readXlsxAttachment(uri, 200);
+            if (sheet != null && !sheet.trim().isEmpty()) return sheet.trim();
+        }
+        String text = readTextAttachment(uri, limit);
+        if (text != null && !text.trim().isEmpty()) return text.trim();
+        return null;
+    }
+
+    private boolean isImageAttachment(Uri uri) {
+        String type = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return (type != null && type.startsWith("image/"))
+                || name.endsWith(".png")
+                || name.endsWith(".jpg")
+                || name.endsWith(".jpeg")
+                || name.endsWith(".webp")
+                || name.endsWith(".gif")
+                || name.endsWith(".heic")
+                || name.endsWith(".heif");
+    }
+
+    private boolean isPdfAttachment(Uri uri) {
+        String type = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return "application/pdf".equals(type) || name.endsWith(".pdf");
+    }
+
+    private String imageDataUrl(Uri uri) throws Exception {
+        String direct = uri == null ? "" : uri.toString().trim();
+        if (direct.startsWith("data:image/")) return direct;
+        String type = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        if (type == null || !type.startsWith("image/")) {
+            if (name.endsWith(".jpg") || name.endsWith(".jpeg")) type = "image/jpeg";
+            else if (name.endsWith(".webp")) type = "image/webp";
+            else if (name.endsWith(".gif")) type = "image/gif";
+            else type = "image/png";
+        }
+        type = canonicalImageMime(type, name);
+        String converted = jpegDataUrl(uri);
+        if (!converted.isEmpty()) return converted;
+        if (!isModelImageMime(type)) return "";
+        byte[] bytes = readAttachmentBytes(uri, 12 * 1024 * 1024);
+        if (bytes.length == 0) return "";
+        return "data:" + type + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+    }
+
+    private String canonicalImageMime(String type, String name) {
+        String clean = type == null ? "" : type.toLowerCase(Locale.ROOT).trim();
+        String lowerName = name == null ? "" : name.toLowerCase(Locale.ROOT);
+        if ("image/jpg".equals(clean) || "image/pjpeg".equals(clean) || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
+            return "image/jpeg";
+        }
+        if ("image/x-png".equals(clean) || lowerName.endsWith(".png")) return "image/png";
+        if (lowerName.endsWith(".webp")) return "image/webp";
+        if (lowerName.endsWith(".gif")) return "image/gif";
+        return clean.isEmpty() ? "image/png" : clean;
+    }
+
+    private boolean isModelImageMime(String type) {
+        String clean = type == null ? "" : type.toLowerCase(Locale.ROOT);
+        return "image/png".equals(clean)
+                || "image/jpeg".equals(clean)
+                || "image/webp".equals(clean)
+                || "image/gif".equals(clean);
+    }
+
+    private String jpegDataUrl(Uri uri) {
+        Bitmap bitmap = null;
+        Bitmap scaled = null;
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (InputStream probe = getContentResolver().openInputStream(uri)) {
+                if (probe == null) return "";
+                BitmapFactory.decodeStream(probe, null, bounds);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return "";
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            int longest = Math.max(bounds.outWidth, bounds.outHeight);
+            int sample = 1;
+            while (longest / sample > 2400) sample *= 2;
+            options.inSampleSize = sample;
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) return "";
+                bitmap = BitmapFactory.decodeStream(input, null, options);
+            }
+            if (bitmap == null) return "";
+            int maxSide = 1600;
+            int width = bitmap.getWidth();
+            int height = bitmap.getHeight();
+            if (Math.max(width, height) > maxSide) {
+                float scale = maxSide / (float) Math.max(width, height);
+                int nextWidth = Math.max(1, Math.round(width * scale));
+                int nextHeight = Math.max(1, Math.round(height * scale));
+                scaled = Bitmap.createScaledBitmap(bitmap, nextWidth, nextHeight, true);
+            }
+            Bitmap outputBitmap = scaled == null ? bitmap : scaled;
+            java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+            int quality = 88;
+            do {
+                output.reset();
+                outputBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output);
+                quality -= 8;
+            } while (output.size() > 3 * 1024 * 1024 && quality >= 60);
+            return "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (scaled != null && scaled != bitmap) scaled.recycle();
+            if (bitmap != null) bitmap.recycle();
+        }
+    }
+
+    private String pdfFirstPageDataUrl(Uri uri) {
+        ParcelFileDescriptor fd = null;
+        PdfRenderer renderer = null;
+        PdfRenderer.Page page = null;
+        try {
+            fd = getContentResolver().openFileDescriptor(uri, "r");
+            if (fd == null) return "";
+            renderer = new PdfRenderer(fd);
+            if (renderer.getPageCount() <= 0) return "";
+            page = renderer.openPage(0);
+            int maxWidth = 1280;
+            float ratio = page.getWidth() / (float) Math.max(1, page.getHeight());
+            int width = Math.max(480, Math.min(maxWidth, page.getWidth() * 2));
+            int height = Math.max(480, (int) (width / Math.max(0.25f, ratio)));
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            bitmap.eraseColor(Color.WHITE);
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+            java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 92, output);
+            return "data:image/png;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            try {
+                if (page != null) page.close();
+            } catch (Exception ignored) {
+            }
+            try {
+                if (renderer != null) renderer.close();
+            } catch (Exception ignored) {
+            }
+            try {
+                if (fd != null) fd.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private byte[] readAttachmentBytes(Uri uri, int limit) throws Exception {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            if (input == null) return new byte[0];
+            byte[] buffer = new byte[8192];
+            int read;
+            int total = 0;
+            while ((read = input.read(buffer)) != -1 && total < limit) {
+                int allowed = Math.min(read, limit - total);
+                output.write(buffer, 0, allowed);
+                total += allowed;
+            }
+            return output.toByteArray();
+        }
+    }
+
     private String readXlsxAttachment(Uri uri, int maxRows) {
         List<String> shared = new ArrayList<>();
         Map<String, String> entries = new LinkedHashMap<>();
@@ -806,6 +1160,7 @@ public class MainActivity extends Activity {
         wrapper.setGravity(Gravity.CENTER);
         ImageButton button = UiKit.imageButton(this, icon, section.label);
         button.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        applyTopNavIconColor(button);
         button.setOnClickListener(v -> switchSection(section));
         wrapper.setOnClickListener(v -> switchSection(section));
         wrapper.addView(button, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -824,12 +1179,31 @@ public class MainActivity extends Activity {
         nav.addView(dot, new LinearLayout.LayoutParams(UiKit.dp(this, 12), UiKit.dp(this, 38)));
     }
 
+    private void applyTopNavIconColor(ImageButton icon) {
+        if (UiKit.darkTheme(this)) {
+            icon.setColorFilter(UiKit.ink(this));
+        } else {
+            icon.clearColorFilter();
+        }
+    }
+
     private void switchSection(AppSection section) {
-        if (currentSection != section) {
+        switchSection(section, true);
+    }
+
+    private void switchSection(AppSection section, boolean forceBottom) {
+        AppSection previousSection = currentSection;
+        if (previousSection.isConversation()) {
+            lastAiChatSection = previousSection;
+        }
+        if (currentSection != section && currentSection.isConversation() && section.isConversation()) {
             selectedAttachments.clear();
             updateAttachmentPreview();
         }
         currentSection = section;
+        if (section.isConversation()) {
+            lastAiChatSection = section;
+        }
         for (Map.Entry<AppSection, LinearLayout> entry : navButtons.entrySet()) {
             boolean selected = entry.getKey() == section;
             LinearLayout wrapper = entry.getValue();
@@ -837,17 +1211,18 @@ public class MainActivity extends Activity {
             View line = wrapper.getChildAt(1);
             wrapper.setBackground(new ColorDrawable(Color.TRANSPARENT));
             icon.setBackground(new ColorDrawable(Color.TRANSPARENT));
-            icon.setColorFilter(null);
-            line.setBackground(UiKit.round(selected ? UiKit.BLUE : Color.TRANSPARENT, UiKit.dp(this, 2), Color.TRANSPARENT));
+            applyTopNavIconColor(icon);
+            line.setBackground(UiKit.round(selected ? UiKit.blue(this) : Color.TRANSPARENT, UiKit.dp(this, 2), Color.TRANSPARENT));
         }
         boolean conversation = section.isConversation();
+        applySystemBars();
         if (aiChatTopNav != null) aiChatTopNav.setVisibility(conversation ? View.VISIBLE : View.INVISIBLE);
-        if (aiChatHeader != null) aiChatHeader.setBackground(conversation ? UiKit.glass(this, 0, Color.TRANSPARENT) : new ColorDrawable(Color.TRANSPARENT));
+        if (aiChatHeader != null) aiChatHeader.setBackground(new ColorDrawable(Color.TRANSPARENT));
         recyclerView.setVisibility(conversation ? View.VISIBLE : View.GONE);
         pageScroll.setVisibility(conversation ? View.GONE : View.VISIBLE);
         composerView.setVisibility(conversation ? View.VISIBLE : View.GONE);
         scrollDock.setVisibility(conversation ? View.VISIBLE : View.GONE);
-        renderCurrent(true);
+        renderCurrent(forceBottom);
         if (section.isDesktop()) {
             refreshDesktopSessions(section);
         }
@@ -861,6 +1236,9 @@ public class MainActivity extends Activity {
         SectionState state = state();
         ChatSession session = state.current();
         composerView.updateState(composerStateFor(session, state));
+        if (currentSection.isDesktop()) {
+            composerView.setSending(isDesktopSessionBusy(session));
+        }
         List<ConversationDisplayItem> items = new ArrayList<>();
         if (currentSection.isDesktop() && prefs.boundDeviceId().isEmpty()) {
             items.add(ConversationDisplayItem.empty("未连接客户端。请先在系统设置中绑定 PC/Mac 客户端，绑定后才能同步会话并发送任务。"));
@@ -871,7 +1249,7 @@ public class MainActivity extends Activity {
                     items.add(ConversationDisplayItem.log(message.text, message.timestamp, i));
                 } else {
                     String text = currentSection.isDesktop() && "assistant".equals(message.role) ? desktopAttachmentTags(message.text) : message.text;
-                    items.add(ConversationDisplayItem.message(message.role, text, message.timestamp, i));
+                    items.add(ConversationDisplayItem.message(message.role, text, message.timestamp, message.tokenText, i));
                 }
             }
         }
@@ -881,6 +1259,8 @@ public class MainActivity extends Activity {
         adapter.submitList(items, () -> {
             if (forceBottom) {
                 scrollToBottomNow();
+            } else if (streamResponseActive && !streamScrollPausedByUser) {
+                requestStreamAutoScroll();
             }
         });
     }
@@ -896,7 +1276,9 @@ public class MainActivity extends Activity {
                     List<ChatMessage> messages = new ArrayList<>();
                     List<ConversationMessageEntity> storedMessages = conversationRepository.latestMessages(row.sessionId, 80);
                     for (ConversationMessageEntity item : storedMessages) {
-                        messages.add(new ChatMessage(item.role, item.text, item.timestamp));
+                        ChatMessage message = new ChatMessage(item.role, item.text, item.timestamp);
+                        message.tokenText = storedTokenText(item.rawJson);
+                        messages.add(message);
                     }
                     sessions.add(new ChatSession(
                             row.sessionId,
@@ -948,6 +1330,7 @@ public class MainActivity extends Activity {
                     message.text = source.text;
                     message.timestamp = source.timestamp;
                     message.sortIndex = i;
+                    message.rawJson = messageRawJson(source);
                     messages.add(message);
                 }
                 conversationRepository.replaceSessionMessages(entity, messages);
@@ -956,13 +1339,31 @@ public class MainActivity extends Activity {
         });
     }
 
+    private String messageRawJson(ChatMessage message) {
+        if (message == null || message.tokenText == null || message.tokenText.trim().isEmpty()) return "";
+        try {
+            return new JSONObject().put("token_text", message.tokenText.trim()).toString();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private String storedTokenText(String rawJson) {
+        if (rawJson == null || rawJson.trim().isEmpty()) return "";
+        try {
+            return new JSONObject(rawJson).optString("token_text", "");
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private void openDrawer() {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(96, 255, 255, 255));
+        overlay.setBackgroundColor(UiKit.overlayTint(this));
         LinearLayout panel = UiKit.vertical(this);
-        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.LINE));
+        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.line(this)));
         panel.setPadding(UiKit.dp(this, 20), UiKit.dp(this, 12), UiKit.dp(this, 20), UiKit.dp(this, 12));
         LinearLayout titleRow = UiKit.horizontal(this);
         titleRow.addView(UiKit.bold(this, "菜单"), new LinearLayout.LayoutParams(0, -2, 1f));
@@ -991,9 +1392,26 @@ public class MainActivity extends Activity {
         dialog.show();
         Window shown = dialog.getWindow();
         if (shown != null) {
+            configureFullscreenOverlayWindow(shown);
             shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
             applyWindowBlur(shown);
         }
+    }
+
+    private void configureFullscreenOverlayWindow(Window window) {
+        if (window == null) return;
+        window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+        }
+        int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        window.getDecorView().setSystemUiVisibility(flags);
     }
 
     private void adjustAnchoredDialog(FrameLayout overlay) {
@@ -1052,9 +1470,10 @@ public class MainActivity extends Activity {
         LinearLayout row = UiKit.horizontal(this);
         row.setGravity(Gravity.CENTER);
         row.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
-        row.setBackground(UiKit.round(Color.argb(120, 255, 255, 255), UiKit.dp(this, 16), UiKit.LINE));
+        row.setBackground(UiKit.round(UiKit.itemFill(this, false), UiKit.dp(this, 16), UiKit.line(this)));
         ImageView icon = new ImageView(this);
         icon.setImageResource(drawerIconRes(section));
+        icon.setColorFilter(UiKit.ink(this));
         icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
         icon.setPadding(UiKit.dp(this, 5), UiKit.dp(this, 5), UiKit.dp(this, 5), UiKit.dp(this, 5));
         LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(UiKit.dp(this, 30), -1);
@@ -1066,7 +1485,11 @@ public class MainActivity extends Activity {
         row.addView(text, new LinearLayout.LayoutParams(-2, -1));
         row.setOnClickListener(v -> {
             dialog.dismiss();
-            switchSection(section);
+            if (section == AppSection.CHAT) {
+                switchSection(lastAiChatSection, false);
+            } else {
+                switchSection(section, true);
+            }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46));
         lp.setMargins(0, UiKit.dp(this, 10), 0, 0);
@@ -1157,19 +1580,66 @@ public class MainActivity extends Activity {
     }
 
     private void applyWindowBlur(Window window) {
-        if (window == null || Build.VERSION.SDK_INT < 31) return;
-        window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+        if (window == null) return;
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        WindowManager.LayoutParams attrs = window.getAttributes();
+        attrs.dimAmount = 0f;
+        window.setAttributes(attrs);
+        if (Build.VERSION.SDK_INT < 31) return;
+        if (UiKit.effectsEnabled(this) && UiKit.blurStrength(this) > 0) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+            attrs = window.getAttributes();
+            attrs.setBlurBehindRadius(UiKit.blurStrength(this));
+            attrs.dimAmount = 0f;
+            window.setAttributes(attrs);
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+        }
     }
 
     private void renderEffectsModule() {
         LinearLayout panel = cardPanel();
-        panel.addView(UiKit.bold(this, "视效设置"));
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.addView(UiKit.bold(this, "视效设置"), new LinearLayout.LayoutParams(0, -2, 1f));
+        ImageButton themeToggle = UiKit.imageButton(this, UiKit.darkTheme(this) ? R.drawable.ic_theme_moon : R.drawable.ic_theme_sun, "切换明暗模式");
+        themeToggle.setBackground(new ColorDrawable(Color.TRANSPARENT));
+        themeToggle.clearColorFilter();
+        themeToggle.setOnClickListener(v -> {
+            boolean nextDark = !UiKit.darkTheme(this);
+            getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putBoolean("dark_theme", nextDark).apply();
+            themeToggle.setImageResource(nextDark ? R.drawable.ic_theme_moon : R.drawable.ic_theme_sun);
+            themeToggle.clearColorFilter();
+            applySystemBars();
+            if (flowBackgroundView != null) flowBackgroundView.invalidate();
+            getWindow().getDecorView().invalidate();
+            if (adapter != null) adapter.refreshTheme();
+            if (scrollDock != null) scrollDock.invalidate();
+            renderCurrent(false);
+        });
+        titleRow.addView(themeToggle, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 42)));
         Switch enabled = new Switch(this);
-        enabled.setText("启用毛玻璃特效");
-        enabled.setTextColor(UiKit.INK);
-        enabled.setTextSize(14);
+        enabled.setText("");
         enabled.setChecked(UiKit.effectsEnabled(this));
-        panel.addView(enabled, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 42)));
+        Switch atmosphere = new Switch(this);
+        atmosphere.setText("");
+        atmosphere.setChecked(UiKit.backgroundEffectsEnabled(this));
+        LinearLayout effectSwitchRow = UiKit.horizontal(this);
+        effectSwitchRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView glassLabel = UiKit.text(this, "毛玻璃", UiKit.MUTED, 13);
+        glassLabel.setGravity(Gravity.CENTER_VERTICAL);
+        effectSwitchRow.addView(glassLabel, new LinearLayout.LayoutParams(-2, UiKit.dp(this, 42)));
+        effectSwitchRow.addView(enabled, new LinearLayout.LayoutParams(UiKit.dp(this, 54), UiKit.dp(this, 42)));
+        View effectSpacer = new View(this);
+        effectSwitchRow.addView(effectSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
+        TextView atmosphereLabel = UiKit.text(this, "氛围灯", UiKit.MUTED, 13);
+        atmosphereLabel.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams atmosphereLabelLp = new LinearLayout.LayoutParams(-2, UiKit.dp(this, 42));
+        atmosphereLabelLp.setMargins(UiKit.dp(this, 16), 0, 0, 0);
+        effectSwitchRow.addView(atmosphereLabel, atmosphereLabelLp);
+        effectSwitchRow.addView(atmosphere, new LinearLayout.LayoutParams(UiKit.dp(this, 54), UiKit.dp(this, 42)));
+        panel.addView(effectSwitchRow, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46)));
         TextView blurValue = UiKit.text(this, String.valueOf(UiKit.blurStrength(this)), UiKit.MUTED, 13);
         SeekBar blur = new SeekBar(this);
         blur.setMax(50);
@@ -1188,6 +1658,11 @@ public class MainActivity extends Activity {
         enabled.setOnCheckedChangeListener((buttonView, isChecked) -> {
             getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putBoolean("effects_enabled", isChecked).apply();
             syncEnabled.run();
+        });
+        atmosphere.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putBoolean("background_effects_enabled", isChecked).apply();
+            if (flowBackgroundView != null) flowBackgroundView.invalidate();
+            getWindow().getDecorView().invalidate();
         });
         blur.setOnSeekBarChangeListener(new SimpleSeekListener(progress -> {
             getSharedPreferences("oneapi_mobile", MODE_PRIVATE).edit().putInt("blur_strength", progress).apply();
@@ -1255,7 +1730,7 @@ public class MainActivity extends Activity {
     private LinearLayout cardPanel() {
         LinearLayout panel = UiKit.vertical(this);
         panel.setPadding(UiKit.dp(this, 16), UiKit.dp(this, 14), UiKit.dp(this, 16), UiKit.dp(this, 14));
-        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.LINE));
+        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.line(this)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.setMargins(0, 0, 0, UiKit.dp(this, 12));
         panel.setLayoutParams(lp);
@@ -1286,9 +1761,9 @@ public class MainActivity extends Activity {
         view.setTextSize(14);
         view.setSingleLine(true);
         view.setHint(hint);
-        view.setTextColor(UiKit.INK);
-        view.setHintTextColor(UiKit.MUTED);
-        view.setBackground(UiKit.round(Color.rgb(245, 248, 252), UiKit.dp(this, 14), UiKit.LINE));
+        view.setTextColor(UiKit.ink(this));
+        view.setHintTextColor(UiKit.muted(this));
+        view.setBackground(UiKit.round(UiKit.inputFill(this), UiKit.dp(this, 14), UiKit.line(this)));
         view.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
         return view;
     }
@@ -1383,6 +1858,25 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void doRegister(String username, String password, Runnable onSuccess) {
+        String cleanUser = username == null ? "" : username.trim();
+        String cleanPassword = password == null ? "" : password.trim();
+        network.execute(() -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("username", cleanUser);
+                body.put("password", cleanPassword);
+                new ApiClient(prefs).post("/api/user/register", body);
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "注册成功，正在登录", Toast.LENGTH_SHORT).show();
+                    if (onSuccess != null) onSuccess.run();
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> Toast.makeText(this, "注册失败：" + message(error), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
     private void showLoginDialog(boolean cancelable) {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -1404,8 +1898,57 @@ public class MainActivity extends Activity {
             prefs.setServer(AppPrefs.DEFAULT_SERVER);
             doLogin(username.getText().toString(), password.getText().toString(), dialog::dismiss);
         });
-        panel.addView(login, centeredButtonLp());
+        Button register = UiKit.ghostButton(this, "注册账号");
+        register.setOnClickListener(v -> showRegisterDialog(dialog));
+        LinearLayout actions = UiKit.horizontal(this);
+        actions.setGravity(Gravity.CENTER);
+        actions.addView(login, new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f));
+        LinearLayout.LayoutParams registerLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f);
+        registerLp.leftMargin = UiKit.dp(this, 10);
+        actions.addView(register, registerLp);
+        panel.addView(actions, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44)));
         overlay.addView(panel, centeredModalLp());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void showRegisterDialog(Dialog loginDialog) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "注册账号"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        EditText username = input("账号，最多 20 位");
+        EditText password = input("密码，8-20 位");
+        EditText confirm = input("再次输入密码");
+        password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        confirm.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        panel.addView(labelRow("账号", username));
+        panel.addView(labelRow("密码", password));
+        panel.addView(labelRow("确认", confirm));
+        Button submit = UiKit.ghostButton(this, "注册并登录");
+        submit.setOnClickListener(v -> {
+            String pass = password.getText().toString();
+            if (!pass.equals(confirm.getText().toString())) {
+                Toast.makeText(this, "两次输入的密码不一致", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            prefs.setServer(AppPrefs.DEFAULT_SERVER);
+            doRegister(username.getText().toString(), pass, () -> {
+                dialog.dismiss();
+                if (loginDialog != null && loginDialog.isShowing()) loginDialog.dismiss();
+                doLogin(username.getText().toString(), pass, null);
+            });
+        });
+        panel.addView(submit, centeredButtonLp());
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
         panel.setOnClickListener(v -> { });
         showDialogOverlay(dialog, overlay);
     }
@@ -1420,14 +1963,32 @@ public class MainActivity extends Activity {
     }
 
     private void fetchInto(LinearLayout panel, JsonRequest request, String title) {
+        JSONObject cached = panelDataCache.get(title);
+        Long cachedAt = panelDataCacheAt.get(title);
+        if (cached != null && cachedAt != null && System.currentTimeMillis() - cachedAt < 60_000L) {
+            renderJsonPanel(panel, title, cached);
+            return;
+        }
         network.execute(() -> {
             JSONObject result;
             try {
                 result = request.run();
+                panelDataCache.put(title, result);
+                panelDataCacheAt.put(title, System.currentTimeMillis());
             } catch (Exception error) {
-                result = new JSONObject();
+                String errorText = message(error);
+                JSONObject fallback = panelDataCache.get(title);
+                if (fallback != null && (errorText.contains("429") || errorText.contains("Too Many") || errorText.contains("rate"))) {
+                    result = fallback;
+                    try {
+                        result.put("_stale_notice", "请求过于频繁，已显示上次同步结果。稍后可手动刷新。");
+                    } catch (Exception ignored) {
+                    }
+                } else {
+                    result = new JSONObject();
+                }
                 try {
-                    result.put("error", message(error));
+                    if (!result.has("_stale_notice")) result.put("error", errorText);
                 } catch (Exception ignored) {
                 }
             }
@@ -1439,8 +2000,15 @@ public class MainActivity extends Activity {
     private void renderJsonPanel(LinearLayout panel, String title, JSONObject result) {
         panel.removeAllViews();
         panel.addView(UiKit.bold(this, title));
+        if (result.has("_stale_notice")) {
+            panel.addView(UiKit.text(this, result.optString("_stale_notice"), Color.rgb(214, 144, 44), 13));
+            result.remove("_stale_notice");
+        }
         if (result.has("error")) {
             panel.addView(UiKit.text(this, result.optString("error"), Color.rgb(176, 55, 55), 14));
+            if (result.optString("error").contains("429")) {
+                panel.addView(UiKit.text(this, "服务器限流中，请稍后重试。页面不会清空已有缓存。", UiKit.MUTED, 13));
+            }
             return;
         }
         if (result.has("devices")) {
@@ -1672,7 +2240,7 @@ public class MainActivity extends Activity {
             if (!plan.optBoolean("enabled", true)) continue;
             if (isTrialPlan(plan) && hasPurchasedPlan(record, plan)) continue;
             FrameLayout frame = new FrameLayout(this);
-            frame.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.LINE));
+            frame.setBackground(UiKit.glass(this, UiKit.dp(this, 18), UiKit.line(this)));
             LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(-1, -2);
             frameLp.setMargins(0, 0, 0, UiKit.dp(this, 16));
             frame.setLayoutParams(frameLp);
@@ -1697,7 +2265,7 @@ public class MainActivity extends Activity {
                     UiKit.MUTED, 13));
             LinearLayout foot = UiKit.horizontal(this);
             TextView price = UiKit.bold(this, formatPlainPrice(plan.optDouble("price_amount", 0)) + " 元");
-            price.setTextColor(UiKit.BLUE);
+            price.setTextColor(UiKit.blue(this));
             foot.addView(price, new LinearLayout.LayoutParams(0, -2, 1f));
             if (recommended.contains(planKey(plan))) {
                 ImageView sale = new ImageView(this);
@@ -1709,7 +2277,7 @@ public class MainActivity extends Activity {
                 foot.addView(sale, saleLp);
             }
             ImageButton buy = UiKit.imageButton(this, R.drawable.ic_bubble_buy, "购买套餐");
-            buy.setColorFilter(UiKit.BLUE);
+            buy.setColorFilter(UiKit.blue(this));
             buy.setBackgroundColor(Color.TRANSPARENT);
             buy.setPadding(0, 0, 0, 0);
             buy.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -1881,7 +2449,7 @@ public class MainActivity extends Activity {
         List<String> labels = new ArrayList<>();
         List<Double> quotas = new ArrayList<>();
         double total = 0;
-        for (int i = 0; i < items.length(); i++) {
+        for (int i = 0; i < Math.min(items.length(), 20); i++) {
             JSONObject item = items.optJSONObject(i);
             if (item == null) continue;
             double quota = Math.max(0, item.optDouble("quota", 0));
@@ -1927,7 +2495,7 @@ public class MainActivity extends Activity {
         FrameLayout track = new FrameLayout(this);
         track.setBackground(UiKit.round(Color.argb(78, 145, 160, 184), UiKit.dp(this, 4), Color.TRANSPARENT));
         View fill = new View(this);
-        fill.setBackground(UiKit.round(UiKit.BLUE, UiKit.dp(this, 4), UiKit.BLUE));
+        fill.setBackground(UiKit.round(UiKit.blue(this), UiKit.dp(this, 4), UiKit.blue(this)));
         int width = Math.max(UiKit.dp(this, 4), (int) (UiKit.dp(this, 132) * Math.max(0.04, Math.min(1, ratio))));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width, UiKit.dp(this, 8), Gravity.LEFT | Gravity.CENTER_VERTICAL);
         track.addView(fill, lp);
@@ -2031,13 +2599,20 @@ public class MainActivity extends Activity {
 
     private View serviceHistoryDots(JSONArray history) {
         LinearLayout row = UiKit.horizontal(this);
+        row.setClipChildren(false);
+        row.setClipToPadding(false);
+        row.setMinimumHeight(UiKit.dp(this, 22));
         row.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 6));
-        for (int i = 0; i < Math.min(history.length(), 24); i++) {
+        int start = Math.max(0, history.length() - 20);
+        for (int i = start; i < history.length(); i++) {
             JSONObject item = history.optJSONObject(i);
             View dot = new View(this);
-            dot.setBackground(UiKit.round(serviceToneColor(item == null ? "" : item.optString("tone", item.optString("status", ""))), UiKit.dp(this, 4), Color.TRANSPARENT));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(this, 8), UiKit.dp(this, 8));
-            lp.setMargins(0, 0, UiKit.dp(this, 5), 0);
+            GradientDrawable shape = new GradientDrawable();
+            shape.setShape(GradientDrawable.OVAL);
+            shape.setColor(serviceToneColor(item == null ? "" : item.optString("tone", item.optString("status", ""))));
+            dot.setBackground(shape);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(this, 7), UiKit.dp(this, 7));
+            lp.setMargins(0, UiKit.dp(this, 1), UiKit.dp(this, 6), UiKit.dp(this, 1));
             row.addView(dot, lp);
         }
         return row;
@@ -2054,8 +2629,8 @@ public class MainActivity extends Activity {
             JSONObject boundDevice = findDevice(devices, bound);
             String name = boundDevice == null ? "当前绑定设备" : boundDevice.optString("name", boundDevice.optString("platform", "桌面客户端"));
             String identifier = boundDevice == null ? bound : first(boundDevice, "identifier", "deviceId", "id", "fingerprint");
-            panel.addView(UiKit.text(this, "设备：" + name, UiKit.MUTED, 14));
-            panel.addView(UiKit.text(this, "标识：" + identifier, UiKit.MUTED, 13));
+            LinearLayout current = deviceBindRow(name, identifier, true);
+            panel.addView(current, centeredButtonLp());
         }
         if (devices == null || devices.length() == 0) {
             panel.addView(UiKit.text(this, "暂无可绑定设备。请确认 PC/Mac 客户端在线。", UiKit.MUTED, 14));
@@ -2066,25 +2641,29 @@ public class MainActivity extends Activity {
             JSONObject device = devices.optJSONObject(i);
             if (device == null) continue;
             String id = device.optString("id", device.optString("deviceId", ""));
+            if (!bound.isEmpty() && bound.equals(id)) continue;
             String name = device.optString("name", id);
             String identifier = first(device, "identifier", "deviceId", "id", "fingerprint");
-            LinearLayout button = deviceBindRow(name, identifier);
+            LinearLayout button = deviceBindRow(name, identifier, false);
             button.setOnClickListener(v -> bindDevice(id));
             panel.addView(button, centeredButtonLp());
         }
         panel.addView(deviceActionRow(bound));
     }
 
-    private LinearLayout deviceBindRow(String name, String identifier) {
+    private LinearLayout deviceBindRow(String name, String identifier, boolean selected) {
         LinearLayout row = UiKit.horizontal(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
-        row.setBackground(UiKit.round(Color.argb(150, 255, 255, 255), UiKit.dp(this, 16), UiKit.LINE));
+        row.setBackground(UiKit.round(selected ? Color.TRANSPARENT : UiKit.itemFill(this, false), UiKit.dp(this, 16), selected ? UiKit.blue(this) : UiKit.line(this)));
         TextView label = UiKit.text(this, name == null || name.trim().isEmpty() ? "桌面客户端" : name.trim(), UiKit.INK, 13);
         label.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         label.setSingleLine(true);
         label.setEllipsize(TextUtils.TruncateAt.END);
         row.addView(label, new LinearLayout.LayoutParams(0, -1, 1f));
+        TextView separator = UiKit.text(this, "|", Color.argb(128, 145, 160, 184), 12);
+        separator.setGravity(Gravity.CENTER);
+        row.addView(separator, new LinearLayout.LayoutParams(UiKit.dp(this, 18), -1));
         TextView id = UiKit.text(this, shortDeviceIdentifier(identifier), UiKit.MUTED, 12);
         id.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
         id.setSingleLine(true);
@@ -2177,24 +2756,40 @@ public class MainActivity extends Activity {
         int count = rvAdapter == null ? 0 : rvAdapter.getItemCount();
         if (count <= 0) return;
         recyclerView.post(() -> {
-            RecyclerView.LayoutManager manager = recyclerView.getLayoutManager();
-            if (manager instanceof LinearLayoutManager) {
-                LinearLayoutManager linear = (LinearLayoutManager) manager;
-                linear.scrollToPositionWithOffset(count - 1, Math.max(0, recyclerView.getHeight() - recyclerView.getPaddingBottom()));
-                recyclerView.post(() -> {
-                    View last = linear.findViewByPosition(count - 1);
-                    if (last != null) {
-                        int viewportBottom = recyclerView.getHeight() - recyclerView.getPaddingBottom();
-                        int delta = last.getBottom() - viewportBottom;
-                        if (delta != 0) recyclerView.scrollBy(0, delta);
-                    } else {
-                        recyclerView.scrollToPosition(count - 1);
-                    }
-                });
-            } else {
-                recyclerView.scrollToPosition(count - 1);
-            }
+            recyclerView.scrollToPosition(count - 1);
+            recyclerView.post(() -> recyclerView.scrollBy(0, Integer.MAX_VALUE));
         });
+    }
+
+    private void startStreamAutoScroll() {
+        streamResponseActive = true;
+        streamScrollPausedByUser = false;
+        requestStreamAutoScroll();
+    }
+
+    private void requestStreamAutoScroll() {
+        if (!streamResponseActive || streamScrollPausedByUser || recyclerView == null) return;
+        if (streamScrollRunning) return;
+        if (!recyclerView.canScrollVertically(1)) return;
+        streamScrollRunning = true;
+        mainHandler.removeCallbacks(streamScrollTick);
+        mainHandler.postDelayed(streamScrollTick, 120);
+    }
+
+    private void pauseStreamAutoScroll() {
+        if (!streamResponseActive) return;
+        streamScrollPausedByUser = true;
+        streamScrollRunning = false;
+        mainHandler.removeCallbacks(streamScrollTick);
+    }
+
+    private void stopStreamAutoScroll() {
+        streamResponseActive = false;
+        streamScrollPausedByUser = false;
+        streamScrollRunning = false;
+        streamScrollProgrammatic = false;
+        mainHandler.removeCallbacks(streamScrollTick);
+        mainHandler.removeCallbacks(resumeStreamScrollIfAtBottom);
     }
 
     private void showSessionDialog() {
@@ -2291,7 +2886,7 @@ public class MainActivity extends Activity {
         LinearLayout row = UiKit.horizontal(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
-        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        row.setBackground(UiKit.round(UiKit.itemFill(this, selected), UiKit.dp(this, 14), UiKit.line(this)));
         TextView title = UiKit.text(this, sessionPreviewTitle(session), selected ? UiKit.BLUE : UiKit.INK, 14);
         title.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         title.setSingleLine(true);
@@ -2428,7 +3023,7 @@ public class MainActivity extends Activity {
     private LinearLayout modalPanel() {
         LinearLayout panel = UiKit.vertical(this);
         panel.setPadding(UiKit.dp(this, 28), UiKit.dp(this, 24), UiKit.dp(this, 28), UiKit.dp(this, 28));
-        panel.setBackground(UiKit.round(Color.WHITE, UiKit.dp(this, 22), UiKit.LINE));
+        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 22), UiKit.line(this)));
         return panel;
     }
 
@@ -2506,12 +3101,14 @@ public class MainActivity extends Activity {
             Window window = dialog.getWindow();
             if (window != null) {
                 window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             }
             dialog.show();
             Window shown = dialog.getWindow();
             if (shown != null) {
                 shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
                 shown.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+                shown.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
                 applyWindowBlur(shown);
             }
             if (content instanceof FrameLayout && anchored) {
@@ -2573,7 +3170,7 @@ public class MainActivity extends Activity {
         dim.setBackgroundColor(Color.TRANSPARENT);
         LinearLayout panel = UiKit.vertical(this);
         panel.setPadding(UiKit.dp(this, 8), UiKit.dp(this, 8), UiKit.dp(this, 8), UiKit.dp(this, 8));
-        panel.setBackground(UiKit.round(Color.WHITE, UiKit.dp(this, 16), UiKit.LINE));
+        panel.setBackground(UiKit.glass(this, UiKit.dp(this, 16), UiKit.line(this)));
         PopupWindow popup = new PopupWindow(dim, WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, true);
         popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         popup.setOutsideTouchable(true);
@@ -2616,20 +3213,32 @@ public class MainActivity extends Activity {
             try {
                 JSONArray rows = desktopRepository.sessions(prefs.boundDeviceId());
                 List<ChatSession> parsed = new ArrayList<>();
+                String syncedModel = "";
+                long syncedModelAt = 0L;
                 for (int i = 0; i < rows.length(); i++) {
                     JSONObject item = rows.optJSONObject(i);
                     if (item == null || !section.id.equals(item.optString("client"))) {
                         continue;
                     }
                     parsed.add(desktopSessionFromJson(section, item));
+                    String model = first(item, "model", "modelLabel", "selectedModel");
+                    long updatedAt = normalizeTimestamp(item.optLong("updatedAt", item.optLong("updated_at", 0)));
+                    if (!model.isEmpty() && isAllowedDesktopModel(model) && updatedAt >= syncedModelAt) {
+                        syncedModel = model;
+                        syncedModelAt = updatedAt;
+                    }
                 }
                 if (parsed.isEmpty()) return;
+                String finalSyncedModel = syncedModel;
                 mainHandler.post(() -> {
+                    if (!finalSyncedModel.isEmpty()) {
+                        applySelectedModel(section, finalSyncedModel, true);
+                    }
                     String selectedId = targetState.current().id;
                     if (!targetState.selectedSessionId.isEmpty()) {
                         selectedId = targetState.selectedSessionId;
                     }
-                    List<ChatSession> nextSessions = applyDesktopSessionOverrides(targetState, parsed);
+                    List<ChatSession> nextSessions = mergePendingDesktopMessages(targetState.sessions, applyDesktopSessionOverrides(targetState, parsed));
                     targetState.sessions.clear();
                     targetState.sessions.addAll(limitDesktopSessions(nextSessions));
                     int nextIndex = 0;
@@ -2643,6 +3252,8 @@ public class MainActivity extends Activity {
                     targetState.selectedSessionId = targetState.sessions.isEmpty() ? "" : targetState.sessions.get(nextIndex).id;
                     if (currentSection == section) {
                         renderCurrent(false);
+                    } else if (composerView != null && currentSection.isDesktop()) {
+                        composerView.setSending(isDesktopSessionBusy(state().current()));
                     }
                     if (afterRefresh != null) {
                         afterRefresh.run();
@@ -2663,7 +3274,19 @@ public class MainActivity extends Activity {
         if (messages.isEmpty()) {
             messages.add(new ChatMessage("assistant", "已加载桌面端会话：" + title, System.currentTimeMillis()));
         }
-        return new ChatSession(id, title, section.label, project, messages);
+        ChatSession session = new ChatSession(id, title, section.label, project, messages);
+        session.status = first(item, "status", "state");
+        return session;
+    }
+
+    private boolean isDesktopSessionBusy(ChatSession session) {
+        if (session == null) return false;
+        String status = session.status == null ? "" : session.status.trim().toLowerCase(Locale.ROOT);
+        return "queued".equals(status)
+                || "claimed".equals(status)
+                || "running".equals(status)
+                || "waiting_interaction".equals(status)
+                || "pending".equals(status);
     }
 
     private List<ChatSession> limitDesktopSessions(List<ChatSession> source) {
@@ -2694,6 +3317,51 @@ public class MainActivity extends Activity {
             return 0;
         });
         return rows;
+    }
+
+    private List<ChatSession> mergePendingDesktopMessages(List<ChatSession> localSessions, List<ChatSession> serverSessions) {
+        Map<String, ChatSession> localById = new HashMap<>();
+        for (ChatSession local : localSessions) {
+            if (local != null && local.id != null) localById.put(local.id, local);
+        }
+        long now = System.currentTimeMillis();
+        for (ChatSession server : serverSessions) {
+            ChatSession local = localById.remove(server.id);
+            if (local == null || local.messages == null || local.messages.isEmpty()) continue;
+            for (ChatMessage message : local.messages) {
+                if (message == null) continue;
+                if (containsSimilarMessage(server.messages, message)) continue;
+                if (now - message.timestamp <= 120_000L || "user".equals(message.role)) {
+                    server.messages.add(message);
+                }
+            }
+            server.messages.sort((a, b) -> Long.compare(a.timestamp, b.timestamp));
+        }
+        for (ChatSession local : localById.values()) {
+            if (local == null || local.messages == null || local.messages.isEmpty()) continue;
+            long newest = 0L;
+            for (ChatMessage message : local.messages) {
+                if (message != null) newest = Math.max(newest, message.timestamp);
+            }
+            if (now - newest <= 120_000L) {
+                serverSessions.add(local);
+            }
+        }
+        return serverSessions;
+    }
+
+    private boolean containsSimilarMessage(List<ChatMessage> messages, ChatMessage target) {
+        if (messages == null || target == null) return false;
+        for (ChatMessage item : messages) {
+            if (item == null) continue;
+            if (!String.valueOf(item.role).equals(String.valueOf(target.role))) continue;
+            if (Math.abs(item.timestamp - target.timestamp) > 10_000L) continue;
+            String left = item.text == null ? "" : item.text.trim();
+            String right = target.text == null ? "" : target.text.trim();
+            if (left.equals(right)) return true;
+            if (!left.isEmpty() && !right.isEmpty() && (left.contains(right) || right.contains(left))) return true;
+        }
+        return false;
     }
 
     private int pinnedOrder(SectionState state, String sessionId) {
@@ -2830,15 +3498,19 @@ public class MainActivity extends Activity {
         filters.setPadding(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 4));
         LinearLayout list = UiKit.vertical(this);
         List<String> providers = modelProviders(state.availableModels);
-        final String[] selectedProvider = new String[]{"全部"};
+        String rememberedProvider = rememberedModelProvider.getOrDefault(currentSection, providerForModel(state.selectedModel));
+        if (!providers.contains(rememberedProvider)) rememberedProvider = "全部";
+        final String[] selectedProvider = new String[]{rememberedProvider};
         for (String provider : providers) {
             TextView chip = filterChip(provider, provider.equals(selectedProvider[0]));
             chip.setOnClickListener(v -> {
                 selectedProvider[0] = provider;
+                rememberedModelProvider.put(currentSection, provider);
                 for (int i = 0; i < filters.getChildCount(); i++) {
                     TextView item = (TextView) filters.getChildAt(i);
-                    item.setBackground(UiKit.round(item.getText().toString().equals(provider) ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 13), UiKit.LINE));
-                    item.setTextColor(item.getText().toString().equals(provider) ? UiKit.BLUE : UiKit.MUTED);
+                    boolean selected = item.getText().toString().equals(provider);
+                    item.setBackground(UiKit.round(UiKit.chipFill(this, selected), UiKit.dp(this, 13), UiKit.line(this)));
+                    item.setTextColor(selected ? UiKit.blue(this) : UiKit.muted(this));
                 }
                 renderModelRows(list, state, selectedProvider[0], search.getText().toString(), dialog);
             });
@@ -2859,7 +3531,7 @@ public class MainActivity extends Activity {
     private List<String> modelProviders(List<String> models) {
         List<String> found = new ArrayList<>();
         for (String model : models) addUnique(found, providerForModel(model));
-        List<String> order = new ArrayList<>(Arrays.asList("OpenAI", "Gemini", "DeepSeek", "Qwen", "Claude", "其他"));
+        List<String> order = new ArrayList<>(Arrays.asList("OpenAI", "Gemini", "DeepSeek", "Qwen", "Claude", "Mimo", "Grok"));
         if (currentSection == AppSection.CLAUDE) {
             order.remove("Claude");
             order.add(0, "Claude");
@@ -2870,8 +3542,9 @@ public class MainActivity extends Activity {
             if (found.contains(item)) providers.add(item);
         }
         for (String item : found) {
-            if (!providers.contains(item)) providers.add(item);
+            if (!providers.contains(item) && !"其他".equals(item)) providers.add(item);
         }
+        if (found.contains("其他")) providers.add("其他");
         return providers;
     }
 
@@ -2887,12 +3560,23 @@ public class MainActivity extends Activity {
         return "其他";
     }
 
+    private boolean isAllowedDesktopModel(String model) {
+        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
+        if (n.contains("deepseek")) {
+            return n.contains("deepseek-v4-pro") || n.contains("deepseek-v4-flash");
+        }
+        if (n.contains("mimo")) {
+            return "mimo-v2.5-pro".equals(n) || "mimo-v2.5".equals(n);
+        }
+        return true;
+    }
+
     private TextView filterChip(String text, boolean selected) {
         TextView chip = UiKit.text(this, text, selected ? UiKit.BLUE : UiKit.MUTED, 12);
         chip.setGravity(Gravity.CENTER);
         chip.setSingleLine(true);
         chip.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
-        chip.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 13), UiKit.LINE));
+        chip.setBackground(UiKit.round(UiKit.chipFill(this, selected), UiKit.dp(this, 13), UiKit.line(this)));
         return chip;
     }
 
@@ -2930,12 +3614,13 @@ public class MainActivity extends Activity {
             return a.compareToIgnoreCase(b);
         });
         for (String model : models) {
+            if ((currentSection == AppSection.CODEX || currentSection == AppSection.CLAUDE) && !isAllowedDesktopModel(model)) continue;
             if (!"全部".equals(provider) && !providerForModel(model).equals(provider)) continue;
             if (!matchesSearch(model, search)) continue;
             boolean selected = model.equals(state.selectedModel);
             LinearLayout row = UiKit.horizontal(this);
             row.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
-            row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+            row.setBackground(UiKit.round(UiKit.itemFill(this, selected), UiKit.dp(this, 14), UiKit.line(this)));
             TextView name = UiKit.text(this, model, selected ? UiKit.BLUE : UiKit.INK, 14);
             name.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
             name.setSingleLine(true);
@@ -2951,8 +3636,7 @@ public class MainActivity extends Activity {
             });
             row.addView(favorite, new LinearLayout.LayoutParams(UiKit.dp(this, 42), -1));
             name.setOnClickListener(v -> {
-                state.selectedModel = model;
-                composerView.updateState(composerStateFor(state.current(), state));
+                applySelectedModel(currentSection, model, false);
                 dialog.dismiss();
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44));
@@ -3004,14 +3688,14 @@ public class MainActivity extends Activity {
         row.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         row.setSingleLine(true);
         row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
-        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        row.setBackground(UiKit.round(UiKit.itemFill(this, selected), UiKit.dp(this, 14), UiKit.line(this)));
         return row;
     }
 
     private View assistantRow(String value, boolean selected, SectionState state, Dialog dialog) {
         LinearLayout row = UiKit.horizontal(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        row.setBackground(UiKit.round(UiKit.itemFill(this, selected), UiKit.dp(this, 14), UiKit.line(this)));
         TextView name = UiKit.text(this, value, selected ? UiKit.BLUE : UiKit.INK, 14);
         name.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         name.setSingleLine(true);
@@ -3090,10 +3774,10 @@ public class MainActivity extends Activity {
                     if (!n.contains("image") && !n.contains("midjourney") && !n.contains("dall") && !n.contains("stable")) {
                         addUnique(chat, model);
                     }
-                    if (n.startsWith("gpt-") || n.contains("codex") || n.startsWith("deepseek") || n.startsWith("mimo")) {
+                    if ((n.startsWith("gpt-") || n.contains("codex") || n.contains("deepseek") || n.contains("mimo")) && isAllowedDesktopModel(model)) {
                         addUnique(codex, model);
                     }
-                    if (n.startsWith("claude") || n.startsWith("deepseek") || n.startsWith("mimo")) {
+                    if ((n.startsWith("claude") || n.contains("deepseek") || n.contains("mimo")) && isAllowedDesktopModel(model)) {
                         addUnique(claude, model);
                     }
                 }
@@ -3149,11 +3833,64 @@ public class MainActivity extends Activity {
     private void replaceModels(AppSection section, List<String> values) {
         SectionState target = states.get(section);
         if (target == null || values.isEmpty()) return;
+        String selected = target.selectedModel;
+        String saved = savedModelSelection(section);
         target.availableModels.clear();
         target.availableModels.addAll(values);
-        if (!target.availableModels.contains(target.selectedModel)) {
+        if (target.availableModels.contains(selected)) {
+            target.selectedModel = selected;
+        } else if (!saved.isEmpty() && target.availableModels.contains(saved)) {
+            target.selectedModel = saved;
+        } else if (!target.availableModels.contains(target.selectedModel)) {
             target.selectedModel = target.availableModels.get(0);
         }
+        saveModelSelection(section, target.selectedModel);
+    }
+
+    private void applySelectedModel(AppSection section, String model, boolean fromDesktopSync) {
+        if (section == AppSection.IMAGE || model == null || model.trim().isEmpty()) return;
+        SectionState target = states.get(section);
+        if (target == null) return;
+        String clean = model.trim();
+        if ((section == AppSection.CODEX || section == AppSection.CLAUDE) && !isAllowedDesktopModel(clean)) return;
+        if (!target.availableModels.contains(clean)) {
+            target.availableModels.add(clean);
+        }
+        target.selectedModel = clean;
+        saveModelSelection(section, clean);
+        if (currentSection == section && composerView != null) {
+            composerView.updateState(composerStateFor(target.current(), target));
+        }
+    }
+
+    private void loadSavedModelSelections() {
+        for (AppSection section : Arrays.asList(AppSection.CHAT, AppSection.CODEX, AppSection.CLAUDE)) {
+            String saved = savedModelSelection(section);
+            if (saved.isEmpty()) continue;
+            SectionState target = states.get(section);
+            if (target == null) continue;
+            if (!target.availableModels.contains(saved)) target.availableModels.add(saved);
+            target.selectedModel = saved;
+        }
+    }
+
+    private String savedModelSelection(AppSection section) {
+        if (section == null) return "";
+        return getSharedPreferences("oneapi_mobile", MODE_PRIVATE)
+                .getString(modelSelectionKey(section), "")
+                .trim();
+    }
+
+    private void saveModelSelection(AppSection section, String model) {
+        if (section == null || section == AppSection.IMAGE || model == null || model.trim().isEmpty()) return;
+        getSharedPreferences("oneapi_mobile", MODE_PRIVATE)
+                .edit()
+                .putString(modelSelectionKey(section), model.trim())
+                .apply();
+    }
+
+    private String modelSelectionKey(AppSection section) {
+        return "selected_model_" + section.id;
     }
 
     private void replaceAssistants(AppSection section, List<String> values) {
@@ -3346,10 +4083,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean isLowValueDesktopLog(AppSection section, String title, String type, String text) {
-        if (section != AppSection.CODEX) return false;
+        if (section != AppSection.CODEX && section != AppSection.CLAUDE) return false;
         String value = ((title == null ? "" : title) + " " + (type == null ? "" : type) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
         return value.contains("输出已结束")
                 || value.contains("已完成本次回复")
+                || value.contains("正在整理会话记录")
+                || value.contains("整理会话记录")
+                || value.contains("output has ended")
+                || value.contains("finished this reply")
                 || value.contains("completed response")
                 || value.contains("output ended")
                 || value.contains("finish_reason")
@@ -3458,7 +4199,7 @@ public class MainActivity extends Activity {
             row.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
             row.setSingleLine(true);
             row.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
-            row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+            row.setBackground(UiKit.round(UiKit.itemFill(this, selected), UiKit.dp(this, 14), UiKit.line(this)));
             row.setOnClickListener(v -> {
                 handler.onChoice(value);
                 dialog.dismiss();
@@ -3504,16 +4245,19 @@ public class MainActivity extends Activity {
         scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
         ensureDefaultCommands(state);
         List<String> choices = new ArrayList<>(state.availableSkills);
-        final String[] selectedKind = new String[]{"全部"};
+        String rememberedKind = rememberedExtensionKind.getOrDefault(currentSection, "全部");
+        if (!Arrays.asList("全部", "Skill", "Plugin", "Command").contains(rememberedKind)) rememberedKind = "全部";
+        final String[] selectedKind = new String[]{rememberedKind};
         for (String label : Arrays.asList("全部", "Skill", "Plugin", "Command")) {
             TextView chip = filterChip(label, label.equals(selectedKind[0]));
             chip.setOnClickListener(v -> {
                 selectedKind[0] = label;
+                rememberedExtensionKind.put(currentSection, label);
                 for (int i = 0; i < filters.getChildCount(); i++) {
                     TextView item = (TextView) filters.getChildAt(i);
                     boolean selected = item.getText().toString().equals(label);
-                    item.setTextColor(selected ? UiKit.BLUE : UiKit.MUTED);
-                    item.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(150, 255, 255, 255), UiKit.dp(this, 13), UiKit.LINE));
+                    item.setTextColor(selected ? UiKit.blue(this) : UiKit.muted(this));
+                    item.setBackground(UiKit.round(UiKit.chipFill(this, selected), UiKit.dp(this, 13), UiKit.line(this)));
                 }
                 renderExtensionRows(list, choices, selectedKind[0], search.getText().toString(), state);
             });
@@ -3594,7 +4338,7 @@ public class MainActivity extends Activity {
         boolean selected = state.selectedSkills.contains(choice);
         LinearLayout row = UiKit.horizontal(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(UiKit.round(selected ? Color.argb(190, 238, 244, 255) : Color.argb(140, 255, 255, 255), UiKit.dp(this, 14), UiKit.LINE));
+        row.setBackground(UiKit.round(UiKit.itemFill(this, selected), UiKit.dp(this, 14), UiKit.line(this)));
         TextView label = UiKit.text(this, (selected ? "✓ " : "  ") + choice, selected ? UiKit.BLUE : UiKit.INK, 14);
         label.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         label.setSingleLine(true);
@@ -3716,6 +4460,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "请先在系统设置中绑定 PC/Mac 客户端", Toast.LENGTH_SHORT).show();
             return;
         }
+        stopActiveSend();
         AppSection targetSection = currentSection;
         SectionState state = state();
         ChatSession session = state.current();
@@ -3723,57 +4468,141 @@ public class MainActivity extends Activity {
         List<Uri> attachments = new ArrayList<>(selectedAttachments);
         selectedAttachments.clear();
         updateAttachmentPreview();
-        session.messages.add(new ChatMessage("user", composeUserMessage(text, attachments), now));
-        ChatMessage progress = new ChatMessage("assistant", progressTextFor(targetSection), now + 1);
-        session.messages.add(progress);
+        String userPayload = composeUserMessage(text, attachments);
+        session.messages.add(new ChatMessage("user", userPayload, now));
+        if (targetSection.isDesktop()) {
+            session.status = "queued";
+        }
+        ChatMessage progress = targetSection.isDesktop() ? null : new ChatMessage("assistant", progressTextFor(targetSection), now + 1);
+        if (progress != null) session.messages.add(progress);
         composerView.clearInput();
         composerView.setSending(true);
         renderCurrent(true);
+        if (!targetSection.isDesktop()) startStreamAutoScroll();
         persistSession(targetSection, session);
-        network.execute(() -> {
+        AtomicBoolean cancelFlag = new AtomicBoolean(false);
+        activeSendCancelled = cancelFlag;
+        activeSendTask = network.submit(() -> {
             String result;
             try {
+                Object chatPayload = buildChatUserContent(text, attachments, userPayload);
+                String desktopPayload = userPayload;
+                JSONArray desktopAttachments = buildDesktopAttachments(attachments);
                 if (targetSection == AppSection.CHAT) {
                     String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
+                    final long[] lastRenderAt = new long[]{0};
                     chatController.stream(
                             state.selectedModel,
                             (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow,
                             null,
-                            text,
+                            chatPayload,
                             reasoningValue(state.selectedReasoning),
-                            (fullText, done) -> mainHandler.post(() -> {
-                                progress.text = fullText.trim().isEmpty() ? "正在思考..." : fullText;
-                                if (currentSection == targetSection && state.current() == session) {
-                                    renderCurrent(true);
+                            new ChatController.DeltaHandler() {
+                                @Override
+                                public void onDelta(String fullText, boolean done) {
+                                    mainHandler.post(() -> {
+                                        if (cancelFlag.get()) return;
+                                        if (progress == null) return;
+                                        progress.text = fullText.trim().isEmpty() ? "正在思考..." : fullText;
+                                        if (currentSection == targetSection && state.current() == session) {
+                                            long nowRender = System.currentTimeMillis();
+                                            if (done || nowRender - lastRenderAt[0] >= 180) {
+                                                lastRenderAt[0] = nowRender;
+                                                renderCurrent(false);
+                                                requestStreamAutoScroll();
+                                            }
+                                        }
+                                        if (done) {
+                                            stopStreamAutoScroll();
+                                            persistSession(targetSection, session);
+                                            composerView.setSending(false);
+                                            activeSendTask = null;
+                                            activeSendCancelled = null;
+                                        }
+                                    });
                                 }
-                                if (done) {
-                                    persistSession(targetSection, session);
-                                    composerView.setSending(false);
+
+                                @Override
+                                public void onUsage(ChatController.Usage usage) {
+                                    mainHandler.post(() -> {
+                                        if (cancelFlag.get() || progress == null || usage == null || usage.isEmpty()) return;
+                                        progress.tokenText = usage.displayText();
+                                        if (currentSection == targetSection && state.current() == session) renderCurrent(false);
+                                    });
                                 }
-                            }));
+                            });
                     result = progress.text;
+                } else if (targetSection == AppSection.IMAGE) {
+                    String assistantPrompt = imageAssistantPrompts.getOrDefault(session.assistantLabel, "");
+                    String imagePrompt = assistantPrompt.isEmpty() ? text : assistantPrompt + "\n\n用户图片需求：" + text;
+                    ImageController.ImageResult imageResult = attachments != null && !attachments.isEmpty()
+                            ? imageController.editResult(this, attachments.get(0), imagePrompt, state.imageSize, state.imageQuality)
+                            : imageController.generateResult(imagePrompt, state.imageSize, state.imageQuality, false);
+                    if (progress != null) progress.tokenText = imageResult.tokenText;
+                    result = imageResult.image;
                 } else {
-                    result = networkSend(targetSection, state, session, text, attachments);
+                    result = networkSend(targetSection, state, session, text, userPayload, chatPayload, desktopPayload, desktopAttachments, attachments);
                 }
-                if (result.trim().isEmpty()) {
+                if (!targetSection.isDesktop() && result.trim().isEmpty()) {
                     result = "本次没有返回可显示内容。";
                 }
             } catch (Exception error) {
-                result = "请求失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
+                String currentText = progress == null ? "" : progress.text;
+                result = cancelFlag.get() ? currentText + "\n\n已停止。" : "请求失败：" + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
             }
             String finalResult = result;
             mainHandler.post(() -> {
+                if (cancelFlag.get() && targetSection == AppSection.CHAT) {
+                    progress.text = finalResult.trim().isEmpty() ? "已停止。" : finalResult;
+                    stopStreamAutoScroll();
+                    composerView.setSending(false);
+                    persistSession(targetSection, session);
+                    if (currentSection == targetSection && state.current() == session) renderCurrent(false);
+                    activeSendTask = null;
+                    activeSendCancelled = null;
+                    return;
+                }
                 if (targetSection == AppSection.CHAT && !finalResult.startsWith("请求失败：")) {
                     return;
                 }
-                progress.text = finalResult;
+                if (targetSection.isDesktop() && !finalResult.startsWith("请求失败：")) {
+                    stopStreamAutoScroll();
+                    persistSession(targetSection, session);
+                    if (currentSection == targetSection && state.current() == session) renderCurrent(false);
+                    activeSendTask = null;
+                    activeSendCancelled = null;
+                    return;
+                }
+                if (progress != null) {
+                    progress.text = finalResult;
+                } else if (!finalResult.trim().isEmpty()) {
+                    session.messages.add(new ChatMessage("assistant", finalResult, System.currentTimeMillis()));
+                }
+                stopStreamAutoScroll();
                 composerView.setSending(false);
                 persistSession(targetSection, session);
                 if (currentSection == targetSection && state.current() == session) {
-                    renderCurrent(true);
+                    renderCurrent(false);
                 }
+                activeSendTask = null;
+                activeSendCancelled = null;
             });
         });
+    }
+
+    private void stopActiveSend() {
+        stopStreamAutoScroll();
+        if (currentSection.isDesktop() && isDesktopSessionBusy(state().current())) {
+            Toast.makeText(this, "客户端仍在执行，完成状态同步后会自动恢复发送按钮", Toast.LENGTH_SHORT).show();
+            composerView.setSending(true);
+            return;
+        }
+        if (activeSendCancelled != null) activeSendCancelled.set(true);
+        if (activeSendTask != null && !activeSendTask.isDone()) {
+            activeSendTask.cancel(true);
+        }
+        if (apiClient != null) apiClient.cancelActiveRequests();
+        if (composerView != null) composerView.setSending(false);
     }
 
     private void editMessage(ConversationDisplayItem item) {
@@ -3792,19 +4621,125 @@ public class MainActivity extends Activity {
         StringBuilder out = new StringBuilder();
         if (attachments != null) {
             for (Uri uri : attachments) {
-                out.append(uri).append('\n');
-                String body = readTextAttachment(uri, 20000);
-                if (body != null && !body.trim().isEmpty()) {
-                    out.append("\n附件：").append(displayName(uri)).append("\n```text\n")
-                            .append(body.trim())
-                            .append("\n```\n");
-                } else {
-                    out.append("附件：").append(displayName(uri)).append("\n");
+                if (uri != null) out.append(uri).append('\n');
+            }
+        }
+        out.append(text == null ? "" : text);
+        return out.toString().trim();
+    }
+
+    private Object buildChatUserContent(String text, List<Uri> attachments, String fallbackText) throws Exception {
+        if (attachments == null || attachments.isEmpty()) return fallbackText;
+        JSONArray parts = new JSONArray();
+        StringBuilder textPart = new StringBuilder();
+        for (Uri uri : attachments) {
+            String name = displayName(uri);
+            if (isImageAttachment(uri)) {
+                String dataUrl = imageDataUrl(uri);
+                if (!dataUrl.isEmpty()) {
+                    parts.put(new JSONObject()
+                            .put("type", "image_url")
+                            .put("image_url", new JSONObject()
+                                    .put("url", dataUrl)
+                                    .put("detail", "high")));
+                    if (textPart.length() > 0) textPart.append('\n');
+                    textPart.append("附件：").append(name).append("（图片内容已随消息上传，请直接分析图片内容）");
+                    continue;
+                }
+            }
+            String pdfPage = isPdfAttachment(uri) ? pdfFirstPageDataUrl(uri) : "";
+            if (!pdfPage.isEmpty()) {
+                parts.put(new JSONObject()
+                        .put("type", "image_url")
+                        .put("image_url", new JSONObject().put("url", pdfPage)));
+                if (textPart.length() > 0) textPart.append('\n');
+                textPart.append("附件：").append(name).append("（PDF 第一页已作为图片内容发送）");
+                continue;
+            }
+            String body = readableAttachmentContent(uri, 40000);
+            if (textPart.length() > 0) textPart.append('\n');
+            if (body != null && !body.trim().isEmpty()) {
+                textPart.append("附件：").append(name).append("\n```text\n").append(body.trim()).append("\n```");
+            } else {
+                textPart.append("附件：").append(name).append("（当前文件类型无法直接解析，请结合文件名和用户描述判断）");
+            }
+        }
+        if (text != null && !text.trim().isEmpty()) {
+            if (textPart.length() > 0) textPart.append("\n\n");
+            textPart.append(text.trim());
+        }
+        if (parts.length() == 0) return textPart.toString().trim();
+        parts.put(0, new JSONObject().put("type", "text").put("text", textPart.toString().trim()));
+        return parts;
+    }
+
+    private String composeDesktopUserMessage(String text, List<Uri> attachments) {
+        StringBuilder out = new StringBuilder();
+        if (attachments != null) {
+            for (Uri uri : attachments) {
+                String name = displayName(uri);
+                try {
+                    if (isImageAttachment(uri)) {
+                        String dataUrl = imageDataUrl(uri);
+                        if (!dataUrl.isEmpty()) {
+                            out.append("附件：").append(name).append('\n').append(dataUrl).append("\n\n");
+                            continue;
+                        }
+                    }
+                    String pdfPage = isPdfAttachment(uri) ? pdfFirstPageDataUrl(uri) : "";
+                    if (!pdfPage.isEmpty()) {
+                        out.append("附件：").append(name).append("（PDF 第一页图片）\n")
+                                .append("![PDF page](").append(pdfPage).append(")\n\n");
+                        continue;
+                    }
+                    String body = readableAttachmentContent(uri, 40000);
+                    if (body != null && !body.trim().isEmpty()) {
+                        out.append("附件：").append(name).append("\n```text\n").append(body.trim()).append("\n```\n\n");
+                    } else {
+                        out.append("附件：").append(name).append("\n");
+                    }
+                } catch (Exception error) {
+                    out.append("附件：").append(name).append("（读取失败：").append(message(error)).append("）\n");
                 }
             }
         }
         out.append(text == null ? "" : text);
         return out.toString().trim();
+    }
+
+    private JSONArray buildDesktopAttachments(List<Uri> attachments) {
+        JSONArray out = new JSONArray();
+        if (attachments == null) return out;
+        for (Uri uri : attachments) {
+            try {
+                String name = displayName(uri);
+                String mime = getContentResolver().getType(uri);
+                JSONObject item = new JSONObject()
+                        .put("id", "android-att-" + Math.abs(String.valueOf(uri).hashCode()) + "-" + System.currentTimeMillis())
+                        .put("name", name)
+                        .put("mime", mime == null ? "" : mime)
+                        .put("source", "mobile");
+                if (isImageAttachment(uri)) {
+                    String dataUrl = imageDataUrl(uri);
+                    if (!dataUrl.isEmpty()) {
+                        item.put("kind", "image").put("dataUrl", dataUrl);
+                    }
+                } else if (isPdfAttachment(uri)) {
+                    String dataUrl = pdfFirstPageDataUrl(uri);
+                    item.put("kind", "file");
+                    if (!dataUrl.isEmpty()) item.put("dataUrl", dataUrl).put("renderedPreview", true);
+                } else {
+                    String body = readableAttachmentContent(uri, 120000);
+                    item.put("kind", "file");
+                    if (body != null && !body.trim().isEmpty()) item.put("text", body.trim());
+                }
+                if (item.has("dataUrl") || item.has("text")) {
+                    out.put(item);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
     }
 
     private List<Uri> imageUrisFromMessage(String text) {
@@ -3846,14 +4781,21 @@ public class MainActivity extends Activity {
     private boolean isImageText(String text) {
         if (text == null) return false;
         String value = text.trim().toLowerCase(Locale.ROOT);
-        return value.startsWith("content:") || value.startsWith("file:") || value.startsWith("data:image/")
-                || value.endsWith(".png") || value.endsWith(".jpg") || value.endsWith(".jpeg") || value.endsWith(".webp");
+        if (value.startsWith("data:image/")) return true;
+        if (value.startsWith("content:") || value.startsWith("file:")) {
+            try {
+                return isImageAttachment(Uri.parse(text.trim()));
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+        return value.endsWith(".png") || value.endsWith(".jpg") || value.endsWith(".jpeg") || value.endsWith(".webp");
     }
 
-    private String networkSend(AppSection targetSection, SectionState state, ChatSession session, String text, List<Uri> attachments) throws Exception {
+    private String networkSend(AppSection targetSection, SectionState state, ChatSession session, String text, String userPayload, Object chatPayload, String desktopPayload, JSONArray desktopAttachments, List<Uri> attachments) throws Exception {
         if (targetSection == AppSection.CHAT) {
             String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
-            return chatController.send(state.selectedModel, (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow, null, text, reasoningValue(state.selectedReasoning));
+            return chatController.send(state.selectedModel, (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow, null, chatPayload, reasoningValue(state.selectedReasoning));
         }
         if (targetSection == AppSection.IMAGE) {
             String assistantPrompt = imageAssistantPrompts.getOrDefault(session.assistantLabel, "");
@@ -3872,16 +4814,17 @@ public class MainActivity extends Activity {
                     targetSection.id,
                     deviceId,
                     session.id,
-                    text,
+                    desktopPayload == null || desktopPayload.trim().isEmpty() ? userPayload : desktopPayload,
                     state.selectedModel,
                     reasoningValue(state.selectedReasoning),
                     state.fullPermission ? "full" : "restricted",
-                    extensionRefs(state)
+                    extensionRefs(state),
+                    session.projectLabel,
+                    "mobile",
+                    "android-" + System.currentTimeMillis(),
+                    desktopAttachments
             );
-            return "已发送到 " + targetSection.label + "。\n\n"
-                    + "| 项目 | 权限 | Skill |\n"
-                    + "| --- | --- | --- |\n"
-                    + "| " + session.projectLabel + " | " + (state.fullPermission ? "全权限" : "受限") + " | " + (state.selectedSkills.isEmpty() ? "未选择" : state.selectedSkills) + " |";
+            return "";
         }
         return "";
     }
@@ -3902,7 +4845,7 @@ public class MainActivity extends Activity {
     }
 
     private String progressTextFor(AppSection section) {
-        if (section == AppSection.IMAGE) return "正在生成图片...";
+        if (section == AppSection.IMAGE) return "oneapi://image-loading";
         if (section.isDesktop()) return "正在发送到桌面端...";
         return "正在思考...";
     }
@@ -4002,8 +4945,7 @@ public class MainActivity extends Activity {
         states.put(AppSection.CHAT, chat);
         String defaultImageAssistant = ImageAssistantCatalog.builtIns().get(0).name;
         SectionState image = new SectionState(
-                Arrays.asList(new ChatSession("image-1", "生图", defaultImageAssistant, "图片生成", messages(now,
-                        new ChatMessage("assistant", "图片生成页会复用同一套稳定 RecyclerView 链路。", now)))),
+                Arrays.asList(new ChatSession("image-1", "生图", defaultImageAssistant, "图片生成", new ArrayList<>())),
                 Arrays.asList("写实", "海报", "头像")
         );
         image.selectedModel = "gpt-image-2";
@@ -4163,6 +5105,7 @@ public class MainActivity extends Activity {
         String assistantLabel;
         final String projectLabel;
         final List<ChatMessage> messages;
+        String status = "";
 
         ChatSession(String id, String title, String assistantLabel, String projectLabel, List<ChatMessage> messages) {
             this.id = id;
@@ -4178,6 +5121,7 @@ public class MainActivity extends Activity {
         String text;
         final long timestamp;
         final boolean log;
+        String tokenText = "";
 
         ChatMessage(String role, String text, long timestamp) {
             this.role = role;

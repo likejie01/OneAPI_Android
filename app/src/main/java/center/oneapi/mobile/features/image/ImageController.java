@@ -12,6 +12,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 import center.oneapi.mobile.core.ApiClient;
+import center.oneapi.mobile.features.chat.ChatController;
 
 public class ImageController {
     private final ApiClient api;
@@ -35,10 +36,18 @@ public class ImageController {
     }
 
     public String generate(String prompt, String size, String quality, boolean randomSeed) throws Exception {
-        return extractImage(api.post("/pg/images/generations", buildGenerationRequest(prompt, size, quality, randomSeed)));
+        return generateResult(prompt, size, quality, randomSeed).image;
+    }
+
+    public ImageResult generateResult(String prompt, String size, String quality, boolean randomSeed) throws Exception {
+        return extractResult(api.post("/pg/images/generations", buildGenerationRequest(prompt, size, quality, randomSeed)));
     }
 
     public String edit(Context context, Uri imageUri, String prompt, String size, String quality) throws Exception {
+        return editResult(context, imageUri, prompt, size, quality).image;
+    }
+
+    public ImageResult editResult(Context context, Uri imageUri, String prompt, String size, String quality) throws Exception {
         String boundary = "----OneApiAndroid" + System.currentTimeMillis();
         HttpURLConnection connection = (HttpURLConnection) new URL(ApiClient.buildUrl(api.server(), "/v1/images/edits")).openConnection();
         connection.setConnectTimeout(15000);
@@ -76,26 +85,46 @@ public class ImageController {
         if (code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
             throw new java.io.IOException(json.optString("message", "图片编辑接口请求失败"));
         }
-        return extractImage(json);
+        return extractResult(json);
     }
 
     public static String extractImage(JSONObject response) {
-        if (response == null) return "";
+        return extractResult(response).image;
+    }
+
+    public static ImageResult extractResult(JSONObject response) {
+        if (response == null) return new ImageResult("", "");
+        String image = "";
         JSONArray data = response.optJSONArray("data");
         if (data != null && data.length() > 0) {
             JSONObject first = data.optJSONObject(0);
             if (first != null) {
                 String url = first.optString("url", first.optString("image_url", ""));
-                if (!url.isEmpty()) return url;
+                if (!url.isEmpty()) image = url;
                 String b64 = first.optString("b64_json", first.optString("b64Json", ""));
-                if (!b64.isEmpty()) return b64.startsWith("data:image/") ? b64 : "data:image/png;base64," + b64;
+                if (image.isEmpty() && !b64.isEmpty()) image = b64.startsWith("data:image/") ? b64 : "data:image/png;base64," + b64;
             }
         }
-        String direct = response.optString("image", response.optString("result", ""));
-        if (!direct.isEmpty() && !direct.startsWith("http") && !direct.startsWith("data:image/")) {
-            return "data:image/png;base64," + direct;
+        if (image.isEmpty()) {
+            String direct = response.optString("image", response.optString("result", ""));
+            if (!direct.isEmpty() && !direct.startsWith("http") && !direct.startsWith("data:image/")) {
+                image = "data:image/png;base64," + direct;
+            } else {
+                image = direct;
+            }
         }
-        return direct;
+        ChatController.Usage usage = ChatController.Usage.from(response.optJSONObject("usage"));
+        return new ImageResult(image, usage.displayText());
+    }
+
+    public static final class ImageResult {
+        public final String image;
+        public final String tokenText;
+
+        ImageResult(String image, String tokenText) {
+            this.image = image == null ? "" : image;
+            this.tokenText = tokenText == null ? "" : tokenText;
+        }
     }
 
     private static String clean(String value) {

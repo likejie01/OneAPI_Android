@@ -1,6 +1,7 @@
 package center.oneapi.mobile.ui.conversation;
 
 import android.app.Dialog;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -9,7 +10,12 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Shader;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Build;
@@ -66,6 +72,13 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         setHasStableIds(true);
     }
 
+    public void refreshTheme() {
+        visibleActions = null;
+        if (getItemCount() > 0) {
+            notifyItemRangeChanged(0, getItemCount());
+        }
+    }
+
     @Override
     public long getItemId(int position) {
         return getItem(position).id;
@@ -97,14 +110,14 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         if (item.type == ConversationDisplayItem.LOAD_EARLIER) {
             TextView view = UiKit.text(context, item.text, UiKit.BLUE, 13);
             view.setGravity(android.view.Gravity.CENTER);
-            view.setBackground(UiKit.round(Color.argb(210, 255, 255, 255), UiKit.dp(context, 14), Color.argb(76, 54, 104, 240)));
+            view.setBackground(UiKit.glass(context, UiKit.dp(context, 14), UiKit.blue(context)));
             view.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 9), UiKit.dp(context, 10), UiKit.dp(context, 9));
             return view;
         }
         if (item.type == ConversationDisplayItem.EMPTY) {
             LinearLayout card = UiKit.vertical(context);
             card.setPadding(UiKit.dp(context, 16), UiKit.dp(context, 15), UiKit.dp(context, 16), UiKit.dp(context, 15));
-            card.setBackground(UiKit.round(UiKit.GLASS, UiKit.dp(context, 18), UiKit.LINE));
+            card.setBackground(UiKit.glass(context, UiKit.dp(context, 18), UiKit.line(context)));
             card.addView(UiKit.text(context, item.text, UiKit.MUTED, 14));
             return card;
         }
@@ -116,7 +129,9 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         } else if (user) {
             renderUserContent(bubble, item.text);
         } else {
-            if (isImageSource(item.text)) {
+            if (isImageLoadingSource(item.text)) {
+                bubble.addView(imageLoading());
+            } else if (isImageSource(item.text)) {
                 bubble.addView(image(item.text, true));
             } else if (isAttachmentSource(item.text)) {
                 bubble.addView(attachment(item.text));
@@ -133,7 +148,11 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         if (item.type == ConversationDisplayItem.MESSAGE && item.timestamp > 0) {
             LinearLayout meta = UiKit.horizontal(context);
             meta.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            TextView time = UiKit.text(context, formatTime(item.timestamp) + " · " + tokenEstimate(item.text), UiKit.MUTED, 12);
+            String metaText = formatTime(item.timestamp);
+            if (item.tokenText != null && !item.tokenText.trim().isEmpty()) {
+                metaText += " · " + item.tokenText.trim();
+            }
+            TextView time = UiKit.text(context, metaText, UiKit.MUTED, 12);
             time.setGravity(android.view.Gravity.LEFT | android.view.Gravity.CENTER_VERTICAL);
             meta.addView(time, new LinearLayout.LayoutParams(0, UiKit.dp(context, 34), 1f));
             meta.addView(actions, new LinearLayout.LayoutParams(-2, UiKit.dp(context, 34)));
@@ -141,7 +160,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         }
         attachToggle(bubble, actions);
         FrameLayout shell = new FrameLayout(context);
-        shell.setBackground(UiKit.glass(context, UiKit.dp(context, 16), UiKit.LINE));
+        shell.setBackground(UiKit.glass(context, UiKit.dp(context, 16), UiKit.line(context)));
         shell.setClipToOutline(true);
         shell.addView(bubble, new FrameLayout.LayoutParams(-1, -2));
         attachToggle(shell, actions);
@@ -267,18 +286,12 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
 
     private ImageButton actionButton(int icon, String desc, Runnable action) {
         ImageButton button = UiKit.imageButton(context, icon, desc);
-        button.setColorFilter(UiKit.MUTED);
+        button.setColorFilter(UiKit.muted(context));
         button.setPadding(UiKit.dp(context, 7), UiKit.dp(context, 7), UiKit.dp(context, 7), UiKit.dp(context, 7));
         button.setOnClickListener(v -> action.run());
         button.setBackgroundColor(Color.TRANSPARENT);
         button.setLayoutParams(new LinearLayout.LayoutParams(UiKit.dp(context, 32), UiKit.dp(context, 32)));
         return button;
-    }
-
-    private String tokenEstimate(String text) {
-        int chars = text == null ? 0 : text.trim().length();
-        int tokens = Math.max(1, (int) Math.ceil(chars / 3.5d));
-        return "约 " + tokens + " tokens";
     }
 
     private View image(String source, boolean generated) {
@@ -289,7 +302,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         wrap.setBackground(UiKit.round(Color.TRANSPARENT, UiKit.dp(context, 12), Color.TRANSPARENT));
         ImageView image = new ImageView(context);
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        image.setBackground(UiKit.round(Color.WHITE, UiKit.dp(context, 14), UiKit.LINE));
+        image.setBackground(UiKit.round(UiKit.itemFill(context, false), UiKit.dp(context, 14), UiKit.line(context)));
         image.setContentDescription("图片消息");
         image.setOnClickListener(v -> openImage(source));
         image.setOnLongClickListener(v -> {
@@ -301,7 +314,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         wrap.addView(image, imageLp);
         if (generated) {
             ImageButton download = actionButton(R.drawable.ic_bubble_download, "下载", () -> saveImage(source));
-            download.setBackground(UiKit.round(Color.argb(185, 255, 255, 255), UiKit.dp(context, 9), UiKit.LINE));
+            download.setBackground(UiKit.glass(context, UiKit.dp(context, 9), UiKit.line(context)));
             download.setPadding(UiKit.dp(context, 4), UiKit.dp(context, 4), UiKit.dp(context, 4), UiKit.dp(context, 4));
             FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(UiKit.dp(context, 22), UiKit.dp(context, 22), android.view.Gravity.RIGHT | android.view.Gravity.TOP);
             wrap.addView(download, dl);
@@ -310,6 +323,21 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
         wrap.setLayoutParams(lp);
         loadImage(source, image);
+        return wrap;
+    }
+
+    private View imageLoading() {
+        FrameLayout wrap = new FrameLayout(context);
+        wrap.setBackground(UiKit.round(Color.TRANSPARENT, UiKit.dp(context, 12), Color.TRANSPARENT));
+        ShimmerView shimmer = new ShimmerView(context);
+        shimmer.setBackground(UiKit.round(UiKit.itemFill(context, false), UiKit.dp(context, 14), UiKit.line(context)));
+        wrap.addView(shimmer, new FrameLayout.LayoutParams(UiKit.dp(context, 64), UiKit.dp(context, 64)));
+        TextView label = UiKit.text(context, "生成中", UiKit.MUTED, 11);
+        label.setGravity(android.view.Gravity.CENTER);
+        wrap.addView(label, new FrameLayout.LayoutParams(UiKit.dp(context, 64), UiKit.dp(context, 64)));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(context, 68), UiKit.dp(context, 68));
+        lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
+        wrap.setLayoutParams(lp);
         return wrap;
     }
 
@@ -349,7 +377,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             }
         }
         if (value.startsWith("content:") || value.startsWith("file:")) {
-            target.setImageURI(Uri.parse(value));
+            loadLocalImage(value, target);
             return;
         }
         if (value.startsWith("http://") || value.startsWith("https://")) {
@@ -367,13 +395,31 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         }
     }
 
+    private void loadLocalImage(String value, ImageView target) {
+        new Thread(() -> {
+            Bitmap bitmap = null;
+            try (InputStream input = context.getContentResolver().openInputStream(Uri.parse(value))) {
+                if (input != null) bitmap = BitmapFactory.decodeStream(input);
+            } catch (Exception ignored) {
+            }
+            Bitmap decoded = bitmap;
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (value.equals(target.getTag()) && decoded != null) {
+                    target.setImageBitmap(decoded);
+                }
+            });
+        }).start();
+    }
+
     private boolean isImageSource(String value) {
         if (value == null) return false;
         String text = value.trim().toLowerCase(java.util.Locale.ROOT);
         if (text.startsWith("content:")) {
             try {
                 String type = context.getContentResolver().getType(Uri.parse(value.trim()));
-                return type != null && type.startsWith("image/");
+                if (type != null && type.startsWith("image/")) return true;
+                String name = displayName(value).toLowerCase(java.util.Locale.ROOT);
+                return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".webp");
             } catch (Exception ignored) {
                 return false;
             }
@@ -389,6 +435,10 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
                 || text.contains("/image/");
     }
 
+    private boolean isImageLoadingSource(String value) {
+        return "oneapi://image-loading".equals(value == null ? "" : value.trim());
+    }
+
     private boolean isAttachmentSource(String value) {
         if (value == null) return false;
         String text = value.trim().toLowerCase(java.util.Locale.ROOT);
@@ -401,7 +451,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         file.setGravity(android.view.Gravity.CENTER);
         file.setSingleLine(true);
         file.setTextColor(fileColor(source));
-        file.setBackground(UiKit.round(fileBackground(source), UiKit.dp(context, 12), UiKit.LINE));
+        file.setBackground(UiKit.round(UiKit.resolve(context, fileBackground(source)), UiKit.dp(context, 12), UiKit.line(context)));
         file.setOnClickListener(v -> openAttachment(source));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(context, 56), UiKit.dp(context, 56));
         lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
@@ -443,11 +493,12 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         if (ext.contains("doc")) return Color.rgb(54, 104, 190);
         if (ext.contains("md")) return Color.rgb(92, 104, 124);
         if (ext.contains("json")) return Color.rgb(156, 112, 44);
-        return UiKit.MUTED;
+        return UiKit.muted(context);
     }
 
     private int fileBackground(String source) {
         String ext = extensionLabel(source).toLowerCase(java.util.Locale.ROOT);
+        if (UiKit.darkTheme(context)) return UiKit.tagFill(context, ext.contains("xls") ? "assistant" : ext.contains("json") ? "command" : "model", true);
         if (ext.contains("pdf")) return Color.rgb(255, 239, 238);
         if (ext.contains("xls")) return Color.rgb(235, 249, 241);
         if (ext.contains("doc")) return Color.rgb(238, 244, 255);
@@ -475,7 +526,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             root.setBackgroundColor(Color.TRANSPARENT);
             LinearLayout panel = UiKit.vertical(context);
             panel.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 8), UiKit.dp(context, 10), UiKit.dp(context, 10));
-            panel.setBackground(UiKit.glass(context, UiKit.dp(context, 18), UiKit.LINE));
+            panel.setBackground(UiKit.glass(context, UiKit.dp(context, 18), UiKit.line(context)));
             ImageView image = new ImageView(context);
             image.setScaleType(ImageView.ScaleType.FIT_CENTER);
             loadImage(source, image);
@@ -527,11 +578,15 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             root.addView(panel, panelLp);
             dialog.setContentView(root);
             Window window = dialog.getWindow();
-            if (window != null) window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            if (window != null) {
+                window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+                window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            }
             dialog.show();
             Window shown = dialog.getWindow();
             if (shown != null) {
                 shown.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+                shown.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
                 applyPreviewBlur(shown);
             }
         } catch (Exception ignored) {
@@ -539,11 +594,17 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
     }
 
     private void applyPreviewBlur(Window window) {
-        if (window == null || Build.VERSION.SDK_INT < 31) return;
+        if (window == null) return;
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        WindowManager.LayoutParams attrs = window.getAttributes();
+        attrs.dimAmount = 0f;
+        window.setAttributes(attrs);
+        if (Build.VERSION.SDK_INT < 31) return;
         if (UiKit.effectsEnabled(context) && UiKit.blurStrength(context) > 0) {
             window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
-            WindowManager.LayoutParams attrs = window.getAttributes();
+            attrs = window.getAttributes();
             attrs.setBlurBehindRadius(UiKit.blurStrength(context));
+            attrs.dimAmount = 0f;
             window.setAttributes(attrs);
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
@@ -589,7 +650,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             String[] items = image ? new String[]{"保存图片", "复制", "分享"} : new String[]{"复制", "分享"};
             LinearLayout panel = UiKit.horizontal(context);
             panel.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 6), UiKit.dp(context, 8), UiKit.dp(context, 6));
-            panel.setBackground(UiKit.glass(context, UiKit.dp(context, 16), UiKit.LINE));
+            panel.setBackground(UiKit.glass(context, UiKit.dp(context, 16), UiKit.line(context)));
             PopupWindow popup = new PopupWindow(panel, -2, UiKit.dp(context, 44), true);
             popup.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
             popup.setOutsideTouchable(true);
@@ -633,6 +694,54 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(Intent.createChooser(intent, "分享"));
         } catch (Exception ignored) {
+        }
+    }
+
+    private static final class ShimmerView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Matrix matrix = new Matrix();
+        private LinearGradient gradient;
+        private float offset;
+        private final ValueAnimator animator;
+
+        ShimmerView(Context context) {
+            super(context);
+            animator = ValueAnimator.ofFloat(0f, 1f);
+            animator.setDuration(1100L);
+            animator.setRepeatCount(ValueAnimator.INFINITE);
+            animator.addUpdateListener(animation -> {
+                offset = (float) animation.getAnimatedValue();
+                invalidate();
+            });
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            animator.start();
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            animator.cancel();
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            int base = UiKit.darkTheme(getContext()) ? Color.rgb(34, 44, 62) : Color.rgb(240, 246, 252);
+            int shine = UiKit.darkTheme(getContext()) ? Color.rgb(62, 76, 102) : Color.rgb(255, 255, 255);
+            gradient = new LinearGradient(-w, 0, w, h, new int[]{base, shine, base}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
+            paint.setShader(gradient);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (gradient == null) return;
+            matrix.setTranslate((getWidth() * 2f) * offset, 0);
+            gradient.setLocalMatrix(matrix);
+            canvas.drawRoundRect(0, 0, getWidth(), getHeight(), UiKit.dp(getContext(), 14), UiKit.dp(getContext(), 14), paint);
         }
     }
 
@@ -710,7 +819,8 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             return oldItem.type == newItem.type
                     && oldItem.timestamp == newItem.timestamp
                     && oldItem.role.equals(newItem.role)
-                    && oldItem.text.equals(newItem.text);
+                    && oldItem.text.equals(newItem.text)
+                    && oldItem.tokenText.equals(newItem.tokenText);
         }
     };
 }
