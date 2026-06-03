@@ -44,7 +44,9 @@ import java.io.OutputStream;
 import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 import center.oneapi.mobile.R;
 import center.oneapi.mobile.ui.UiKit;
@@ -59,6 +61,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
 
     private final Context context;
     private final Listener listener;
+    private final Set<Long> expandedThinkingIds = new HashSet<>();
     private LinearLayout visibleActions;
 
     public ConversationAdapter(Context context) {
@@ -136,7 +139,13 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             } else if (isAttachmentSource(item.text)) {
                 bubble.addView(attachment(item.text));
             } else {
-                new MarkdownViews(context).renderInto(bubble, item.text, null);
+                new MarkdownViews(context, expandedThinkingIds.contains(item.id), expanded -> {
+                    if (expanded) {
+                        expandedThinkingIds.add(item.id);
+                    } else {
+                        expandedThinkingIds.remove(item.id);
+                    }
+                }).renderInto(bubble, item.text, null);
             }
         }
         bubble.setOnLongClickListener(v -> {
@@ -148,15 +157,21 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         if (item.type == ConversationDisplayItem.MESSAGE && item.timestamp > 0) {
             LinearLayout meta = UiKit.horizontal(context);
             meta.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            String metaText = formatTime(item.timestamp);
-            if (item.tokenText != null && !item.tokenText.trim().isEmpty()) {
-                metaText += " · " + item.tokenText.trim();
-            }
-            TextView time = UiKit.text(context, metaText, UiKit.MUTED, 12);
+            LinearLayout metaText = UiKit.vertical(context);
+            metaText.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            TextView time = UiKit.text(context, formatTime(item.timestamp), UiKit.MUTED, 12);
             time.setGravity(android.view.Gravity.LEFT | android.view.Gravity.CENTER_VERTICAL);
-            meta.addView(time, new LinearLayout.LayoutParams(0, UiKit.dp(context, 34), 1f));
+            metaText.addView(time, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 18)));
+            String tokenText = tokenDisplayText(item.tokenText);
+            if (!tokenText.isEmpty()) {
+                TextView token = UiKit.text(context, tokenText, UiKit.MUTED, 11);
+                token.setSingleLine(true);
+                token.setGravity(android.view.Gravity.LEFT | android.view.Gravity.CENTER_VERTICAL);
+                metaText.addView(token, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 18)));
+            }
+            meta.addView(metaText, new LinearLayout.LayoutParams(0, tokenText.isEmpty() ? UiKit.dp(context, 34) : UiKit.dp(context, 40), 1f));
             meta.addView(actions, new LinearLayout.LayoutParams(-2, UiKit.dp(context, 34)));
-            bubble.addView(meta, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 36)));
+            bubble.addView(meta, new LinearLayout.LayoutParams(-1, tokenText.isEmpty() ? UiKit.dp(context, 36) : UiKit.dp(context, 44)));
         }
         attachToggle(bubble, actions);
         FrameLayout shell = new FrameLayout(context);
@@ -202,6 +217,8 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
 
     private void attachToggle(View view, LinearLayout actions) {
         if ("log".equals(view.getTag())) return;
+        if ("markdown_thinking".equals(view.getTag()) || "markdown_interactive".equals(view.getTag())) return;
+        if (view.hasOnClickListeners()) return;
         view.setOnClickListener(v -> toggleActions(actions));
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
@@ -748,6 +765,34 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
     private String formatTime(long timestamp) {
         long ms = timestamp > 10000000000L ? timestamp : timestamp * 1000L;
         return new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(new Date(ms));
+    }
+
+    private String tokenDisplayText(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) return "";
+        if (!text.toLowerCase(Locale.ROOT).startsWith("tokens:")) return text;
+        String[] parts = text.substring(text.indexOf(':') + 1).trim().split("\\s+");
+        int input = parseTokenPart(parts, 0);
+        int output = parseTokenPart(parts, 1);
+        int total = parseTokenPart(parts, 2);
+        if (parts.length == 1) {
+            total = input;
+            input = 0;
+        }
+        String converted = "输入：" + input + " | 输出：" + output + " | 缓存：0";
+        if (total > 0 && input <= 0 && output <= 0) {
+            converted += " | 总计：" + total;
+        }
+        return converted;
+    }
+
+    private int parseTokenPart(String[] parts, int index) {
+        if (parts == null || index < 0 || index >= parts.length) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(parts[index].replaceAll("[^0-9]", "")));
+        } catch (Exception ignored) {
+            return 0;
+        }
     }
 
     private void saveImage(String source) {

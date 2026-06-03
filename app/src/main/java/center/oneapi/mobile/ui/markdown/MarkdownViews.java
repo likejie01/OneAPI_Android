@@ -19,12 +19,15 @@ import android.text.style.BackgroundColorSpan;
 import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ImageButton;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
 import android.widget.TableLayout;
 import android.widget.TableRow;
 import android.widget.TextView;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.webkit.WebSettings;
 
@@ -35,11 +38,23 @@ import java.io.OutputStream;
 import java.util.List;
 
 public class MarkdownViews {
+    public interface ThinkingStateListener {
+        void onChanged(boolean expanded);
+    }
+
     private final Context context;
     private final MarkdownParser parser = new MarkdownParser();
+    private final boolean thinkingExpanded;
+    private final ThinkingStateListener thinkingStateListener;
 
     public MarkdownViews(Context context) {
+        this(context, false, null);
+    }
+
+    public MarkdownViews(Context context, boolean thinkingExpanded, ThinkingStateListener thinkingStateListener) {
         this.context = context;
+        this.thinkingExpanded = thinkingExpanded;
+        this.thinkingStateListener = thinkingStateListener;
     }
 
     public void renderInto(LinearLayout parent, String markdown, Runnable clickAction) {
@@ -74,6 +89,7 @@ public class MarkdownViews {
 
     private View thinking(String value, Runnable clickAction) {
         LinearLayout box = UiKit.vertical(context);
+        box.setTag("markdown_thinking");
         box.setBackground(UiKit.round(UiKit.thinkingFill(context), UiKit.dp(context, 12), UiKit.thinkingStroke(context)));
         box.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 7), UiKit.dp(context, 10), UiKit.dp(context, 7));
         LinearLayout head = UiKit.horizontal(context);
@@ -90,15 +106,20 @@ public class MarkdownViews {
         head.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
         TextView body = UiKit.text(context, value, UiKit.thinkingText(context), 13);
         body.setTextIsSelectable(true);
-        body.setVisibility(View.GONE);
+        body.setVisibility(thinkingExpanded ? View.VISIBLE : View.GONE);
+        marker.setText(thinkingExpanded ? "▼" : "▶");
         box.addView(head);
         box.addView(body);
-        head.setOnClickListener(v -> {
+        View.OnClickListener toggle = v -> {
             boolean open = body.getVisibility() == View.VISIBLE;
-            body.setVisibility(open ? View.GONE : View.VISIBLE);
-            marker.setText(open ? "▶" : "▼");
-        });
-        if (clickAction != null) box.setOnClickListener(v -> clickAction.run());
+            boolean nextOpen = !open;
+            body.setVisibility(nextOpen ? View.VISIBLE : View.GONE);
+            marker.setText(nextOpen ? "▼" : "▶");
+            if (thinkingStateListener != null) thinkingStateListener.onChanged(nextOpen);
+            if (clickAction != null) clickAction.run();
+        };
+        head.setOnClickListener(toggle);
+        box.setOnClickListener(toggle);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.setMargins(0, UiKit.dp(context, 4), 0, UiKit.dp(context, 8));
         box.setLayoutParams(lp);
@@ -140,15 +161,15 @@ public class MarkdownViews {
     }
 
     private View mermaid(String value, Runnable clickAction) {
+        String clean = normalizeMermaid(value);
         LinearLayout box = UiKit.vertical(context);
+        box.setTag("markdown_interactive");
         box.setBackground(UiKit.round(UiKit.codeFill(context), UiKit.dp(context, 10), UiKit.line(context)));
         WebView web = new WebView(context);
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         web.setBackgroundColor(Color.TRANSPARENT);
-        web.loadDataWithBaseURL("https://cdn.jsdelivr.net/", mermaidHtml(value), "text/html", "UTF-8", null);
-        box.addView(web, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 260)));
         LinearLayout actions = UiKit.horizontal(context);
         actions.setGravity(Gravity.RIGHT);
         actions.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 4), UiKit.dp(context, 6), UiKit.dp(context, 6));
@@ -157,16 +178,16 @@ public class MarkdownViews {
         actions.addView(label, new LinearLayout.LayoutParams(0, UiKit.dp(context, 30), 1f));
         ImageButton copy = UiKit.imageButton(context, R.drawable.ic_bubble_copy, "复制 Mermaid");
         copy.setColorFilter(UiKit.muted(context));
-        copy.setOnClickListener(v -> copy(value));
-        ImageButton svg = UiKit.imageButton(context, R.drawable.ic_bubble_download, "下载 SVG");
-        svg.setColorFilter(UiKit.muted(context));
-        svg.setOnClickListener(v -> saveRenderedSvg(web, value));
-        ImageButton png = UiKit.imageButton(context, R.drawable.ic_bubble_download, "下载 PNG");
-        png.setColorFilter(UiKit.blue(context));
-        png.setOnClickListener(v -> saveWebViewPng(web, value));
+        copy.setOnClickListener(v -> copy(clean));
+        ImageButton download = UiKit.imageButton(context, R.drawable.ic_bubble_download, "下载 Mermaid");
+        download.setColorFilter(UiKit.blue(context));
+        download.setVisibility(View.GONE);
+        download.setOnClickListener(v -> showMermaidDownloadMenu(download, web, clean));
+        web.addJavascriptInterface(new MermaidBridge(download), "AndroidMermaid");
+        web.loadDataWithBaseURL("https://cdn.jsdelivr.net/", mermaidHtml(clean), "text/html", "UTF-8", null);
+        box.addView(web, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 260)));
         actions.addView(copy, new LinearLayout.LayoutParams(UiKit.dp(context, 30), UiKit.dp(context, 30)));
-        actions.addView(svg, new LinearLayout.LayoutParams(UiKit.dp(context, 30), UiKit.dp(context, 30)));
-        actions.addView(png, new LinearLayout.LayoutParams(UiKit.dp(context, 30), UiKit.dp(context, 30)));
+        actions.addView(download, new LinearLayout.LayoutParams(UiKit.dp(context, 30), UiKit.dp(context, 30)));
         box.addView(actions);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.setMargins(0, UiKit.dp(context, 5), 0, UiKit.dp(context, 7));
@@ -221,6 +242,21 @@ public class MarkdownViews {
             TableRow.LayoutParams lp = new TableRow.LayoutParams(-2, -2);
             row.addView(view, lp);
         }
+        row.post(() -> {
+            int max = 0;
+            for (int i = 0; i < row.getChildCount(); i++) {
+                max = Math.max(max, row.getChildAt(i).getHeight());
+            }
+            if (max <= 0) return;
+            for (int i = 0; i < row.getChildCount(); i++) {
+                View child = row.getChildAt(i);
+                ViewGroup.LayoutParams params = child.getLayoutParams();
+                if (params != null && params.height != max) {
+                    params.height = max;
+                    child.setLayoutParams(params);
+                }
+            }
+        });
         return row;
     }
 
@@ -372,6 +408,37 @@ public class MarkdownViews {
         }
     }
 
+    private void showMermaidDownloadMenu(View anchor, WebView web, String fallback) {
+        LinearLayout panel = UiKit.horizontal(context);
+        panel.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 6), UiKit.dp(context, 8), UiKit.dp(context, 6));
+        panel.setBackground(UiKit.glass(context, UiKit.dp(context, 16), UiKit.line(context)));
+        PopupWindow popup = new PopupWindow(panel, -2, UiKit.dp(context, 44), true);
+        popup.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        popup.setOutsideTouchable(true);
+        TextView png = mermaidDownloadOption("PNG", () -> {
+            popup.dismiss();
+            saveWebViewPng(web, fallback);
+        });
+        TextView svg = mermaidDownloadOption("SVG", () -> {
+            popup.dismiss();
+            saveRenderedSvg(web, fallback);
+        });
+        panel.addView(png, new LinearLayout.LayoutParams(UiKit.dp(context, 56), -1));
+        panel.addView(svg, new LinearLayout.LayoutParams(UiKit.dp(context, 56), -1));
+        panel.measure(View.MeasureSpec.makeMeasureSpec(UiKit.dp(context, 140), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED);
+        int[] pos = new int[2];
+        anchor.getLocationOnScreen(pos);
+        int y = pos[1] - Math.max(panel.getMeasuredHeight(), UiKit.dp(context, 44)) - UiKit.dp(context, 8);
+        popup.showAtLocation(anchor, Gravity.NO_GRAVITY, pos[0] - UiKit.dp(context, 80), Math.max(UiKit.dp(context, 12), y));
+    }
+
+    private TextView mermaidDownloadOption(String label, Runnable action) {
+        TextView view = UiKit.text(context, label, UiKit.INK, 13);
+        view.setGravity(Gravity.CENTER);
+        view.setOnClickListener(v -> action.run());
+        return view;
+    }
+
     private String mermaidHtml(String source) {
         String clean = normalizeMermaid(source);
         return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>"
@@ -381,10 +448,12 @@ public class MarkdownViews {
                 + "</head><body><div id=\"diagram\"></div>"
                 + "<script>"
                 + "const src=" + jsString(clean) + ";"
-                + "mermaid.initialize({startOnLoad:false,securityLevel:'loose',theme:'default'});"
-                + "mermaid.parseError=function(e){document.getElementById('diagram').innerHTML='<pre class=\"fallback\">Mermaid 解析失败\\n\\n'+escapeHtml(src)+'</pre>';};"
+                + "mermaid.initialize({startOnLoad:false,securityLevel:'loose',theme:'default',flowchart:{htmlLabels:true,useMaxWidth:true}});"
+                + "mermaid.parseError=function(e){fail();};"
                 + "function escapeHtml(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}"
-                + "(async function(){try{const r=await mermaid.render('m'+Date.now(),src);document.getElementById('diagram').innerHTML=r.svg;}catch(e){mermaid.parseError(e);}})();"
+                + "function repairLabels(s){return String(s).replace(/([A-Za-z][A-Za-z0-9_]*)\\[([^\\]\\n\"]*[()（）,:：;；\\/][^\\]\\n\"]*)\\]/g,function(m,id,label){return id+'[\"'+label.replace(/\"/g,'\\\\\"')+'\"]';});}"
+                + "function fail(){document.getElementById('diagram').innerHTML='<pre class=\"fallback\">Mermaid 解析失败\\n\\n'+escapeHtml(src)+'</pre>';if(window.AndroidMermaid){AndroidMermaid.failed();}}"
+                + "(async function(){const variants=[src,repairLabels(src)];for(let i=0;i<variants.length;i++){try{const r=await mermaid.render('m'+Date.now()+i,variants[i]);document.getElementById('diagram').innerHTML=r.svg;if(window.AndroidMermaid){AndroidMermaid.ready();}return;}catch(e){}}fail();})();"
                 + "</script></body></html>";
     }
 
@@ -392,6 +461,13 @@ public class MarkdownViews {
         String value = source == null ? "" : source.trim()
                 .replace("\u200B", "")
                 .replace("\uFEFF", "");
+        if (value.startsWith("```")) {
+            value = value.replaceFirst("^```[A-Za-z0-9_-]*\\s*", "").replaceFirst("\\s*```$", "").trim();
+        }
+        if (value.startsWith("---")) {
+            int end = value.indexOf("\n---", 3);
+            if (end >= 0) value = value.substring(end + 4).trim();
+        }
         String lower = value.toLowerCase(java.util.Locale.ROOT);
         String[] starts = new String[]{
                 "graph ", "flowchart ", "sequencediagram", "classdiagram", "statediagram",
@@ -406,6 +482,24 @@ public class MarkdownViews {
         }
         if (best > 0) value = value.substring(best).trim();
         return value;
+    }
+
+    private static final class MermaidBridge {
+        private final View download;
+
+        MermaidBridge(View download) {
+            this.download = download;
+        }
+
+        @JavascriptInterface
+        public void ready() {
+            download.post(() -> download.setVisibility(View.VISIBLE));
+        }
+
+        @JavascriptInterface
+        public void failed() {
+            download.post(() -> download.setVisibility(View.GONE));
+        }
     }
 
     private String jsString(String value) {

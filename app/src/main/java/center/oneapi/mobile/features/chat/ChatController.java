@@ -255,33 +255,45 @@ public class ChatController {
     public static final class Usage {
         public final int promptTokens;
         public final int completionTokens;
+        public final int cachedTokens;
         public final int totalTokens;
 
-        private Usage(int promptTokens, int completionTokens, int totalTokens) {
+        private Usage(int promptTokens, int completionTokens, int cachedTokens, int totalTokens) {
             this.promptTokens = Math.max(0, promptTokens);
             this.completionTokens = Math.max(0, completionTokens);
+            this.cachedTokens = Math.max(0, cachedTokens);
             this.totalTokens = Math.max(0, totalTokens);
         }
 
         public static Usage from(JSONObject usage) {
-            if (usage == null) return new Usage(0, 0, 0);
+            if (usage == null) return new Usage(0, 0, 0, 0);
             int prompt = firstPositive(usage, "prompt_tokens", "input_tokens");
             int completion = firstPositive(usage, "completion_tokens", "output_tokens");
+            int cached = firstPositive(usage, "cached_tokens", "cache_read_input_tokens", "cache_creation_input_tokens");
+            JSONObject promptDetails = usage.optJSONObject("prompt_tokens_details");
+            if (promptDetails != null) {
+                cached = Math.max(cached, firstPositive(promptDetails, "cached_tokens"));
+            }
+            JSONObject inputDetails = usage.optJSONObject("input_token_details");
+            if (inputDetails != null) {
+                cached = Math.max(cached, firstPositive(inputDetails, "cache_read", "cache_creation", "cached_tokens"));
+            }
             int total = firstPositive(usage, "total_tokens");
             if (total <= 0 && (prompt > 0 || completion > 0)) total = prompt + completion;
-            return new Usage(prompt, completion, total);
+            return new Usage(prompt, completion, cached, total);
         }
 
         public boolean isEmpty() {
-            return promptTokens <= 0 && completionTokens <= 0 && totalTokens <= 0;
+            return promptTokens <= 0 && completionTokens <= 0 && cachedTokens <= 0 && totalTokens <= 0;
         }
 
         public String displayText() {
             if (isEmpty()) return "";
-            if (promptTokens > 0 || completionTokens > 0) {
-                return "Tokens: " + promptTokens + " " + completionTokens + " " + totalTokens;
+            String text = "输入：" + promptTokens + " | 输出：" + completionTokens + " | 缓存：" + cachedTokens;
+            if (totalTokens > 0 && promptTokens <= 0 && completionTokens <= 0) {
+                text += " | 总计：" + totalTokens;
             }
-            return "Tokens: " + totalTokens;
+            return text;
         }
 
         private static int firstPositive(JSONObject object, String... keys) {

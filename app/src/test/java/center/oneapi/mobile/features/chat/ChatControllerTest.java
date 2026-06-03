@@ -32,9 +32,9 @@ public class ChatControllerTest {
 
     @Test
     public void usage_formatsPromptCompletionAndTotalTokens() throws Exception {
-        JSONObject usageJson = new JSONObject("{\"prompt_tokens\":1719,\"completion_tokens\":1912,\"total_tokens\":3631}");
+        JSONObject usageJson = new JSONObject("{\"prompt_tokens\":1719,\"completion_tokens\":1912,\"total_tokens\":3631,\"prompt_tokens_details\":{\"cached_tokens\":128}}");
         ChatController.Usage usage = ChatController.Usage.from(usageJson);
 
-        assertEquals("Tokens: 1719 1912 3631", usage.displayText());
+        assertEquals("输入：1719 | 输出：1912 | 缓存：128", usage.displayText());
     }
 }

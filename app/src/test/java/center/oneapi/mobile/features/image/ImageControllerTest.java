@@ -18,6 +18,6 @@ public class ImageControllerTest {
         ImageController.ImageResult result = ImageController.extractResult(response);
 
         assertEquals("data:image/png;base64,abc", result.image);
-        assertEquals("Tokens: 12 34 46", result.tokenText);
+        assertEquals("输入：12 | 输出：34 | 缓存：0", result.tokenText);
     }
 }

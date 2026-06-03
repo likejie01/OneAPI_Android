@@ -2276,7 +2276,7 @@ public class MainActivity extends Activity {
                 saleLp.setMargins(0, 0, UiKit.dp(this, 8), 0);
                 foot.addView(sale, saleLp);
             }
-            ImageButton buy = UiKit.imageButton(this, R.drawable.ic_bubble_buy, "购买套餐");
+            ImageButton buy = UiKit.imageButton(this, R.drawable.plan_shop, "购买套餐");
             buy.setColorFilter(UiKit.blue(this));
             buy.setBackgroundColor(Color.TRANSPARENT);
             buy.setPadding(0, 0, 0, 0);
@@ -3405,11 +3405,87 @@ public class MainActivity extends Activity {
                 rowsByStableKey.put(row.stableKey, row);
             }
         }
+        if (section == AppSection.CLAUDE) {
+            uniqueRows = coalesceClaudeAssistantRows(uniqueRows);
+        }
         List<ChatMessage> out = new ArrayList<>();
         for (DesktopTimelineRow row : uniqueRows) {
             out.add(row.message);
         }
         return out;
+    }
+
+    private List<DesktopTimelineRow> coalesceClaudeAssistantRows(List<DesktopTimelineRow> rows) {
+        List<DesktopTimelineRow> out = new ArrayList<>();
+        DesktopTimelineRow pending = null;
+        boolean pendingMerged = false;
+        for (DesktopTimelineRow row : rows) {
+            if (canCoalesceClaudeAssistant(pending, row, pendingMerged)) {
+                pending = mergeClaudeAssistantRows(pending, row);
+                pendingMerged = true;
+                continue;
+            }
+            if (pending != null) {
+                out.add(pending);
+            }
+            pending = row;
+            pendingMerged = false;
+        }
+        if (pending != null) {
+            out.add(pending);
+        }
+        return out;
+    }
+
+    private boolean canCoalesceClaudeAssistant(DesktopTimelineRow left, DesktopTimelineRow right, boolean leftAlreadyMerged) {
+        if (!isClaudeAssistantProcessRow(left) || !isClaudeAssistantProcessRow(right)) return false;
+        if (!left.jobId.isEmpty() && !right.jobId.isEmpty() && !left.jobId.equals(right.jobId)) return false;
+        long gap = Math.abs(right.timestamp - left.timestamp);
+        if (gap > 30000L) return false;
+        return leftAlreadyMerged || likelyClaudeProcessFragment(left.message.text) || likelyClaudeProcessFragment(right.message.text);
+    }
+
+    private boolean isClaudeAssistantProcessRow(DesktopTimelineRow row) {
+        return row != null && row.message != null && !row.message.log && row.priority == 2
+                && "assistant".equals(row.message.role);
+    }
+
+    private boolean likelyClaudeProcessFragment(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) return false;
+        if (text.length() <= 32) return true;
+        if (text.length() <= 80 && !text.contains("\n") && !endsWithSentenceBoundary(text)) return true;
+        return false;
+    }
+
+    private boolean endsWithSentenceBoundary(String text) {
+        if (text == null || text.isEmpty()) return false;
+        char last = text.charAt(text.length() - 1);
+        return "。！？!?；;：:\n".indexOf(last) >= 0;
+    }
+
+    private DesktopTimelineRow mergeClaudeAssistantRows(DesktopTimelineRow left, DesktopTimelineRow right) {
+        ChatMessage message = new ChatMessage("assistant",
+                joinClaudeAssistantFragment(left.message.text, right.message.text),
+                left.message.timestamp);
+        String key = left.stableKey.isEmpty() ? right.stableKey : left.stableKey + "+" + right.stableKey;
+        return new DesktopTimelineRow(message, key, left.timestamp, left.priority, left.index, left.jobId);
+    }
+
+    private String joinClaudeAssistantFragment(String left, String right) {
+        String a = left == null ? "" : left;
+        String b = right == null ? "" : right;
+        if (a.isEmpty()) return b;
+        if (b.isEmpty()) return a;
+        char last = a.charAt(a.length() - 1);
+        char first = b.charAt(0);
+        if (Character.isWhitespace(last) || Character.isWhitespace(first)) return a + b;
+        if (isAsciiWord(last) && isAsciiWord(first)) return a + " " + b;
+        return a + b;
+    }
+
+    private boolean isAsciiWord(char value) {
+        return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
     }
 
     private void collectDesktopRows(AppSection section, List<DesktopTimelineRow> out, JSONArray rows, boolean log) {
@@ -3423,8 +3499,8 @@ public class MainActivity extends Activity {
             if (text.isEmpty()) continue;
             long timestamp = normalizeTimestamp(item.optLong("timestamp", item.optLong("createdAt", System.currentTimeMillis())));
             String stableId = first(item, "id", "messageId", "eventId");
+            String jobId = first(item, "jobId", "job_id");
             if (stableId.isEmpty()) {
-                String jobId = first(item, "jobId", "job_id");
                 if (!jobId.isEmpty()) stableId = (log ? "log:" : "message:") + jobId + ":" + role + ":" + normalizeForKey(text);
             }
             if (log) {
@@ -3446,10 +3522,10 @@ public class MainActivity extends Activity {
                     body.append("\n\n").append(text);
                 }
                 ChatMessage message = ChatMessage.log(body.toString(), timestamp);
-                out.add(new DesktopTimelineRow(message, stableId, timestamp, 1, i));
+                out.add(new DesktopTimelineRow(message, stableId, timestamp, 1, i, jobId));
             } else {
                 ChatMessage message = new ChatMessage(role, text, timestamp);
-                out.add(new DesktopTimelineRow(message, stableId, timestamp, "user".equals(role) ? 0 : 2, i));
+                out.add(new DesktopTimelineRow(message, stableId, timestamp, "user".equals(role) ? 0 : 2, i, jobId));
             }
         }
     }
@@ -4630,14 +4706,14 @@ public class MainActivity extends Activity {
 
     private Object buildChatUserContent(String text, List<Uri> attachments, String fallbackText) throws Exception {
         if (attachments == null || attachments.isEmpty()) return fallbackText;
-        JSONArray parts = new JSONArray();
+        JSONArray mediaParts = new JSONArray();
         StringBuilder textPart = new StringBuilder();
         for (Uri uri : attachments) {
             String name = displayName(uri);
             if (isImageAttachment(uri)) {
                 String dataUrl = imageDataUrl(uri);
                 if (!dataUrl.isEmpty()) {
-                    parts.put(new JSONObject()
+                    mediaParts.put(new JSONObject()
                             .put("type", "image_url")
                             .put("image_url", new JSONObject()
                                     .put("url", dataUrl)
@@ -4649,7 +4725,7 @@ public class MainActivity extends Activity {
             }
             String pdfPage = isPdfAttachment(uri) ? pdfFirstPageDataUrl(uri) : "";
             if (!pdfPage.isEmpty()) {
-                parts.put(new JSONObject()
+                mediaParts.put(new JSONObject()
                         .put("type", "image_url")
                         .put("image_url", new JSONObject().put("url", pdfPage)));
                 if (textPart.length() > 0) textPart.append('\n');
@@ -4668,8 +4744,13 @@ public class MainActivity extends Activity {
             if (textPart.length() > 0) textPart.append("\n\n");
             textPart.append(text.trim());
         }
-        if (parts.length() == 0) return textPart.toString().trim();
-        parts.put(0, new JSONObject().put("type", "text").put("text", textPart.toString().trim()));
+        if (mediaParts.length() == 0) return textPart.toString().trim();
+        JSONArray parts = new JSONArray();
+        String promptText = textPart.toString().trim();
+        parts.put(new JSONObject().put("type", "text").put("text", promptText.isEmpty() ? "请分析已上传的图片内容。" : promptText));
+        for (int i = 0; i < mediaParts.length(); i++) {
+            parts.put(mediaParts.get(i));
+        }
         return parts;
     }
 
@@ -5148,13 +5229,19 @@ public class MainActivity extends Activity {
         final long timestamp;
         final int priority;
         final int index;
+        final String jobId;
 
         DesktopTimelineRow(ChatMessage message, String stableKey, long timestamp, int priority, int index) {
+            this(message, stableKey, timestamp, priority, index, "");
+        }
+
+        DesktopTimelineRow(ChatMessage message, String stableKey, long timestamp, int priority, int index, String jobId) {
             this.message = message;
             this.stableKey = stableKey == null ? "" : stableKey.trim();
             this.timestamp = timestamp;
             this.priority = priority;
             this.index = index;
+            this.jobId = jobId == null ? "" : jobId.trim();
         }
 
         boolean duplicates(DesktopTimelineRow other) {
