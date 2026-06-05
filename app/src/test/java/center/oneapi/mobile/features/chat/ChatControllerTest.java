@@ -1,6 +1,7 @@
 package center.oneapi.mobile.features.chat;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
@@ -35,6 +36,22 @@ public class ChatControllerTest {
         JSONObject usageJson = new JSONObject("{\"prompt_tokens\":1719,\"completion_tokens\":1912,\"total_tokens\":3631,\"prompt_tokens_details\":{\"cached_tokens\":128}}");
         ChatController.Usage usage = ChatController.Usage.from(usageJson);
 
-        assertEquals("输入：1719 | 输出：1912 | 缓存：128", usage.displayText());
+        assertEquals("Token 输入：1719 | 输出：1912 | 缓存：128", usage.displayText());
+    }
+
+    @Test
+    public void buildRequest_includesContextBeforeCurrentUserMessage() throws Exception {
+        ChatController controller = new ChatController(null);
+        JSONArray context = new JSONArray()
+                .put(new JSONObject().put("role", "user").put("content", "上一轮问题"))
+                .put(new JSONObject().put("role", "assistant").put("content", "上一轮回答"));
+
+        JSONObject request = controller.buildRequest("gpt-test", "system", context, "当前问题", "off");
+        JSONArray messages = request.getJSONArray("messages");
+
+        assertEquals("system", messages.getJSONObject(0).getString("role"));
+        assertEquals("上一轮问题", messages.getJSONObject(1).getString("content"));
+        assertEquals("上一轮回答", messages.getJSONObject(2).getString("content"));
+        assertEquals("当前问题", messages.getJSONObject(3).getString("content"));
     }
 }

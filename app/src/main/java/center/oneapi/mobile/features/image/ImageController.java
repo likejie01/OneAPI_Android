@@ -15,6 +15,7 @@ import center.oneapi.mobile.core.ApiClient;
 import center.oneapi.mobile.features.chat.ChatController;
 
 public class ImageController {
+    private static final int IMAGE_READ_TIMEOUT_MS = 10 * 60 * 1000;
     private final ApiClient api;
 
     public ImageController(ApiClient api) {
@@ -40,7 +41,7 @@ public class ImageController {
     }
 
     public ImageResult generateResult(String prompt, String size, String quality, boolean randomSeed) throws Exception {
-        return extractResult(api.post("/pg/images/generations", buildGenerationRequest(prompt, size, quality, randomSeed)));
+        return extractResult(api.post("/pg/images/generations", buildGenerationRequest(prompt, size, quality, randomSeed), IMAGE_READ_TIMEOUT_MS));
     }
 
     public String edit(Context context, Uri imageUri, String prompt, String size, String quality) throws Exception {
@@ -51,7 +52,7 @@ public class ImageController {
         String boundary = "----OneApiAndroid" + System.currentTimeMillis();
         HttpURLConnection connection = (HttpURLConnection) new URL(ApiClient.buildUrl(api.server(), "/v1/images/edits")).openConnection();
         connection.setConnectTimeout(15000);
-        connection.setReadTimeout(180000);
+        connection.setReadTimeout(IMAGE_READ_TIMEOUT_MS);
         connection.setRequestMethod("POST");
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);

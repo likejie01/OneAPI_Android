@@ -289,7 +289,7 @@ public class ChatController {
 
         public String displayText() {
             if (isEmpty()) return "";
-            String text = "输入：" + promptTokens + " | 输出：" + completionTokens + " | 缓存：" + cachedTokens;
+            String text = "Token 输入：" + promptTokens + " | 输出：" + completionTokens + " | 缓存：" + cachedTokens;
             if (totalTokens > 0 && promptTokens <= 0 && completionTokens <= 0) {
                 text += " | 总计：" + totalTokens;
             }

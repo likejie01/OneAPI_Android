@@ -155,23 +155,21 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         LinearLayout actions = actions(item, user);
         actions.setVisibility(View.GONE);
         if (item.type == ConversationDisplayItem.MESSAGE && item.timestamp > 0) {
-            LinearLayout meta = UiKit.horizontal(context);
-            meta.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            LinearLayout metaText = UiKit.vertical(context);
-            metaText.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            LinearLayout meta = UiKit.vertical(context);
+            LinearLayout timeRow = UiKit.horizontal(context);
+            timeRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
             TextView time = UiKit.text(context, formatTime(item.timestamp), UiKit.MUTED, 12);
             time.setGravity(android.view.Gravity.LEFT | android.view.Gravity.CENTER_VERTICAL);
-            metaText.addView(time, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 18)));
+            timeRow.addView(time, new LinearLayout.LayoutParams(0, UiKit.dp(context, 34), 1f));
+            timeRow.addView(actions, new LinearLayout.LayoutParams(-2, UiKit.dp(context, 34)));
+            meta.addView(timeRow, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 34)));
             String tokenText = tokenDisplayText(item.tokenText);
             if (!tokenText.isEmpty()) {
                 TextView token = UiKit.text(context, tokenText, UiKit.MUTED, 11);
-                token.setSingleLine(true);
-                token.setGravity(android.view.Gravity.LEFT | android.view.Gravity.CENTER_VERTICAL);
-                metaText.addView(token, new LinearLayout.LayoutParams(-1, UiKit.dp(context, 18)));
+                token.setGravity(android.view.Gravity.LEFT);
+                meta.addView(token, new LinearLayout.LayoutParams(-1, -2));
             }
-            meta.addView(metaText, new LinearLayout.LayoutParams(0, tokenText.isEmpty() ? UiKit.dp(context, 34) : UiKit.dp(context, 40), 1f));
-            meta.addView(actions, new LinearLayout.LayoutParams(-2, UiKit.dp(context, 34)));
-            bubble.addView(meta, new LinearLayout.LayoutParams(-1, tokenText.isEmpty() ? UiKit.dp(context, 36) : UiKit.dp(context, 44)));
+            bubble.addView(meta, new LinearLayout.LayoutParams(-1, -2));
         }
         attachToggle(bubble, actions);
         FrameLayout shell = new FrameLayout(context);
@@ -312,6 +310,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
     }
 
     private View image(String source, boolean generated) {
+        if (generated) return generatedImage(source);
         int outer = UiKit.dp(context, 56);
         int inner = UiKit.dp(context, 52);
         FrameLayout wrap = new FrameLayout(context);
@@ -329,14 +328,63 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         FrameLayout.LayoutParams imageLp = new FrameLayout.LayoutParams(inner, inner, android.view.Gravity.LEFT | android.view.Gravity.TOP);
         imageLp.setMargins(0, 0, UiKit.dp(context, 4), UiKit.dp(context, 4));
         wrap.addView(image, imageLp);
-        if (generated) {
-            ImageButton download = actionButton(R.drawable.ic_bubble_download, "下载", () -> saveImage(source));
-            download.setBackground(UiKit.glass(context, UiKit.dp(context, 9), UiKit.line(context)));
-            download.setPadding(UiKit.dp(context, 4), UiKit.dp(context, 4), UiKit.dp(context, 4), UiKit.dp(context, 4));
-            FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(UiKit.dp(context, 22), UiKit.dp(context, 22), android.view.Gravity.RIGHT | android.view.Gravity.TOP);
-            wrap.addView(download, dl);
-        }
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(outer, outer);
+        lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
+        wrap.setLayoutParams(lp);
+        loadImage(source, image);
+        return wrap;
+    }
+
+    private View generatedImage(String source) {
+        FrameLayout wrap = new FrameLayout(context);
+        wrap.setClipToOutline(true);
+        wrap.setBackground(UiKit.round(Color.TRANSPARENT, UiKit.dp(context, 14), Color.TRANSPARENT));
+        int screenW = context.getResources().getDisplayMetrics().widthPixels;
+        int bubbleW = Math.max(UiKit.dp(context, 220), screenW - UiKit.dp(context, 24));
+        int imageW = Math.max(UiKit.dp(context, 180), (int) (bubbleW * 0.8f));
+        int[] size = imageSize(source);
+        float ratio = size[0] > 0 && size[1] > 0 ? size[0] / (float) size[1] : 1f;
+        int imageH = Math.max(UiKit.dp(context, 140), (int) (imageW / Math.max(0.25f, Math.min(4f, ratio))));
+        int maxH = Math.max(UiKit.dp(context, 180), (int) (context.getResources().getDisplayMetrics().heightPixels * 0.48f));
+        if (imageH > maxH) {
+            imageH = maxH;
+            imageW = Math.max(UiKit.dp(context, 180), (int) (imageH * Math.max(0.25f, Math.min(4f, ratio))));
+        }
+
+        ImageView image = new ImageView(context);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setAdjustViewBounds(true);
+        image.setBackground(UiKit.round(UiKit.itemFill(context, false), UiKit.dp(context, 14), UiKit.line(context)));
+        image.setContentDescription("生成图片");
+        image.setOnTouchListener(new View.OnTouchListener() {
+            private long lastTap = 0L;
+
+            @Override
+            public boolean onTouch(View v, android.view.MotionEvent event) {
+                if (event.getAction() == android.view.MotionEvent.ACTION_UP) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastTap < 280L) {
+                        openImage(source);
+                        lastTap = 0L;
+                    } else {
+                        lastTap = now;
+                    }
+                    return true;
+                }
+                return true;
+            }
+        });
+        image.setOnLongClickListener(v -> {
+            shareImageSource(source);
+            return true;
+        });
+        wrap.addView(image, new FrameLayout.LayoutParams(imageW, imageH));
+        ImageButton download = actionButton(R.drawable.ic_bubble_download, "下载", () -> saveImage(source));
+        download.setBackground(UiKit.glass(context, UiKit.dp(context, 9), UiKit.line(context)));
+        download.setPadding(UiKit.dp(context, 4), UiKit.dp(context, 4), UiKit.dp(context, 4), UiKit.dp(context, 4));
+        FrameLayout.LayoutParams dl = new FrameLayout.LayoutParams(UiKit.dp(context, 22), UiKit.dp(context, 22), android.view.Gravity.RIGHT | android.view.Gravity.TOP);
+        wrap.addView(download, dl);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(imageW, imageH);
         lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
         wrap.setLayoutParams(lp);
         loadImage(source, image);
@@ -346,13 +394,15 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
     private View imageLoading() {
         FrameLayout wrap = new FrameLayout(context);
         wrap.setBackground(UiKit.round(Color.TRANSPARENT, UiKit.dp(context, 12), Color.TRANSPARENT));
+        int screenW = context.getResources().getDisplayMetrics().widthPixels;
+        int side = Math.max(UiKit.dp(context, 132), Math.min(UiKit.dp(context, 220), screenW / 2));
         ShimmerView shimmer = new ShimmerView(context);
         shimmer.setBackground(UiKit.round(UiKit.itemFill(context, false), UiKit.dp(context, 14), UiKit.line(context)));
-        wrap.addView(shimmer, new FrameLayout.LayoutParams(UiKit.dp(context, 64), UiKit.dp(context, 64)));
+        wrap.addView(shimmer, new FrameLayout.LayoutParams(side, side));
         TextView label = UiKit.text(context, "生成中", UiKit.MUTED, 11);
         label.setGravity(android.view.Gravity.CENTER);
-        wrap.addView(label, new FrameLayout.LayoutParams(UiKit.dp(context, 64), UiKit.dp(context, 64)));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(context, 68), UiKit.dp(context, 68));
+        wrap.addView(label, new FrameLayout.LayoutParams(side, side));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(side + UiKit.dp(context, 4), side + UiKit.dp(context, 4));
         lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
         wrap.setLayoutParams(lp);
         return wrap;
@@ -779,7 +829,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             total = input;
             input = 0;
         }
-        String converted = "输入：" + input + " | 输出：" + output + " | 缓存：0";
+        String converted = "Token 输入：" + input + " | 输出：" + output + " | 缓存：0";
         if (total > 0 && input <= 0 && output <= 0) {
             converted += " | 总计：" + total;
         }

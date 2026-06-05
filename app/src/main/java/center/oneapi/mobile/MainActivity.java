@@ -180,7 +180,7 @@ public class MainActivity extends Activity {
                 return;
             }
             streamScrollProgrammatic = true;
-            recyclerView.scrollBy(0, Math.max(1, UiKit.dp(MainActivity.this, 1)));
+            recyclerView.scrollBy(0, Math.max(2, UiKit.dp(MainActivity.this, 2)));
             mainHandler.postDelayed(() -> streamScrollProgrammatic = false, 40);
             mainHandler.postDelayed(this, STREAM_SCROLL_INTERVAL_MS);
         }
@@ -1296,7 +1296,7 @@ public class MainActivity extends Activity {
                     target.selectedIndex = 0;
                     target.selectedSessionId = sessions.isEmpty() ? "" : sessions.get(0).id;
                     if (currentSection == section) {
-                        renderCurrent(false);
+                        renderCurrent(true);
                     }
                 });
             } catch (Exception ignored) {
@@ -4545,6 +4545,7 @@ public class MainActivity extends Activity {
         selectedAttachments.clear();
         updateAttachmentPreview();
         String userPayload = composeUserMessage(text, attachments);
+        JSONArray chatContext = targetSection == AppSection.CHAT ? buildChatContext(session, state.contextWindow) : null;
         session.messages.add(new ChatMessage("user", userPayload, now));
         if (targetSection.isDesktop()) {
             session.status = "queued";
@@ -4570,7 +4571,7 @@ public class MainActivity extends Activity {
                     chatController.stream(
                             state.selectedModel,
                             (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow,
-                            null,
+                            chatContext,
                             chatPayload,
                             reasoningValue(state.selectedReasoning),
                             new ChatController.DeltaHandler() {
@@ -4617,7 +4618,7 @@ public class MainActivity extends Activity {
                     if (progress != null) progress.tokenText = imageResult.tokenText;
                     result = imageResult.image;
                 } else {
-                    result = networkSend(targetSection, state, session, text, userPayload, chatPayload, desktopPayload, desktopAttachments, attachments);
+                    result = networkSend(targetSection, state, session, text, userPayload, chatPayload, chatContext, desktopPayload, desktopAttachments, attachments);
                 }
                 if (!targetSection.isDesktop() && result.trim().isEmpty()) {
                     result = "本次没有返回可显示内容。";
@@ -4702,6 +4703,48 @@ public class MainActivity extends Activity {
         }
         out.append(text == null ? "" : text);
         return out.toString().trim();
+    }
+
+    private JSONArray buildChatContext(ChatSession session, String contextWindow) {
+        JSONArray context = new JSONArray();
+        if (session == null || session.messages == null || session.messages.isEmpty()) return context;
+        int limit = chatContextLimit(contextWindow);
+        int start = Math.max(0, session.messages.size() - limit);
+        for (int i = start; i < session.messages.size(); i++) {
+            ChatMessage message = session.messages.get(i);
+            if (message == null || message.log) continue;
+            if (!"user".equals(message.role) && !"assistant".equals(message.role)) continue;
+            String content = chatContextText(message);
+            if (content.isEmpty()) continue;
+            try {
+                context.put(new JSONObject()
+                        .put("role", message.role)
+                        .put("content", content));
+            } catch (Exception ignored) {
+            }
+        }
+        return context;
+    }
+
+    private int chatContextLimit(String contextWindow) {
+        String value = contextWindow == null ? "" : contextWindow.trim();
+        if ("短上下文".equals(value)) return 8;
+        if ("长上下文".equals(value)) return 40;
+        return 20;
+    }
+
+    private String chatContextText(ChatMessage message) {
+        String text = message == null ? "" : message.text;
+        if (text == null) return "";
+        String clean = textWithoutImageUris(text).trim();
+        if (clean.equals("正在思考...") || clean.equals("oneapi://image-loading") || clean.equals("正在发送到桌面端...")) {
+            return "";
+        }
+        clean = clean.replaceAll("(?is)<thinking>.*?</thinking>", "").trim();
+        if (clean.length() > 4000) {
+            clean = clean.substring(clean.length() - 4000).trim();
+        }
+        return clean;
     }
 
     private Object buildChatUserContent(String text, List<Uri> attachments, String fallbackText) throws Exception {
@@ -4873,10 +4916,10 @@ public class MainActivity extends Activity {
         return value.endsWith(".png") || value.endsWith(".jpg") || value.endsWith(".jpeg") || value.endsWith(".webp");
     }
 
-    private String networkSend(AppSection targetSection, SectionState state, ChatSession session, String text, String userPayload, Object chatPayload, String desktopPayload, JSONArray desktopAttachments, List<Uri> attachments) throws Exception {
+    private String networkSend(AppSection targetSection, SectionState state, ChatSession session, String text, String userPayload, Object chatPayload, JSONArray chatContext, String desktopPayload, JSONArray desktopAttachments, List<Uri> attachments) throws Exception {
         if (targetSection == AppSection.CHAT) {
             String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
-            return chatController.send(state.selectedModel, (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow, null, chatPayload, reasoningValue(state.selectedReasoning));
+            return chatController.send(state.selectedModel, (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow, chatContext, chatPayload, reasoningValue(state.selectedReasoning));
         }
         if (targetSection == AppSection.IMAGE) {
             String assistantPrompt = imageAssistantPrompts.getOrDefault(session.assistantLabel, "");

@@ -35,6 +35,10 @@ public class ApiClient {
         return request("POST", path, body);
     }
 
+    public JSONObject post(String path, JSONObject body, int readTimeoutMs) throws IOException, JSONException {
+        return request("POST", path, body, readTimeoutMs);
+    }
+
     public void postStream(String path, JSONObject body, StreamHandler handler) throws IOException, JSONException {
         ensureBackgroundThread();
         HttpURLConnection connection = (HttpURLConnection) new URL(buildUrl(prefs.server(), path)).openConnection();
@@ -80,13 +84,17 @@ public class ApiClient {
     }
 
     public JSONObject request(String method, String path, JSONObject body) throws IOException, JSONException {
+        return request(method, path, body, 30000);
+    }
+
+    public JSONObject request(String method, String path, JSONObject body, int readTimeoutMs) throws IOException, JSONException {
         ensureBackgroundThread();
         HttpURLConnection connection = (HttpURLConnection) new URL(buildUrl(prefs.server(), path)).openConnection();
         activeConnections.add(connection);
         try {
             connection.setRequestMethod(method);
             connection.setConnectTimeout(12000);
-            connection.setReadTimeout(30000);
+            connection.setReadTimeout(readTimeoutMs);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             String token = prefs.token();
