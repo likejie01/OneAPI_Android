@@ -57,7 +57,7 @@ public class AppPrefs {
     }
 
     public boolean isLoggedIn() {
-        return !token().isEmpty() || !cookie().isEmpty() || !userId().isEmpty();
+        return !token().isEmpty() || !cookie().isEmpty();
     }
 
     public String appId() {

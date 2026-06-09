@@ -159,6 +159,7 @@ public class MainActivity extends Activity {
     private final Map<AppSection, String> rememberedModelProvider = new EnumMap<>(AppSection.class);
     private final Map<AppSection, String> rememberedExtensionKind = new EnumMap<>(AppSection.class);
     private boolean keyboardOpen;
+    private boolean loginDialogShowing;
     private int lastKeyboardInset = -1;
     private static final Pattern MARKDOWN_IMAGE = Pattern.compile("!\\[[^\\]]*\\]\\(([^)]+)\\)");
     private static final long STREAM_SCROLL_INTERVAL_MS = 32L;
@@ -1837,15 +1838,37 @@ public class MainActivity extends Activity {
     private void doLogin(String username, String password, Runnable onSuccess) {
         network.execute(() -> {
             try {
+                prefs.setToken("");
+                prefs.setCookie("");
                 JSONObject body = new JSONObject();
                 body.put("username", username == null ? "" : username.trim());
                 body.put("password", password == null ? "" : password.trim());
-                JSONObject envelope = new ApiClient(prefs).post("/api/user/login", body);
+                ApiClient loginClient = new ApiClient(prefs);
+                JSONObject envelope = loginClient.post("/api/user/login", body);
                 JSONObject data = envelope.optJSONObject("data");
                 if (data != null) {
                     prefs.setUserId(String.valueOf(data.optInt("id")));
+                    String loginToken = first(data, "access_token", "accessToken", "token");
+                    if (!loginToken.isEmpty()) {
+                        prefs.setToken(loginToken);
+                    }
                 }
-                prefs.setUsername(username);
+                prefs.setUsername(data == null ? username : first(data, "username", "display_name"));
+                if (prefs.token().isEmpty()) {
+                    try {
+                        JSONObject tokenEnvelope = loginClient.get("/api/user/token");
+                        Object tokenData = tokenEnvelope.opt("data");
+                        String accessToken = tokenData == null ? "" : String.valueOf(tokenData).trim();
+                        if (!accessToken.isEmpty() && !"null".equalsIgnoreCase(accessToken)) {
+                            prefs.setToken(accessToken);
+                        }
+                    } catch (Exception ignored) {
+                        // Older servers may not return the token in login; keep cookie auth as a fallback.
+                    }
+                }
+                if (prefs.token().isEmpty() && prefs.cookie().isEmpty()) {
+                    throw new IllegalStateException("登录成功但未获取到有效登录凭据，请确认服务器已更新移动端登录接口。");
+                }
                 mainHandler.post(() -> {
                     Toast.makeText(this, "登录成功", Toast.LENGTH_SHORT).show();
                     if (onSuccess != null) onSuccess.run();
@@ -1878,9 +1901,12 @@ public class MainActivity extends Activity {
     }
 
     private void showLoginDialog(boolean cancelable) {
+        if (loginDialogShowing) return;
+        loginDialogShowing = true;
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setCancelable(cancelable);
+        dialog.setOnDismissListener(d -> loginDialogShowing = false);
         FrameLayout overlay = modalOverlay();
         overlay.setOnClickListener(v -> {
             if (cancelable) dialog.dismiss();
@@ -1977,6 +2003,13 @@ public class MainActivity extends Activity {
                 panelDataCacheAt.put(title, System.currentTimeMillis());
             } catch (Exception error) {
                 String errorText = message(error);
+                if (isAuthExpiredMessage(errorText)) {
+                    prefs.setCookie("");
+                    prefs.setToken("");
+                    prefs.setUserId("");
+                    prefs.setBoundDeviceId("");
+                    mainHandler.post(() -> showLoginDialog(false));
+                }
                 JSONObject fallback = panelDataCache.get(title);
                 if (fallback != null && (errorText.contains("429") || errorText.contains("Too Many") || errorText.contains("rate"))) {
                     result = fallback;
@@ -2747,6 +2780,14 @@ public class MainActivity extends Activity {
         return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
     }
 
+    private boolean isAuthExpiredMessage(String message) {
+        String normalized = message == null ? "" : message.trim().toLowerCase(Locale.ROOT);
+        return normalized.contains("not logged in and no access token provided")
+                || normalized.contains("access token invalid")
+                || normalized.contains("未登录且未提供 access token")
+                || normalized.contains("access token 无效");
+    }
+
     private interface JsonRequest {
         JSONObject run() throws Exception;
     }
@@ -3240,7 +3281,7 @@ public class MainActivity extends Activity {
                     }
                     List<ChatSession> nextSessions = mergePendingDesktopMessages(targetState.sessions, applyDesktopSessionOverrides(targetState, parsed));
                     targetState.sessions.clear();
-                    targetState.sessions.addAll(limitDesktopSessions(nextSessions));
+                    targetState.sessions.addAll(nextSessions);
                     int nextIndex = 0;
                     for (int i = 0; i < targetState.sessions.size(); i++) {
                         if (targetState.sessions.get(i).id.equals(selectedId)) {
@@ -3287,19 +3328,6 @@ public class MainActivity extends Activity {
                 || "running".equals(status)
                 || "waiting_interaction".equals(status)
                 || "pending".equals(status);
-    }
-
-    private List<ChatSession> limitDesktopSessions(List<ChatSession> source) {
-        LinkedHashMap<String, List<ChatSession>> grouped = new LinkedHashMap<>();
-        for (ChatSession session : source) {
-            String project = session.projectLabel == null || session.projectLabel.isEmpty() ? "本机项目" : session.projectLabel;
-            if (!grouped.containsKey(project) && grouped.size() >= 3) continue;
-            List<ChatSession> rows = grouped.computeIfAbsent(project, key -> new ArrayList<>());
-            if (rows.size() < 5) rows.add(session);
-        }
-        List<ChatSession> out = new ArrayList<>();
-        for (List<ChatSession> rows : grouped.values()) out.addAll(rows);
-        return out;
     }
 
     private List<ChatSession> applyDesktopSessionOverrides(SectionState state, List<ChatSession> source) {
@@ -4802,29 +4830,7 @@ public class MainActivity extends Activity {
         if (attachments != null) {
             for (Uri uri : attachments) {
                 String name = displayName(uri);
-                try {
-                    if (isImageAttachment(uri)) {
-                        String dataUrl = imageDataUrl(uri);
-                        if (!dataUrl.isEmpty()) {
-                            out.append("附件：").append(name).append('\n').append(dataUrl).append("\n\n");
-                            continue;
-                        }
-                    }
-                    String pdfPage = isPdfAttachment(uri) ? pdfFirstPageDataUrl(uri) : "";
-                    if (!pdfPage.isEmpty()) {
-                        out.append("附件：").append(name).append("（PDF 第一页图片）\n")
-                                .append("![PDF page](").append(pdfPage).append(")\n\n");
-                        continue;
-                    }
-                    String body = readableAttachmentContent(uri, 40000);
-                    if (body != null && !body.trim().isEmpty()) {
-                        out.append("附件：").append(name).append("\n```text\n").append(body.trim()).append("\n```\n\n");
-                    } else {
-                        out.append("附件：").append(name).append("\n");
-                    }
-                } catch (Exception error) {
-                    out.append("附件：").append(name).append("（读取失败：").append(message(error)).append("）\n");
-                }
+                out.append("附件：").append(name).append("（内容已随消息上传）\n");
             }
         }
         out.append(text == null ? "" : text);
