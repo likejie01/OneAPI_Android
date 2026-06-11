@@ -146,14 +146,16 @@ public class MainActivity extends Activity {
     private final Runnable desktopPoll = new Runnable() {
         @Override
         public void run() {
-            if (currentSection.isDesktop()) {
-                refreshDesktopSessions(currentSection);
+            if (!prefs.boundDeviceId().isEmpty() && (currentSection.isDesktop() || hasBusyDesktopSession())) {
+                refreshDesktopSessions(AppSection.CODEX);
+                refreshDesktopSessions(AppSection.CLAUDE);
             }
-            mainHandler.postDelayed(this, 8000);
+            mainHandler.postDelayed(this, hasBusyDesktopSession() ? 2500 : 8000);
         }
     };
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final ExecutorService desktopJobMonitor = Executors.newSingleThreadExecutor();
     private Future<?> activeSendTask;
     private AtomicBoolean activeSendCancelled;
     private final Map<AppSection, String> rememberedModelProvider = new EnumMap<>(AppSection.class);
@@ -164,7 +166,10 @@ public class MainActivity extends Activity {
     private static final Pattern MARKDOWN_IMAGE = Pattern.compile("!\\[[^\\]]*\\]\\(([^)]+)\\)");
     private static final long STREAM_SCROLL_INTERVAL_MS = 32L;
     private static final long STREAM_SCROLL_RESUME_MS = 1000L;
+    private static final long DESKTOP_JOB_TAKEOVER_TIMEOUT_MS = 25000L;
+    private static final long DESKTOP_JOB_EVENT_POLL_MS = 2500L;
     private boolean voiceListening;
+    private boolean desktopKeepScreenOn;
     private boolean streamResponseActive;
     private boolean streamScrollPausedByUser;
     private boolean streamScrollRunning;
@@ -229,6 +234,9 @@ public class MainActivity extends Activity {
         apiClient.cancelActiveRequests();
         mainHandler.removeCallbacks(desktopPoll);
         stopVoiceRecognition();
+        setDesktopKeepScreenOn(false);
+        desktopJobMonitor.shutdownNow();
+        network.shutdownNow();
         super.onDestroy();
     }
 
@@ -3291,6 +3299,7 @@ public class MainActivity extends Activity {
                     }
                     targetState.selectedIndex = nextIndex;
                     targetState.selectedSessionId = targetState.sessions.isEmpty() ? "" : targetState.sessions.get(nextIndex).id;
+                    updateDesktopWakeState();
                     if (currentSection == section) {
                         renderCurrent(false);
                     } else if (composerView != null && currentSection.isDesktop()) {
@@ -3328,6 +3337,31 @@ public class MainActivity extends Activity {
                 || "running".equals(status)
                 || "waiting_interaction".equals(status)
                 || "pending".equals(status);
+    }
+
+    private boolean hasBusyDesktopSession() {
+        for (AppSection section : new AppSection[]{AppSection.CODEX, AppSection.CLAUDE}) {
+            SectionState sectionState = states.get(section);
+            if (sectionState == null) continue;
+            for (ChatSession session : sectionState.sessions) {
+                if (isDesktopSessionBusy(session)) return true;
+            }
+        }
+        return false;
+    }
+
+    private void updateDesktopWakeState() {
+        setDesktopKeepScreenOn(hasBusyDesktopSession());
+    }
+
+    private void setDesktopKeepScreenOn(boolean enabled) {
+        if (desktopKeepScreenOn == enabled) return;
+        desktopKeepScreenOn = enabled;
+        if (enabled) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     private List<ChatSession> applyDesktopSessionOverrides(SectionState state, List<ChatSession> source) {
@@ -3962,9 +3996,27 @@ public class MainActivity extends Activity {
         }
         target.selectedModel = clean;
         saveModelSelection(section, clean);
+        if (!fromDesktopSync && section.isDesktop()) {
+            syncDesktopModelSelection(section, clean);
+        }
         if (currentSection == section && composerView != null) {
             composerView.updateState(composerStateFor(target.current(), target));
         }
+    }
+
+    private void syncDesktopModelSelection(AppSection section, String model) {
+        if (section == null || !section.isDesktop()) return;
+        String deviceId = prefs.boundDeviceId();
+        if (deviceId.isEmpty()) return;
+        network.execute(() -> {
+            try {
+                desktopRepository.selectModel(section.id, deviceId, model);
+                refreshDesktopSessions(section);
+            } catch (Exception error) {
+                String message = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+                mainHandler.post(() -> Toast.makeText(this, "模型已在手机端切换，但同步到客户端失败：" + message, Toast.LENGTH_SHORT).show());
+            }
+        });
     }
 
     private void loadSavedModelSelections() {
@@ -4577,6 +4629,7 @@ public class MainActivity extends Activity {
         session.messages.add(new ChatMessage("user", userPayload, now));
         if (targetSection.isDesktop()) {
             session.status = "queued";
+            updateDesktopWakeState();
         }
         ChatMessage progress = targetSection.isDesktop() ? null : new ChatMessage("assistant", progressTextFor(targetSection), now + 1);
         if (progress != null) session.messages.add(progress);
@@ -4673,10 +4726,15 @@ public class MainActivity extends Activity {
                 if (targetSection.isDesktop() && !finalResult.startsWith("请求失败：")) {
                     stopStreamAutoScroll();
                     persistSession(targetSection, session);
+                    refreshDesktopSessions(targetSection);
                     if (currentSection == targetSection && state.current() == session) renderCurrent(false);
                     activeSendTask = null;
                     activeSendCancelled = null;
                     return;
+                }
+                if (targetSection.isDesktop() && finalResult.startsWith("请求失败：")) {
+                    session.status = "error";
+                    updateDesktopWakeState();
                 }
                 if (progress != null) {
                     progress.text = finalResult;
@@ -4940,7 +4998,7 @@ public class MainActivity extends Activity {
             if (deviceId.isEmpty()) {
                 return "请先在设置中绑定 PC/Mac 客户端。";
             }
-            desktopController.sendJob(
+            JSONObject response = desktopController.sendJob(
                     targetSection.id,
                     deviceId,
                     session.id,
@@ -4954,6 +5012,20 @@ public class MainActivity extends Activity {
                     "android-" + System.currentTimeMillis(),
                     desktopAttachments
             );
+            JSONObject job = response.optJSONObject("data");
+            if (job == null) job = response;
+            String jobId = first(job, "jobId", "job_id", "id");
+            if (jobId.isEmpty()) {
+                throw new IllegalStateException("桌面任务已提交，但后端没有返回任务编号。");
+            }
+            long createdAt = System.currentTimeMillis();
+            mainHandler.post(() -> {
+                session.messages.add(ChatMessage.log("任务已创建，等待桌面客户端接管。\n任务编号：" + jobId, createdAt));
+                session.status = "queued";
+                persistSession(targetSection, session);
+                if (currentSection == targetSection && state.current() == session) renderCurrent(false);
+            });
+            monitorDesktopJobTakeover(targetSection, session, jobId, createdAt);
             return "";
         }
         return "";
@@ -4972,6 +5044,80 @@ public class MainActivity extends Activity {
                     .put("name", name));
         }
         return refs;
+    }
+
+    private void monitorDesktopJobTakeover(AppSection section, ChatSession session, String jobId, long createdAt) {
+        if (section == null || !section.isDesktop() || jobId == null || jobId.trim().isEmpty()) return;
+        desktopJobMonitor.execute(() -> {
+            long deadline = System.currentTimeMillis() + DESKTOP_JOB_TAKEOVER_TIMEOUT_MS;
+            boolean takeover = false;
+            Exception lastError = null;
+            while (System.currentTimeMillis() < deadline && !Thread.currentThread().isInterrupted()) {
+                try {
+                    JSONArray events = desktopRepository.jobEvents(jobId);
+                    if (hasDesktopTakeoverEvent(events)) {
+                        takeover = true;
+                        break;
+                    }
+                } catch (Exception error) {
+                    lastError = error;
+                }
+                try {
+                    Thread.sleep(DESKTOP_JOB_EVENT_POLL_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            if (takeover) {
+                refreshDesktopSessions(section);
+                return;
+            }
+            String detail = lastError == null || lastError.getMessage() == null || lastError.getMessage().trim().isEmpty()
+                    ? ""
+                    : "\n最近一次事件刷新失败：" + lastError.getMessage().trim();
+            mainHandler.post(() -> {
+                if (session.messages.isEmpty() || !containsRecentDesktopTakeoverWarning(session, jobId)) {
+                    session.messages.add(ChatMessage.log("桌面客户端暂未接管，请确认客户端在线并已绑定。\n任务编号：" + jobId + detail, Math.max(System.currentTimeMillis(), createdAt + 1)));
+                }
+                persistSession(section, session);
+                if (currentSection == section && state().current() == session) renderCurrent(false);
+            });
+            refreshDesktopSessions(section);
+        });
+    }
+
+    private boolean hasDesktopTakeoverEvent(JSONArray events) {
+        if (events == null) return false;
+        for (int i = 0; i < events.length(); i++) {
+            JSONObject event = events.optJSONObject(i);
+            if (event == null) continue;
+            String type = first(event, "type", "phase").toLowerCase(Locale.ROOT);
+            String role = first(event, "role").toLowerCase(Locale.ROOT);
+            if ("project".equals(type)
+                    || "running".equals(type)
+                    || "message".equals(type)
+                    || "message_delta".equals(type)
+                    || "error".equals(type)
+                    || "complete".equals(type)
+                    || "assistant".equals(role)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsRecentDesktopTakeoverWarning(ChatSession session, String jobId) {
+        String cleanJobId = jobId == null ? "" : jobId.trim();
+        for (int i = session.messages.size() - 1; i >= 0; i--) {
+            ChatMessage message = session.messages.get(i);
+            if (message == null || !message.log) continue;
+            String text = message.text == null ? "" : message.text;
+            if (text.contains("桌面客户端暂未接管") && (cleanJobId.isEmpty() || text.contains(cleanJobId))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String progressTextFor(AppSection section) {

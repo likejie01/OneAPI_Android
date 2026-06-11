@@ -22,6 +22,10 @@ public class DesktopRepository {
         return arrayData(api.get("/api/mobile/desktop-sessions" + query));
     }
 
+    public JSONArray jobEvents(String jobId) throws Exception {
+        return arrayData(api.get("/api/mobile/desktop-jobs/" + ApiClient.enc(jobId) + "/events"));
+    }
+
     public JSONArray devices() throws Exception {
         return arrayData(api.get("/api/mobile/desktop-devices"));
     }
@@ -40,6 +44,15 @@ public class DesktopRepository {
 
     public JSONObject unbindDevice(String deviceId, String appId) throws Exception {
         return api.delete("/api/mobile/desktop-bindings/" + ApiClient.enc(deviceId) + "?appId=" + ApiClient.enc(appId));
+    }
+
+    public JSONObject selectModel(String client, String deviceId, String model) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("client", client == null ? "" : client);
+        body.put("deviceId", deviceId == null ? "" : deviceId);
+        body.put("model", model == null ? "" : model);
+        body.put("source", "android");
+        return api.post("/api/mobile/desktop-model-selection", body);
     }
 
     private static JSONArray arrayData(JSONObject envelope) {
