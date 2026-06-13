@@ -32,6 +32,31 @@ public class ChatControllerTest {
     }
 
     @Test
+    public void extractDeltaPart_readsArrayContent() throws Exception {
+        JSONObject response = new JSONObject("{\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"},{\"type\":\"text\",\"text\":\" world\"}]}}]}");
+        ChatController.Delta delta = ChatController.extractDeltaPart(response);
+
+        assertEquals("hello world", delta.text);
+        assertEquals(false, delta.reasoning);
+    }
+
+    @Test
+    public void extractDeltaPart_readsObjectMessageContent() throws Exception {
+        JSONObject response = new JSONObject("{\"message\":{\"content\":[{\"text\":\"fallback reply\"}]}}");
+        ChatController.Delta delta = ChatController.extractDeltaPart(response);
+
+        assertEquals("fallback reply", delta.text);
+        assertEquals(false, delta.reasoning);
+    }
+
+    @Test
+    public void parseStreamPayload_detectsDoneSentinel() {
+        ChatController.StreamPayload payload = ChatController.parseStreamPayload("[DONE]");
+
+        assertEquals(true, payload.done);
+    }
+
+    @Test
     public void usage_formatsPromptCompletionAndTotalTokens() throws Exception {
         JSONObject usageJson = new JSONObject("{\"prompt_tokens\":1719,\"completion_tokens\":1912,\"total_tokens\":3631,\"prompt_tokens_details\":{\"cached_tokens\":128}}");
         ChatController.Usage usage = ChatController.Usage.from(usageJson);

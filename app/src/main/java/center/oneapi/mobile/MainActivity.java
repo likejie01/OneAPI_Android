@@ -146,9 +146,9 @@ public class MainActivity extends Activity {
     private final Runnable desktopPoll = new Runnable() {
         @Override
         public void run() {
-            if (!prefs.boundDeviceId().isEmpty() && (currentSection.isDesktop() || hasBusyDesktopSession())) {
-                refreshDesktopSessions(AppSection.CODEX);
-                refreshDesktopSessions(AppSection.CLAUDE);
+            if (!prefs.boundDeviceId().isEmpty()) {
+                maybeRefreshDesktopSessions(AppSection.CODEX, false);
+                maybeRefreshDesktopSessions(AppSection.CLAUDE, false);
             }
             mainHandler.postDelayed(this, hasBusyDesktopSession() ? 2500 : 8000);
         }
@@ -160,6 +160,8 @@ public class MainActivity extends Activity {
     private AtomicBoolean activeSendCancelled;
     private final Map<AppSection, String> rememberedModelProvider = new EnumMap<>(AppSection.class);
     private final Map<AppSection, String> rememberedExtensionKind = new EnumMap<>(AppSection.class);
+    private final Map<AppSection, Long> desktopSessionRefreshedAt = new EnumMap<>(AppSection.class);
+    private final Set<String> desktopSessionRefreshInFlight = new HashSet<>();
     private boolean keyboardOpen;
     private boolean loginDialogShowing;
     private int lastKeyboardInset = -1;
@@ -168,6 +170,7 @@ public class MainActivity extends Activity {
     private static final long STREAM_SCROLL_RESUME_MS = 1000L;
     private static final long DESKTOP_JOB_TAKEOVER_TIMEOUT_MS = 25000L;
     private static final long DESKTOP_JOB_EVENT_POLL_MS = 2500L;
+    private static final long DESKTOP_SESSION_REFRESH_MIN_INTERVAL_MS = 20000L;
     private boolean voiceListening;
     private boolean desktopKeepScreenOn;
     private boolean streamResponseActive;
@@ -219,6 +222,8 @@ public class MainActivity extends Activity {
         applySystemBars();
         loadStoredLocalSessions(AppSection.CHAT);
         loadStoredLocalSessions(AppSection.IMAGE);
+        loadStoredLocalSessions(AppSection.CODEX);
+        loadStoredLocalSessions(AppSection.CLAUDE);
         switchSection(AppSection.CHAT);
         refreshModels();
         refreshAssistants();
@@ -230,7 +235,6 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        network.shutdownNow();
         apiClient.cancelActiveRequests();
         mainHandler.removeCallbacks(desktopPoll);
         stopVoiceRecognition();
@@ -1233,7 +1237,7 @@ public class MainActivity extends Activity {
         scrollDock.setVisibility(conversation ? View.VISIBLE : View.GONE);
         renderCurrent(forceBottom);
         if (section.isDesktop()) {
-            refreshDesktopSessions(section);
+            maybeRefreshDesktopSessions(section, false);
         }
     }
 
@@ -1275,7 +1279,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadStoredLocalSessions(AppSection section) {
-        if (section != AppSection.CHAT && section != AppSection.IMAGE) return;
+        if (!section.isConversation()) return;
         network.execute(() -> {
             try {
                 List<ConversationSessionEntity> rows = conversationRepository.sessionsForMode(section.id);
@@ -1285,14 +1289,16 @@ public class MainActivity extends Activity {
                     List<ChatMessage> messages = new ArrayList<>();
                     List<ConversationMessageEntity> storedMessages = conversationRepository.latestMessages(row.sessionId, 80);
                     for (ConversationMessageEntity item : storedMessages) {
-                        ChatMessage message = new ChatMessage(item.role, item.text, item.timestamp);
+                        ChatMessage message = "log".equals(item.kind)
+                                ? ChatMessage.log(item.text, item.timestamp)
+                                : new ChatMessage(item.role, item.text, item.timestamp);
                         message.tokenText = storedTokenText(item.rawJson);
                         messages.add(message);
                     }
                     sessions.add(new ChatSession(
                             row.sessionId,
                             row.title.isEmpty() ? row.groupName : row.title,
-                            row.groupName,
+                            section.isDesktop() ? section.label : row.groupName,
                             row.projectName,
                             messages
                     ));
@@ -1314,38 +1320,64 @@ public class MainActivity extends Activity {
     }
 
     private void persistSession(AppSection section, ChatSession session) {
-        if (section != AppSection.CHAT && section != AppSection.IMAGE) return;
+        if (!section.isConversation()) return;
         network.execute(() -> {
             try {
-                ConversationSessionEntity entity = new ConversationSessionEntity();
-                entity.sessionId = session.id;
-                entity.mode = section.id;
-                entity.groupName = session.assistantLabel;
-                entity.title = session.title;
-                entity.projectName = session.projectLabel;
-                entity.projectPath = session.projectLabel;
-                entity.updatedAt = System.currentTimeMillis();
-                entity.preview = session.messages.isEmpty() ? "" : session.messages.get(session.messages.size() - 1).text;
-                List<ConversationMessageEntity> messages = new ArrayList<>();
-                for (int i = 0; i < session.messages.size(); i++) {
-                    ChatMessage source = session.messages.get(i);
-                    ConversationMessageEntity message = new ConversationMessageEntity();
-                    message.messageId = session.id + "-" + i + "-" + source.timestamp;
-                    message.sessionId = session.id;
-                    message.mode = section.id;
-                    message.kind = "message";
-                    message.role = source.role;
-                    message.contentType = "text";
-                    message.text = source.text;
-                    message.timestamp = source.timestamp;
-                    message.sortIndex = i;
-                    message.rawJson = messageRawJson(source);
-                    messages.add(message);
-                }
-                conversationRepository.replaceSessionMessages(entity, messages);
+                replaceStoredSession(section, session);
             } catch (Exception ignored) {
             }
         });
+    }
+
+    private void persistSessions(AppSection section, List<ChatSession> sessions) {
+        if (!section.isConversation() || sessions == null || sessions.isEmpty()) return;
+        network.execute(() -> {
+            try {
+                for (ChatSession session : sessions) {
+                    replaceStoredSession(section, session);
+                }
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void replaceStoredSession(AppSection section, ChatSession session) {
+        if (section == null || session == null) return;
+        ConversationSessionEntity entity = new ConversationSessionEntity();
+        entity.sessionId = session.id;
+        entity.mode = section.id;
+        entity.groupName = session.assistantLabel;
+        entity.title = session.title;
+        entity.projectName = session.projectLabel;
+        entity.projectPath = session.projectLabel;
+        entity.updatedAt = newestMessageTimestamp(session);
+        entity.preview = session.messages.isEmpty() ? "" : session.messages.get(session.messages.size() - 1).text;
+        List<ConversationMessageEntity> messages = new ArrayList<>();
+        for (int i = 0; i < session.messages.size(); i++) {
+            ChatMessage source = session.messages.get(i);
+            ConversationMessageEntity message = new ConversationMessageEntity();
+            message.messageId = session.id + "-" + i + "-" + source.timestamp;
+            message.sessionId = session.id;
+            message.mode = section.id;
+            message.kind = source.log ? "log" : "message";
+            message.role = source.role;
+            message.contentType = "text";
+            message.text = source.text;
+            message.timestamp = source.timestamp;
+            message.sortIndex = i;
+            message.rawJson = messageRawJson(source);
+            messages.add(message);
+        }
+        conversationRepository.replaceSessionMessages(entity, messages);
+    }
+
+    private long newestMessageTimestamp(ChatSession session) {
+        long newest = System.currentTimeMillis();
+        if (session == null || session.messages == null) return newest;
+        for (ChatMessage message : session.messages) {
+            if (message != null && message.timestamp > newest) newest = message.timestamp;
+        }
+        return newest;
     }
 
     private String messageRawJson(ChatMessage message) {
@@ -2861,7 +2893,7 @@ public class MainActivity extends Activity {
         titleRow.addView(create, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
         if (currentSection.isDesktop()) {
             Button refresh = iconGlyphButton("⟳");
-            refresh.setOnClickListener(v -> refreshDesktopSessions(currentSection, () -> {
+            refresh.setOnClickListener(v -> refreshDesktopSessions(currentSection, true, () -> {
                 if (sessionListRef[0] != null) {
                     sessionListRef[0].removeAllViews();
                     renderGroupedSessions(sessionListRef[0], state, dialog);
@@ -2882,7 +2914,7 @@ public class MainActivity extends Activity {
         listScroll.addView(list, new ScrollView.LayoutParams(-1, -2));
         renderGroupedSessions(list, state, dialog);
         if (currentSection.isDesktop()) {
-            refreshDesktopSessions(currentSection, () -> {
+            maybeRefreshDesktopSessions(currentSection, false, () -> {
                 list.removeAllViews();
                 renderGroupedSessions(list, state, dialog);
             });
@@ -3252,12 +3284,27 @@ public class MainActivity extends Activity {
     }
 
     private void refreshDesktopSessions(AppSection section) {
-        refreshDesktopSessions(section, null);
+        refreshDesktopSessions(section, false, null);
     }
 
     private void refreshDesktopSessions(AppSection section, Runnable afterRefresh) {
+        refreshDesktopSessions(section, false, afterRefresh);
+    }
+
+    private void refreshDesktopSessions(AppSection section, boolean force, Runnable afterRefresh) {
         SectionState targetState = states.get(section);
-        if (targetState == null) return;
+        if (targetState == null || !section.isDesktop()) return;
+        if (!force && shouldSkipDesktopSessionRefresh(section)) {
+            if (afterRefresh != null) mainHandler.post(afterRefresh);
+            return;
+        }
+        synchronized (desktopSessionRefreshInFlight) {
+            if (desktopSessionRefreshInFlight.contains(section.id)) {
+                if (afterRefresh != null) mainHandler.post(afterRefresh);
+                return;
+            }
+            desktopSessionRefreshInFlight.add(section.id);
+        }
         network.execute(() -> {
             try {
                 JSONArray rows = desktopRepository.sessions(prefs.boundDeviceId());
@@ -3277,11 +3324,14 @@ public class MainActivity extends Activity {
                         syncedModelAt = updatedAt;
                     }
                 }
-                if (parsed.isEmpty()) return;
                 String finalSyncedModel = syncedModel;
                 mainHandler.post(() -> {
                     if (!finalSyncedModel.isEmpty()) {
                         applySelectedModel(section, finalSyncedModel, true);
+                    }
+                    if (parsed.isEmpty()) {
+                        if (afterRefresh != null) afterRefresh.run();
+                        return;
                     }
                     String selectedId = targetState.current().id;
                     if (!targetState.selectedSessionId.isEmpty()) {
@@ -3299,6 +3349,8 @@ public class MainActivity extends Activity {
                     }
                     targetState.selectedIndex = nextIndex;
                     targetState.selectedSessionId = targetState.sessions.isEmpty() ? "" : targetState.sessions.get(nextIndex).id;
+                    desktopSessionRefreshedAt.put(section, System.currentTimeMillis());
+                    persistSessions(section, targetState.sessions);
                     updateDesktopWakeState();
                     if (currentSection == section) {
                         renderCurrent(false);
@@ -3310,8 +3362,35 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Exception ignored) {
+                if (afterRefresh != null) mainHandler.post(afterRefresh);
+            } finally {
+                synchronized (desktopSessionRefreshInFlight) {
+                    desktopSessionRefreshInFlight.remove(section.id);
+                }
             }
         });
+    }
+
+    private void maybeRefreshDesktopSessions(AppSection section, boolean force) {
+        maybeRefreshDesktopSessions(section, force, null);
+    }
+
+    private void maybeRefreshDesktopSessions(AppSection section, boolean force, Runnable afterRefresh) {
+        if (force || !shouldSkipDesktopSessionRefresh(section)) {
+            refreshDesktopSessions(section, force, afterRefresh);
+        } else if (afterRefresh != null) {
+            mainHandler.post(afterRefresh);
+        }
+    }
+
+    private boolean shouldSkipDesktopSessionRefresh(AppSection section) {
+        if (section == null || !section.isDesktop()) return true;
+        SectionState target = states.get(section);
+        if (target == null || target.sessions.isEmpty()) return false;
+        String deviceId = prefs.boundDeviceId();
+        if (deviceId == null || deviceId.trim().isEmpty()) return true;
+        long last = desktopSessionRefreshedAt.getOrDefault(section, 0L);
+        return last > 0L && System.currentTimeMillis() - last < DESKTOP_SESSION_REFRESH_MIN_INTERVAL_MS;
     }
 
     private ChatSession desktopSessionFromJson(AppSection section, JSONObject item) {
@@ -3559,8 +3638,9 @@ public class MainActivity extends Activity {
             if (!"user".equals(role)) role = "assistant";
             String text = first(item, "text", "content", "body", "message", "title");
             if (text.isEmpty()) continue;
-            long timestamp = normalizeTimestamp(item.optLong("timestamp", item.optLong("createdAt", System.currentTimeMillis())));
-            String stableId = first(item, "id", "messageId", "eventId");
+            long timestamp = normalizeTimestamp(firstLong(item, "timestamp", "createdAt", "created_at"));
+            if (timestamp <= 0L) timestamp = System.currentTimeMillis();
+            String stableId = first(item, "event_id", "id", "messageId", "message_id", "eventId");
             String jobId = first(item, "jobId", "job_id");
             if (stableId.isEmpty()) {
                 if (!jobId.isEmpty()) stableId = (log ? "log:" : "message:") + jobId + ":" + role + ":" + normalizeForKey(text);
@@ -3612,6 +3692,16 @@ public class MainActivity extends Activity {
             if (!value.isEmpty()) return value;
         }
         return "";
+    }
+
+    private long firstLong(JSONObject item, String... keys) {
+        if (item == null) return 0L;
+        for (String key : keys) {
+            if (!item.has(key)) continue;
+            long value = item.optLong(key, 0L);
+            if (value > 0L) return value;
+        }
+        return 0L;
     }
 
     private void showModelDialog() {
@@ -4661,7 +4751,10 @@ public class MainActivity extends Activity {
                                     mainHandler.post(() -> {
                                         if (cancelFlag.get()) return;
                                         if (progress == null) return;
-                                        progress.text = fullText.trim().isEmpty() ? "正在思考..." : fullText;
+                                        String cleanFullText = fullText == null ? "" : fullText.trim();
+                                        progress.text = cleanFullText.isEmpty()
+                                                ? (done ? "本次没有返回可显示内容。" : "正在思考...")
+                                                : fullText;
                                         if (currentSection == targetSection && state.current() == session) {
                                             long nowRender = System.currentTimeMillis();
                                             if (done || nowRender - lastRenderAt[0] >= 180) {
@@ -5051,16 +5144,26 @@ public class MainActivity extends Activity {
         desktopJobMonitor.execute(() -> {
             long deadline = System.currentTimeMillis() + DESKTOP_JOB_TAKEOVER_TIMEOUT_MS;
             boolean takeover = false;
+            boolean terminal = false;
             Exception lastError = null;
-            while (System.currentTimeMillis() < deadline && !Thread.currentThread().isInterrupted()) {
+            while (!terminal && !Thread.currentThread().isInterrupted()) {
                 try {
                     JSONArray events = desktopRepository.jobEvents(jobId);
+                    if (events != null && events.length() > 0) {
+                        appendDesktopJobEvents(section, session, jobId, events);
+                    }
                     if (hasDesktopTakeoverEvent(events)) {
                         takeover = true;
+                    }
+                    if (hasTerminalDesktopJobEvent(events)) {
+                        terminal = true;
                         break;
                     }
                 } catch (Exception error) {
                     lastError = error;
+                }
+                if (!takeover && System.currentTimeMillis() >= deadline) {
+                    break;
                 }
                 try {
                     Thread.sleep(DESKTOP_JOB_EVENT_POLL_MS);
@@ -5069,20 +5172,22 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            if (takeover) {
+            if (takeover && terminal) {
                 refreshDesktopSessions(section);
                 return;
             }
-            String detail = lastError == null || lastError.getMessage() == null || lastError.getMessage().trim().isEmpty()
-                    ? ""
-                    : "\n最近一次事件刷新失败：" + lastError.getMessage().trim();
-            mainHandler.post(() -> {
-                if (session.messages.isEmpty() || !containsRecentDesktopTakeoverWarning(session, jobId)) {
-                    session.messages.add(ChatMessage.log("桌面客户端暂未接管，请确认客户端在线并已绑定。\n任务编号：" + jobId + detail, Math.max(System.currentTimeMillis(), createdAt + 1)));
-                }
-                persistSession(section, session);
-                if (currentSection == section && state().current() == session) renderCurrent(false);
-            });
+            if (!takeover) {
+                String detail = lastError == null || lastError.getMessage() == null || lastError.getMessage().trim().isEmpty()
+                        ? ""
+                        : "\n最近一次事件刷新失败：" + lastError.getMessage().trim();
+                mainHandler.post(() -> {
+                    if (session.messages.isEmpty() || !containsRecentDesktopTakeoverWarning(session, jobId)) {
+                        session.messages.add(ChatMessage.log("桌面客户端暂未接管，请确认客户端在线并已绑定。\n任务编号：" + jobId + detail, Math.max(System.currentTimeMillis(), createdAt + 1)));
+                    }
+                    persistSession(section, session);
+                    if (currentSection == section && state().current() == session) renderCurrent(false);
+                });
+            }
             refreshDesktopSessions(section);
         });
     }
@@ -5105,6 +5210,95 @@ public class MainActivity extends Activity {
             }
         }
         return false;
+    }
+
+    private boolean hasTerminalDesktopJobEvent(JSONArray events) {
+        if (events == null) return false;
+        for (int i = 0; i < events.length(); i++) {
+            JSONObject event = events.optJSONObject(i);
+            if (event == null) continue;
+            String type = first(event, "type", "phase").toLowerCase(Locale.ROOT);
+            if ("complete".equals(type) || "error".equals(type)) return true;
+        }
+        return false;
+    }
+
+    private void appendDesktopJobEvents(AppSection section, ChatSession session, String jobId, JSONArray events) {
+        if (events == null || events.length() == 0) return;
+        List<ChatMessage> eventMessages = desktopMessagesFromJobEvents(section, jobId, events);
+        if (eventMessages.isEmpty()) return;
+        mainHandler.post(() -> {
+            boolean changed = false;
+            for (ChatMessage message : eventMessages) {
+                if (message == null || containsSimilarMessage(session.messages, message)) continue;
+                session.messages.add(message);
+                changed = true;
+            }
+            if (!changed) return;
+            session.messages.sort((a, b) -> Long.compare(a.timestamp, b.timestamp));
+            session.status = hasTerminalDesktopJobEvent(events) ? "complete" : "running";
+            persistSession(section, session);
+            if (currentSection == section && state().current() == session) renderCurrent(false);
+        });
+    }
+
+    private List<ChatMessage> desktopMessagesFromJobEvents(AppSection section, String jobId, JSONArray events) {
+        JSONArray messages = new JSONArray();
+        JSONArray logs = new JSONArray();
+        for (int i = 0; i < events.length(); i++) {
+            JSONObject event = events.optJSONObject(i);
+            if (event == null) continue;
+            JSONObject item = new JSONObject();
+            copyDesktopEventField(event, item, "id");
+            copyDesktopEventField(event, item, "event_id");
+            copyDesktopEventField(event, item, "eventId");
+            copyDesktopEventField(event, item, "sessionId");
+            copyDesktopEventField(event, item, "session_id");
+            copyDesktopEventField(event, item, "role");
+            copyDesktopEventField(event, item, "text");
+            copyDesktopEventField(event, item, "body");
+            copyDesktopEventField(event, item, "title");
+            copyDesktopEventField(event, item, "type");
+            copyDesktopEventField(event, item, "phase");
+            copyDesktopEventField(event, item, "command");
+            copyDesktopEventField(event, item, "createdAt");
+            copyDesktopEventField(event, item, "created_at");
+            copyDesktopEventField(event, item, "timestamp");
+            try {
+                item.put("jobId", jobId);
+            } catch (Exception ignored) {
+            }
+            String type = first(event, "type", "phase").toLowerCase(Locale.ROOT);
+            String role = first(event, "role").toLowerCase(Locale.ROOT);
+            if ("message".equals(type) || "message_delta".equals(type) || "user".equals(role) || "assistant".equals(role)) {
+                messages.put(item);
+            } else {
+                logs.put(item);
+            }
+        }
+        List<DesktopTimelineRow> rows = new ArrayList<>();
+        collectDesktopRows(section, rows, messages, false);
+        collectDesktopRows(section, rows, logs, true);
+        rows.sort((a, b) -> {
+            int byTime = Long.compare(a.timestamp, b.timestamp);
+            if (byTime != 0) return byTime;
+            int byPriority = Integer.compare(a.priority, b.priority);
+            if (byPriority != 0) return byPriority;
+            return Integer.compare(a.index, b.index);
+        });
+        List<ChatMessage> out = new ArrayList<>();
+        for (DesktopTimelineRow row : rows) {
+            if (row != null && row.message != null) out.add(row.message);
+        }
+        return out;
+    }
+
+    private void copyDesktopEventField(JSONObject from, JSONObject to, String key) {
+        if (from == null || to == null || key == null || !from.has(key)) return;
+        try {
+            to.put(key, from.opt(key));
+        } catch (Exception ignored) {
+        }
     }
 
     private boolean containsRecentDesktopTakeoverWarning(ChatSession session, String jobId) {

@@ -58,25 +58,67 @@ public class ChatController {
         body.put("stream_options", new JSONObject().put("include_usage", true));
         StringBuilder reasoning = new StringBuilder();
         StringBuilder answer = new StringBuilder();
+        StringBuilder pendingSseData = new StringBuilder();
+        StringBuilder plainResponse = new StringBuilder();
+        boolean[] sawSse = new boolean[]{false};
         api.postStream("/pg/chat/completions", body, line -> {
             String clean = line == null ? "" : line.trim();
-            if (!clean.startsWith("data:")) return;
-            String data = clean.substring("data:".length()).trim();
-            if (data.isEmpty() || "[DONE]".equals(data)) return;
-            try {
-                JSONObject event = new JSONObject(data);
-                Usage usage = Usage.from(event.optJSONObject("usage"));
-                if (!usage.isEmpty() && handler != null) handler.onUsage(usage);
-                Delta delta = extractDeltaPart(event);
-                if (!delta.text.isEmpty()) {
-                    if (delta.reasoning) reasoning.append(delta.text);
-                    else answer.append(delta.text);
-                    if (handler != null) handler.onDelta(joinReasoning(reasoning.toString(), answer.toString()), false);
+            if (clean.isEmpty()) {
+                if (pendingSseData.length() > 0) {
+                    StreamPayload payload = parseStreamPayload(pendingSseData.toString());
+                    pendingSseData.setLength(0);
+                    if (payload != null) {
+                        applyStreamPayload(payload, reasoning, answer, handler);
+                    }
                 }
-            } catch (Exception ignored) {
+                return;
+            }
+            if (!clean.startsWith("data:")) {
+                if (!sawSse[0]) plainResponse.append(clean).append('\n');
+                return;
+            }
+            sawSse[0] = true;
+            String data = clean.substring("data:".length()).trim();
+            pendingSseData.append(data);
+            StreamPayload payload = parseStreamPayload(data);
+            if (payload != null) {
+                pendingSseData.setLength(0);
+                applyStreamPayload(payload, reasoning, answer, handler);
             }
         });
+        if (pendingSseData.length() > 0) {
+            StreamPayload payload = parseStreamPayload(pendingSseData.toString());
+            if (payload != null) {
+                applyStreamPayload(payload, reasoning, answer, handler);
+            }
+        }
+        if (!sawSse[0] && plainResponse.length() > 0) {
+            String text = extractText(new JSONObject(plainResponse.toString().trim()));
+            if (!text.isEmpty()) answer.append(text);
+        }
         if (handler != null) handler.onDelta(joinReasoning(reasoning.toString(), answer.toString()), true);
+    }
+
+    static StreamPayload parseStreamPayload(String payload) {
+        String clean = clean(payload);
+        if (clean.isEmpty()) return null;
+        if ("[DONE]".equals(clean)) return new StreamPayload(new Delta("", false), null, true);
+        try {
+            JSONObject event = new JSONObject(clean);
+            return new StreamPayload(extractDeltaPart(event), Usage.from(event.optJSONObject("usage")), false);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static void applyStreamPayload(StreamPayload payload, StringBuilder reasoning, StringBuilder answer, DeltaHandler handler) {
+        if (payload == null) return;
+        if (payload.usage != null && !payload.usage.isEmpty() && handler != null) handler.onUsage(payload.usage);
+        Delta delta = payload.delta;
+        if (delta == null || delta.text.isEmpty()) return;
+        if (delta.reasoning) reasoning.append(delta.text);
+        else answer.append(delta.text);
+        if (handler != null) handler.onDelta(joinReasoning(reasoning.toString(), answer.toString()), false);
     }
 
     public static String extractText(JSONObject response) {
@@ -86,15 +128,15 @@ public class ChatController {
             JSONObject message = choices.optJSONObject(0) == null ? null : choices.optJSONObject(0).optJSONObject("message");
             if (message != null) {
                 String reasoning = reasoningFromObject(message);
-                Object content = message.opt("content");
-                String text = "";
-            if (content instanceof String) text = nonNull((String) content);
-            if (content instanceof JSONArray) text = textFromParts((JSONArray) content);
+                String text = textFromAny(message.opt("content"));
+                if (text.isEmpty()) text = textFromAny(message.opt("text"));
                 return joinReasoning(reasoning, text).trim();
             }
         }
         String reasoning = reasoningFromObject(response);
-        String text = firstString(response, "text", "message", "content").trim();
+        String text = textFromAny(response.opt("text"));
+        if (text.isEmpty()) text = textFromAny(response.opt("content"));
+        if (text.isEmpty()) text = textFromAny(response.opt("message"));
         if (text.isEmpty()) text = textFromParts(response.optJSONArray("output"));
         return joinReasoning(reasoning, text).trim();
     }
@@ -111,16 +153,31 @@ public class ChatController {
             }
             JSONObject part = parts.optJSONObject(i);
             if (part == null) continue;
-            String text = firstString(part, "text", "content", "output_text", "input_text", "reasoning_text", "summary");
-            if (text.isEmpty()) {
-                Object nested = part.opt("content");
-                if (nested instanceof JSONArray) text = textFromParts((JSONArray) nested);
-            }
-            if (text.isEmpty()) text = textFromParts(part.optJSONArray("summary"));
-            if (text.isEmpty()) text = textFromParts(part.optJSONArray("parts"));
+            String text = textFromAny(part.opt("text"));
+            if (text.isEmpty()) text = textFromAny(part.opt("content"));
+            if (text.isEmpty()) text = textFromAny(part.opt("output_text"));
+            if (text.isEmpty()) text = textFromAny(part.opt("input_text"));
+            if (text.isEmpty()) text = textFromAny(part.opt("reasoning_text"));
+            if (text.isEmpty()) text = textFromAny(part.opt("summary"));
+            if (text.isEmpty()) text = textFromAny(part.opt("parts"));
             if (!text.isEmpty()) out.append(text);
         }
         return out.toString();
+    }
+
+    private static String textFromAny(Object raw) {
+        if (raw == null || JSONObject.NULL.equals(raw)) return "";
+        if (raw instanceof String) return nonNull((String) raw);
+        if (raw instanceof JSONArray) return textFromParts((JSONArray) raw);
+        if (raw instanceof JSONObject) {
+            JSONObject object = (JSONObject) raw;
+            String text = firstString(object, "text", "output_text", "input_text", "reasoning_text");
+            if (text.isEmpty()) text = textFromAny(object.opt("content"));
+            if (text.isEmpty()) text = textFromAny(object.opt("summary"));
+            if (text.isEmpty()) text = textFromAny(object.opt("parts"));
+            return text;
+        }
+        return "";
     }
 
     private static String reasoningFromObject(JSONObject object) {
@@ -184,12 +241,19 @@ public class ChatController {
         JSONArray choices = response.optJSONArray("choices");
         if (choices == null || choices.length() == 0) {
             if (isReasoningEvent(response)) {
-                String text = firstString(response, "delta", "text", "content", "message", "summary", "reasoning_text");
+                String text = firstString(response, "delta", "text", "summary", "reasoning_text");
+                if (text.isEmpty()) text = textFromAny(response.opt("content"));
+                if (text.isEmpty()) text = textFromAny(response.opt("message"));
                 if (!text.isEmpty()) return new Delta(text, true);
             }
             String reasoning = reasoningFromObject(response);
             if (!reasoning.isEmpty()) return new Delta(reasoning, true);
-            return new Delta(firstString(response, "text", "content", "message", "delta"), false);
+            String text = textFromAny(response.opt("text"));
+            if (text.isEmpty()) text = textFromAny(response.opt("content"));
+            if (text.isEmpty()) text = textFromAny(response.opt("message"));
+            if (text.isEmpty()) text = textFromAny(response.opt("output"));
+            if (text.isEmpty()) text = firstString(response, "delta");
+            return new Delta(text, false);
         }
         JSONObject choice = choices.optJSONObject(0);
         if (choice == null) return new Delta("", false);
@@ -197,19 +261,23 @@ public class ChatController {
         if (delta != null) {
             String reasoning = reasoningFromObject(delta);
             if (!reasoning.isEmpty()) return new Delta(reasoning, true);
-            Object content = delta.opt("content");
-            if (content instanceof String) return new Delta(nonNull((String) content), false);
-            if (content instanceof JSONArray) return new Delta(textFromParts((JSONArray) content), false);
+            String text = textFromAny(delta.opt("content"));
+            if (text.isEmpty()) text = textFromAny(delta.opt("text"));
+            if (!text.isEmpty()) return new Delta(text, false);
         }
         JSONObject message = choice.optJSONObject("message");
         if (message != null) {
             String reasoning = reasoningFromObject(message);
             if (!reasoning.isEmpty()) return new Delta(reasoning, true);
-            Object content = message.opt("content");
-            if (content instanceof String) return new Delta(nonNull((String) content), false);
-            if (content instanceof JSONArray) return new Delta(textFromParts((JSONArray) content), false);
+            String text = textFromAny(message.opt("content"));
+            if (text.isEmpty()) text = textFromAny(message.opt("text"));
+            if (!text.isEmpty()) return new Delta(text, false);
         }
-        return new Delta(firstString(response, "text", "content", "message"), false);
+        String text = textFromAny(choice.opt("content"));
+        if (text.isEmpty()) text = textFromAny(response.opt("text"));
+        if (text.isEmpty()) text = textFromAny(response.opt("content"));
+        if (text.isEmpty()) text = textFromAny(response.opt("message"));
+        return new Delta(text, false);
     }
 
     private static boolean isReasoningEvent(JSONObject response) {
@@ -242,6 +310,18 @@ public class ChatController {
         Delta(String text, boolean reasoning) {
             this.text = text == null ? "" : text;
             this.reasoning = reasoning;
+        }
+    }
+
+    static class StreamPayload {
+        final Delta delta;
+        final Usage usage;
+        final boolean done;
+
+        StreamPayload(Delta delta, Usage usage, boolean done) {
+            this.delta = delta;
+            this.usage = usage;
+            this.done = done;
         }
     }
 
