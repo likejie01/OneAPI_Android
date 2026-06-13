@@ -93,10 +93,20 @@ public class ChatController {
             }
         }
         if (!sawSse[0] && plainResponse.length() > 0) {
-            String text = extractText(new JSONObject(plainResponse.toString().trim()));
+            String text = extractTextFromPlainResponse(plainResponse.toString());
             if (!text.isEmpty()) answer.append(text);
         }
         if (handler != null) handler.onDelta(joinReasoning(reasoning.toString(), answer.toString()), true);
+    }
+
+    static String extractTextFromPlainResponse(String response) {
+        String clean = clean(response);
+        if (clean.isEmpty()) return "";
+        try {
+            return extractText(new JSONObject(clean));
+        } catch (Exception ignored) {
+            return clean;
+        }
     }
 
     static StreamPayload parseStreamPayload(String payload) {

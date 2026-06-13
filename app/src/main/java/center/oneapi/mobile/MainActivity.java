@@ -27,6 +27,7 @@ import android.text.TextUtils;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Base64;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -88,9 +89,12 @@ import center.oneapi.mobile.data.ConversationRepository;
 import center.oneapi.mobile.data.ConversationSessionEntity;
 import center.oneapi.mobile.features.audio.AudioTranscriptionController;
 import center.oneapi.mobile.features.billing.BillingController;
+import center.oneapi.mobile.features.catalog.AssistantCatalog;
+import center.oneapi.mobile.features.catalog.ModelCatalog;
 import center.oneapi.mobile.features.chat.ChatController;
 import center.oneapi.mobile.features.desktop.DesktopController;
 import center.oneapi.mobile.features.desktop.DesktopRepository;
+import center.oneapi.mobile.features.desktop.DesktopTimelineMapper;
 import center.oneapi.mobile.features.image.ImageController;
 import center.oneapi.mobile.features.image.ImageAssistantCatalog;
 import center.oneapi.mobile.features.status.StatusController;
@@ -106,6 +110,7 @@ import center.oneapi.mobile.ui.conversation.ConversationDisplayItem;
 import center.oneapi.mobile.ui.conversation.ScrollDock;
 
 public class MainActivity extends Activity {
+    private static final String TAG = "OneAPI-Mobile";
     private static final int REQ_IMAGE = 42;
     private static final int REQ_RECORD_AUDIO = 43;
     private static final int REQ_CAMERA = 44;
@@ -3318,7 +3323,7 @@ public class MainActivity extends Activity {
                     }
                     parsed.add(desktopSessionFromJson(section, item));
                     String model = first(item, "model", "modelLabel", "selectedModel");
-                    long updatedAt = normalizeTimestamp(item.optLong("updatedAt", item.optLong("updated_at", 0)));
+                    long updatedAt = DesktopTimelineMapper.normalizeTimestamp(item.optLong("updatedAt", item.optLong("updated_at", 0)));
                     if (!model.isEmpty() && isAllowedDesktopModel(model) && updatedAt >= syncedModelAt) {
                         syncedModel = model;
                         syncedModelAt = updatedAt;
@@ -3399,7 +3404,7 @@ public class MainActivity extends Activity {
         String project = first(item, "projectPath", "cwd", "workspace", "projectName");
         String title = first(item, "title", "name", "projectName");
         if (title.isEmpty()) title = project.isEmpty() ? "未命名会话" : project;
-        List<ChatMessage> messages = desktopTimeline(section, item);
+        List<ChatMessage> messages = DesktopTimelineMapper.fromSession(section, item);
         if (messages.isEmpty()) {
             messages.add(new ChatMessage("assistant", "已加载桌面端会话：" + title, System.currentTimeMillis()));
         }
@@ -3514,194 +3519,12 @@ public class MainActivity extends Activity {
         return 100000 + index;
     }
 
-    private List<ChatMessage> desktopTimeline(AppSection section, JSONObject item) {
-        List<DesktopTimelineRow> rows = new ArrayList<>();
-        collectDesktopRows(section, rows, item.optJSONArray("messages"), false);
-        collectDesktopRows(section, rows, item.optJSONArray("logs"), true);
-        rows.sort((a, b) -> {
-            int byTime = Long.compare(a.timestamp, b.timestamp);
-            if (byTime != 0) return byTime;
-            int byPriority = Integer.compare(a.priority, b.priority);
-            if (byPriority != 0) return byPriority;
-            return Integer.compare(a.index, b.index);
-        });
-        LinkedHashMap<String, DesktopTimelineRow> rowsByStableKey = new LinkedHashMap<>();
-        List<DesktopTimelineRow> uniqueRows = new ArrayList<>();
-        for (DesktopTimelineRow row : rows) {
-            if (!row.stableKey.isEmpty() && rowsByStableKey.containsKey(row.stableKey)) {
-                continue;
-            }
-            boolean duplicate = false;
-            for (DesktopTimelineRow existing : uniqueRows) {
-                if (row.duplicates(existing)) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate) {
-                continue;
-            }
-            uniqueRows.add(row);
-            if (!row.stableKey.isEmpty()) {
-                rowsByStableKey.put(row.stableKey, row);
-            }
-        }
-        if (section == AppSection.CLAUDE) {
-            uniqueRows = coalesceClaudeAssistantRows(uniqueRows);
-        }
-        List<ChatMessage> out = new ArrayList<>();
-        for (DesktopTimelineRow row : uniqueRows) {
-            out.add(row.message);
-        }
-        return out;
-    }
-
-    private List<DesktopTimelineRow> coalesceClaudeAssistantRows(List<DesktopTimelineRow> rows) {
-        List<DesktopTimelineRow> out = new ArrayList<>();
-        DesktopTimelineRow pending = null;
-        boolean pendingMerged = false;
-        for (DesktopTimelineRow row : rows) {
-            if (canCoalesceClaudeAssistant(pending, row, pendingMerged)) {
-                pending = mergeClaudeAssistantRows(pending, row);
-                pendingMerged = true;
-                continue;
-            }
-            if (pending != null) {
-                out.add(pending);
-            }
-            pending = row;
-            pendingMerged = false;
-        }
-        if (pending != null) {
-            out.add(pending);
-        }
-        return out;
-    }
-
-    private boolean canCoalesceClaudeAssistant(DesktopTimelineRow left, DesktopTimelineRow right, boolean leftAlreadyMerged) {
-        if (!isClaudeAssistantProcessRow(left) || !isClaudeAssistantProcessRow(right)) return false;
-        if (!left.jobId.isEmpty() && !right.jobId.isEmpty() && !left.jobId.equals(right.jobId)) return false;
-        long gap = Math.abs(right.timestamp - left.timestamp);
-        if (gap > 30000L) return false;
-        return leftAlreadyMerged || likelyClaudeProcessFragment(left.message.text) || likelyClaudeProcessFragment(right.message.text);
-    }
-
-    private boolean isClaudeAssistantProcessRow(DesktopTimelineRow row) {
-        return row != null && row.message != null && !row.message.log && row.priority == 2
-                && "assistant".equals(row.message.role);
-    }
-
-    private boolean likelyClaudeProcessFragment(String value) {
-        String text = value == null ? "" : value.trim();
-        if (text.isEmpty()) return false;
-        if (text.length() <= 32) return true;
-        if (text.length() <= 80 && !text.contains("\n") && !endsWithSentenceBoundary(text)) return true;
-        return false;
-    }
-
-    private boolean endsWithSentenceBoundary(String text) {
-        if (text == null || text.isEmpty()) return false;
-        char last = text.charAt(text.length() - 1);
-        return "。！？!?；;：:\n".indexOf(last) >= 0;
-    }
-
-    private DesktopTimelineRow mergeClaudeAssistantRows(DesktopTimelineRow left, DesktopTimelineRow right) {
-        ChatMessage message = new ChatMessage("assistant",
-                joinClaudeAssistantFragment(left.message.text, right.message.text),
-                left.message.timestamp);
-        String key = left.stableKey.isEmpty() ? right.stableKey : left.stableKey + "+" + right.stableKey;
-        return new DesktopTimelineRow(message, key, left.timestamp, left.priority, left.index, left.jobId);
-    }
-
-    private String joinClaudeAssistantFragment(String left, String right) {
-        String a = left == null ? "" : left;
-        String b = right == null ? "" : right;
-        if (a.isEmpty()) return b;
-        if (b.isEmpty()) return a;
-        char last = a.charAt(a.length() - 1);
-        char first = b.charAt(0);
-        if (Character.isWhitespace(last) || Character.isWhitespace(first)) return a + b;
-        if (isAsciiWord(last) && isAsciiWord(first)) return a + " " + b;
-        return a + b;
-    }
-
-    private boolean isAsciiWord(char value) {
-        return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
-    }
-
-    private void collectDesktopRows(AppSection section, List<DesktopTimelineRow> out, JSONArray rows, boolean log) {
-        if (rows == null) return;
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject item = rows.optJSONObject(i);
-            if (item == null) continue;
-            String role = item.optString("role", log ? "assistant" : "assistant");
-            if (!"user".equals(role)) role = "assistant";
-            String text = first(item, "text", "content", "body", "message", "title");
-            if (text.isEmpty()) continue;
-            long timestamp = normalizeTimestamp(firstLong(item, "timestamp", "createdAt", "created_at"));
-            if (timestamp <= 0L) timestamp = System.currentTimeMillis();
-            String stableId = first(item, "event_id", "id", "messageId", "message_id", "eventId");
-            String jobId = first(item, "jobId", "job_id");
-            if (stableId.isEmpty()) {
-                if (!jobId.isEmpty()) stableId = (log ? "log:" : "message:") + jobId + ":" + role + ":" + normalizeForKey(text);
-            }
-            if (log) {
-                String title = first(item, "title", "type", "phase");
-                String command = first(item, "command");
-                String type = first(item, "type");
-                if (isLowValueDesktopLog(section, title, type, text)) continue;
-                String logTitle = desktopLogTitle(section, title, type, command, text);
-                StringBuilder body = new StringBuilder();
-                body.append(logTitle);
-                if (!command.isEmpty()) body.append("\n\n```bash\n").append(command).append("\n```");
-                String path = first(item, "path", "file", "filePath", "cwd", "workspace");
-                if (!path.isEmpty()) body.append("\n\n文件：`").append(path).append("`");
-                if (!command.isEmpty() && looksLikeCommandJson(text)) {
-                    // The command is already rendered as a code block above; Codex often repeats it in JSON body.
-                } else if (looksLikeCodeLog(type, text)) {
-                    body.append("\n\n```").append(codeLanguageForLog(type, text)).append("\n").append(text).append("\n```");
-                } else {
-                    body.append("\n\n").append(text);
-                }
-                ChatMessage message = ChatMessage.log(body.toString(), timestamp);
-                out.add(new DesktopTimelineRow(message, stableId, timestamp, 1, i, jobId));
-            } else {
-                ChatMessage message = new ChatMessage(role, text, timestamp);
-                out.add(new DesktopTimelineRow(message, stableId, timestamp, "user".equals(role) ? 0 : 2, i, jobId));
-            }
-        }
-    }
-
-    private String normalizeForKey(String value) {
-        return (value == null ? "" : value).trim().replaceAll("\\s+", " ");
-    }
-
-    private boolean looksLikeCommandJson(String text) {
-        String clean = text == null ? "" : text.trim();
-        return clean.startsWith("{") && clean.endsWith("}") && clean.contains("\"command\"");
-    }
-
-    private long normalizeTimestamp(long value) {
-        if (value <= 0) return System.currentTimeMillis();
-        return value > 10000000000L ? value : value * 1000L;
-    }
-
     private String first(JSONObject item, String... keys) {
         for (String key : keys) {
             String value = item.optString(key, "").trim();
             if (!value.isEmpty()) return value;
         }
         return "";
-    }
-
-    private long firstLong(JSONObject item, String... keys) {
-        if (item == null) return 0L;
-        for (String key : keys) {
-            if (!item.has(key)) continue;
-            long value = item.optLong(key, 0L);
-            if (value > 0L) return value;
-        }
-        return 0L;
     }
 
     private void showModelDialog() {
@@ -3757,46 +3580,15 @@ public class MainActivity extends Activity {
     }
 
     private List<String> modelProviders(List<String> models) {
-        List<String> found = new ArrayList<>();
-        for (String model : models) addUnique(found, providerForModel(model));
-        List<String> order = new ArrayList<>(Arrays.asList("OpenAI", "Gemini", "DeepSeek", "Qwen", "Claude", "Mimo", "Grok"));
-        if (currentSection == AppSection.CLAUDE) {
-            order.remove("Claude");
-            order.add(0, "Claude");
-        }
-        List<String> providers = new ArrayList<>();
-        providers.add("全部");
-        for (String item : order) {
-            if (found.contains(item)) providers.add(item);
-        }
-        for (String item : found) {
-            if (!providers.contains(item) && !"其他".equals(item)) providers.add(item);
-        }
-        if (found.contains("其他")) providers.add("其他");
-        return providers;
+        return ModelCatalog.providersFor(models, currentSection == AppSection.CLAUDE);
     }
 
     private String providerForModel(String model) {
-        String value = model == null ? "" : model.toLowerCase(Locale.ROOT);
-        if (value.contains("claude")) return "Claude";
-        if (value.contains("deepseek")) return "DeepSeek";
-        if (value.contains("mimo")) return "Mimo";
-        if (value.contains("gemini")) return "Gemini";
-        if (value.contains("grok")) return "Grok";
-        if (value.contains("qwen") || value.contains("通义")) return "Qwen";
-        if (value.contains("gpt") || value.contains("openai") || value.contains("codex") || value.contains("o1") || value.contains("o3") || value.contains("o4")) return "OpenAI";
-        return "其他";
+        return ModelCatalog.providerForModel(model);
     }
 
     private boolean isAllowedDesktopModel(String model) {
-        String n = model == null ? "" : model.toLowerCase(Locale.ROOT);
-        if (n.contains("deepseek")) {
-            return n.contains("deepseek-v4-pro") || n.contains("deepseek-v4-flash");
-        }
-        if (n.contains("mimo")) {
-            return "mimo-v2.5-pro".equals(n) || "mimo-v2.5".equals(n);
-        }
-        return true;
+        return ModelCatalog.isAllowedDesktopModel(model);
     }
 
     private TextView filterChip(String text, boolean selected) {
@@ -3806,25 +3598,6 @@ public class MainActivity extends Activity {
         chip.setPadding(UiKit.dp(this, 10), 0, UiKit.dp(this, 10), 0);
         chip.setBackground(UiKit.round(UiKit.chipFill(this, selected), UiKit.dp(this, 13), UiKit.line(this)));
         return chip;
-    }
-
-    private boolean looksLikeCodeLog(String type, String text) {
-        String cleanType = type == null ? "" : type.toLowerCase(Locale.ROOT);
-        String clean = text == null ? "" : text;
-        return cleanType.contains("file") || cleanType.contains("patch") || cleanType.contains("diff")
-                || clean.contains("```") || clean.contains("class ") || clean.contains("function ")
-                || clean.contains("import ") || clean.contains("package ") || clean.contains("@@");
-    }
-
-    private String codeLanguageForLog(String type, String text) {
-        String value = (type == null ? "" : type.toLowerCase(Locale.ROOT)) + " " + (text == null ? "" : text.toLowerCase(Locale.ROOT));
-        if (value.contains("diff") || value.contains("@@")) return "diff";
-        if (value.contains("json")) return "json";
-        if (value.contains("java")) return "java";
-        if (value.contains("kotlin") || value.contains(".kt")) return "kotlin";
-        if (value.contains("typescript") || value.contains(".ts")) return "typescript";
-        if (value.contains("javascript") || value.contains(".js")) return "javascript";
-        return "";
     }
 
     private LinearLayout.LayoutParams filterLp() {
@@ -3990,32 +3763,16 @@ public class MainActivity extends Activity {
             try {
                 JSONObject envelope = apiClient.get("/api/pricing");
                 JSONArray data = envelope.optJSONArray("data");
-                if (data == null) return;
-                List<String> chat = new ArrayList<>();
-                List<String> codex = new ArrayList<>();
-                List<String> claude = new ArrayList<>();
-                for (int i = 0; i < data.length(); i++) {
-                    JSONObject item = data.optJSONObject(i);
-                    String model = item == null ? "" : item.optString("model_name", item.optString("model", "")).trim();
-                    if (model.isEmpty()) continue;
-                    String n = model.toLowerCase(Locale.ROOT);
-                    if (!n.contains("image") && !n.contains("midjourney") && !n.contains("dall") && !n.contains("stable")) {
-                        addUnique(chat, model);
-                    }
-                    if ((n.startsWith("gpt-") || n.contains("codex") || n.contains("deepseek") || n.contains("mimo")) && isAllowedDesktopModel(model)) {
-                        addUnique(codex, model);
-                    }
-                    if ((n.startsWith("claude") || n.contains("deepseek") || n.contains("mimo")) && isAllowedDesktopModel(model)) {
-                        addUnique(claude, model);
-                    }
-                }
+                ModelCatalog.Result catalog = ModelCatalog.fromPricing(data);
                 mainHandler.post(() -> {
-                    replaceModels(AppSection.CHAT, chat);
-                    replaceModels(AppSection.CODEX, codex);
-                    replaceModels(AppSection.CLAUDE, claude);
+                    replaceModels(AppSection.CHAT, catalog.chat);
+                    replaceModels(AppSection.CODEX, catalog.codex);
+                    replaceModels(AppSection.CLAUDE, catalog.claude);
                     if (currentSection.isConversation()) composerView.updateState(composerStateFor(state().current(), state()));
                 });
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                Log.w(TAG, "refreshModels failed", error);
+                mainHandler.post(() -> Toast.makeText(this, "模型列表刷新失败：" + message(error), Toast.LENGTH_LONG).show());
             }
         });
     }
@@ -4026,34 +3783,16 @@ public class MainActivity extends Activity {
                 String query = prefs.boundDeviceId().isEmpty() ? "" : "?device_id=" + ApiClient.enc(prefs.boundDeviceId());
                 JSONObject envelope = apiClient.get("/api/mobile/desktop-assistants" + query);
                 JSONArray data = envelope.optJSONArray("data");
-                List<String> chat = new ArrayList<>();
-                List<String> image = new ArrayList<>();
-                Map<String, String> chatPrompts = new HashMap<>();
-                Map<String, String> imagePrompts = new HashMap<>();
-                if (data != null) {
-                    for (int i = 0; i < data.length(); i++) {
-                        JSONObject item = data.optJSONObject(i);
-                        if (item == null) continue;
-                        String name = first(item, "name", "title", "assistantName");
-                        if (name.isEmpty()) continue;
-                        String scope = item.optString("scope", "chat");
-                        String prompt = item.optString("prompt", "");
-                        if ("draw".equals(scope) || "image".equals(scope)) {
-                            addUnique(image, name);
-                            imagePrompts.put(name, prompt);
-                        } else {
-                            addUnique(chat, name);
-                            chatPrompts.put(name, prompt);
-                        }
-                    }
-                }
+                AssistantCatalog.Result catalog = AssistantCatalog.fromMobileAssistants(data);
                 mainHandler.post(() -> {
-                    chatAssistantPrompts.putAll(chatPrompts);
-                    imageAssistantPrompts.putAll(imagePrompts);
-                    replaceAssistants(AppSection.CHAT, chat);
-                    replaceAssistants(AppSection.IMAGE, image);
+                    chatAssistantPrompts.putAll(catalog.chatPrompts);
+                    imageAssistantPrompts.putAll(catalog.imagePrompts);
+                    replaceAssistants(AppSection.CHAT, catalog.chat);
+                    replaceAssistants(AppSection.IMAGE, catalog.image);
                 });
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                Log.w(TAG, "refreshAssistants failed", error);
+                mainHandler.post(() -> Toast.makeText(this, "助手列表刷新失败：" + message(error), Toast.LENGTH_LONG).show());
             }
         });
     }
@@ -4326,39 +4065,6 @@ public class MainActivity extends Activity {
         if (list.getChildCount() == 0) {
             list.addView(UiKit.text(this, "没有匹配的助手", UiKit.MUTED, 14));
         }
-    }
-
-    private boolean isLowValueDesktopLog(AppSection section, String title, String type, String text) {
-        if (section != AppSection.CODEX && section != AppSection.CLAUDE) return false;
-        String value = ((title == null ? "" : title) + " " + (type == null ? "" : type) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
-        return value.contains("输出已结束")
-                || value.contains("已完成本次回复")
-                || value.contains("正在整理会话记录")
-                || value.contains("整理会话记录")
-                || value.contains("output has ended")
-                || value.contains("finished this reply")
-                || value.contains("completed response")
-                || value.contains("output ended")
-                || value.contains("finish_reason")
-                || value.trim().equals("complete")
-                || value.trim().equals("done");
-    }
-
-    private String desktopLogTitle(AppSection section, String title, String type, String command, String text) {
-        String raw = ((title == null ? "" : title) + " " + (type == null ? "" : type) + " " + (command == null ? "" : command) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
-        if (section == AppSection.CODEX) {
-            if (raw.contains("shell_command") || raw.contains("shell") || raw.contains("bash") || raw.contains("powershell") || raw.contains("cmd.exe")) {
-                return "正在执行 shell_command";
-            }
-            if (raw.contains("apply_patch") || raw.contains("patch")) return "正在修改文件";
-            if (raw.contains("read") || raw.contains("open") || raw.contains("cat") || raw.contains("rg ") || raw.contains("grep")) return "正在读取项目文件";
-            if (raw.contains("tool") || raw.contains("function")) return "正在执行工具";
-            if (raw.contains("error") || raw.contains("失败")) return "执行失败";
-            return title == null || title.trim().isEmpty() ? "执行日志" : title.trim();
-        }
-        if (title != null && !title.trim().isEmpty()) return title.trim();
-        if (type != null && !type.trim().isEmpty()) return type.trim();
-        return "执行日志";
     }
 
     private void showImageSizeDialog() {
@@ -5243,62 +4949,7 @@ public class MainActivity extends Activity {
     }
 
     private List<ChatMessage> desktopMessagesFromJobEvents(AppSection section, String jobId, JSONArray events) {
-        JSONArray messages = new JSONArray();
-        JSONArray logs = new JSONArray();
-        for (int i = 0; i < events.length(); i++) {
-            JSONObject event = events.optJSONObject(i);
-            if (event == null) continue;
-            JSONObject item = new JSONObject();
-            copyDesktopEventField(event, item, "id");
-            copyDesktopEventField(event, item, "event_id");
-            copyDesktopEventField(event, item, "eventId");
-            copyDesktopEventField(event, item, "sessionId");
-            copyDesktopEventField(event, item, "session_id");
-            copyDesktopEventField(event, item, "role");
-            copyDesktopEventField(event, item, "text");
-            copyDesktopEventField(event, item, "body");
-            copyDesktopEventField(event, item, "title");
-            copyDesktopEventField(event, item, "type");
-            copyDesktopEventField(event, item, "phase");
-            copyDesktopEventField(event, item, "command");
-            copyDesktopEventField(event, item, "createdAt");
-            copyDesktopEventField(event, item, "created_at");
-            copyDesktopEventField(event, item, "timestamp");
-            try {
-                item.put("jobId", jobId);
-            } catch (Exception ignored) {
-            }
-            String type = first(event, "type", "phase").toLowerCase(Locale.ROOT);
-            String role = first(event, "role").toLowerCase(Locale.ROOT);
-            if ("message".equals(type) || "message_delta".equals(type) || "user".equals(role) || "assistant".equals(role)) {
-                messages.put(item);
-            } else {
-                logs.put(item);
-            }
-        }
-        List<DesktopTimelineRow> rows = new ArrayList<>();
-        collectDesktopRows(section, rows, messages, false);
-        collectDesktopRows(section, rows, logs, true);
-        rows.sort((a, b) -> {
-            int byTime = Long.compare(a.timestamp, b.timestamp);
-            if (byTime != 0) return byTime;
-            int byPriority = Integer.compare(a.priority, b.priority);
-            if (byPriority != 0) return byPriority;
-            return Integer.compare(a.index, b.index);
-        });
-        List<ChatMessage> out = new ArrayList<>();
-        for (DesktopTimelineRow row : rows) {
-            if (row != null && row.message != null) out.add(row.message);
-        }
-        return out;
-    }
-
-    private void copyDesktopEventField(JSONObject from, JSONObject to, String key) {
-        if (from == null || to == null || key == null || !from.has(key)) return;
-        try {
-            to.put(key, from.opt(key));
-        } catch (Exception ignored) {
-        }
+        return DesktopTimelineMapper.fromJobEvents(section, jobId, events);
     }
 
     private boolean containsRecentDesktopTakeoverWarning(ChatSession session, String jobId) {
@@ -5456,85 +5107,6 @@ public class MainActivity extends Activity {
         return new ArrayList<>(Arrays.asList(messages));
     }
 
-    private static final class SectionState {
-        final List<ChatSession> sessions;
-        final List<String> availableSkills;
-        final Map<String, ExtensionRef> availableExtensionRefs = new LinkedHashMap<>();
-        final List<String> availableModels = new ArrayList<>();
-        final List<String> availableAssistants = new ArrayList<>();
-        final Map<String, Integer> assistantOrders = new HashMap<>();
-        final Set<String> favoriteModels = new LinkedHashSet<>();
-        final Set<String> favoriteAssistants = new LinkedHashSet<>();
-        final Set<String> favoriteExtensions = new LinkedHashSet<>();
-        final Set<String> selectedSkills = new LinkedHashSet<>();
-        final Set<String> pinnedSessionIds = new LinkedHashSet<>();
-        final Set<String> deletedSessionIds = new LinkedHashSet<>();
-        final Map<String, String> renamedSessionTitles = new HashMap<>();
-        int selectedIndex;
-        boolean fullPermission;
-        String selectedModel = "gpt-5.4";
-        String selectedReasoning = "中";
-        String contextWindow = "自动";
-        String imageSize = "1024x1024";
-        String imageQuality = "medium";
-        String selectedSessionId = "";
-
-        SectionState(List<ChatSession> sessions, List<String> availableSkills) {
-            this.sessions = new ArrayList<>(sessions);
-            this.availableSkills = new ArrayList<>(availableSkills);
-            for (String skill : this.availableSkills) {
-                availableExtensionRefs.put(skill, new ExtensionRef(skill, inferExtensionKind(skill), skill, "", "shared"));
-            }
-            for (ChatSession session : this.sessions) {
-                if (!session.assistantLabel.isEmpty() && !availableAssistants.contains(session.assistantLabel)) {
-                    availableAssistants.add(session.assistantLabel);
-                    assistantOrders.put(session.assistantLabel, 100);
-                }
-            }
-        }
-
-        ChatSession current() {
-            if (sessions.isEmpty()) {
-                return new ChatSession("empty", "空会话", "", "", new ArrayList<>());
-            }
-            if (!selectedSessionId.isEmpty()) {
-                for (int i = 0; i < sessions.size(); i++) {
-                    if (selectedSessionId.equals(sessions.get(i).id)) {
-                        selectedIndex = i;
-                        break;
-                    }
-                }
-            }
-            selectedIndex = Math.max(0, Math.min(selectedIndex, sessions.size() - 1));
-            ChatSession selected = sessions.get(selectedIndex);
-            selectedSessionId = selected.id;
-            return selected;
-        }
-    }
-
-    private static String inferExtensionKind(String value) {
-        String clean = value == null ? "" : value.toLowerCase(Locale.ROOT);
-        if (clean.startsWith("/") || clean.startsWith("command:") || clean.startsWith("cmd:")) return "command";
-        if (clean.startsWith("plugin:") || clean.contains("plugin")) return "plugin";
-        return "skill";
-    }
-
-    private static final class ExtensionRef {
-        final String id;
-        final String kind;
-        final String name;
-        final String description;
-        final String client;
-
-        ExtensionRef(String id, String kind, String name, String description, String client) {
-            this.id = id == null ? "" : id;
-            this.kind = kind == null || kind.trim().isEmpty() ? "skill" : kind.trim().toLowerCase(Locale.ROOT);
-            this.name = name == null ? this.id : name;
-            this.description = description == null ? "" : description;
-            this.client = client == null ? "" : client;
-        }
-    }
-
     private interface ChoiceHandler {
         void onChoice(String value);
     }
@@ -5569,91 +5141,4 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static final class ChatSession {
-        final String id;
-        String title;
-        String assistantLabel;
-        final String projectLabel;
-        final List<ChatMessage> messages;
-        String status = "";
-
-        ChatSession(String id, String title, String assistantLabel, String projectLabel, List<ChatMessage> messages) {
-            this.id = id;
-            this.title = title;
-            this.assistantLabel = assistantLabel;
-            this.projectLabel = projectLabel;
-            this.messages = messages;
-        }
-    }
-
-    private static final class ChatMessage {
-        final String role;
-        String text;
-        final long timestamp;
-        final boolean log;
-        String tokenText = "";
-
-        ChatMessage(String role, String text, long timestamp) {
-            this.role = role;
-            this.text = text;
-            this.timestamp = timestamp;
-            this.log = false;
-        }
-
-        private ChatMessage(String role, String text, long timestamp, boolean log) {
-            this.role = role;
-            this.text = text;
-            this.timestamp = timestamp;
-            this.log = log;
-        }
-
-        static ChatMessage log(String text, long timestamp) {
-            return new ChatMessage("assistant", text, timestamp, true);
-        }
-    }
-
-    private static final class DesktopTimelineRow {
-        final ChatMessage message;
-        final String stableKey;
-        final long timestamp;
-        final int priority;
-        final int index;
-        final String jobId;
-
-        DesktopTimelineRow(ChatMessage message, String stableKey, long timestamp, int priority, int index) {
-            this(message, stableKey, timestamp, priority, index, "");
-        }
-
-        DesktopTimelineRow(ChatMessage message, String stableKey, long timestamp, int priority, int index, String jobId) {
-            this.message = message;
-            this.stableKey = stableKey == null ? "" : stableKey.trim();
-            this.timestamp = timestamp;
-            this.priority = priority;
-            this.index = index;
-            this.jobId = jobId == null ? "" : jobId.trim();
-        }
-
-        boolean duplicates(DesktopTimelineRow other) {
-            if (other == null || message == null || other.message == null) return false;
-            if (message.log != other.message.log) return false;
-            if (!message.role.equals(other.message.role)) return false;
-            String text = normalizedText(message.text);
-            String otherText = normalizedText(other.message.text);
-            if (text.isEmpty() || !text.equals(otherText)) return false;
-            return Math.abs(timestamp - other.timestamp) <= duplicateWindowMs(other);
-        }
-
-        private long duplicateWindowMs(DesktopTimelineRow other) {
-            if (message != null && !message.log && "user".equals(message.role)
-                    && (stableKey.contains(":prompt") || (other != null && other.stableKey.contains(":prompt")))) {
-                return 300000L;
-            }
-            return 3000L;
-        }
-
-        private String normalizedText(String value) {
-            String text = value == null ? "" : value.trim().replaceAll("\\s+", " ");
-            return text.length() > 240 ? text.substring(0, 240) : text;
-        }
-    }
 }

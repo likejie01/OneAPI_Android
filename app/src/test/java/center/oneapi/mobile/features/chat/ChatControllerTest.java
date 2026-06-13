@@ -57,6 +57,16 @@ public class ChatControllerTest {
     }
 
     @Test
+    public void extractTextFromPlainResponse_keepsPlainText() {
+        assertEquals("plain reply", ChatController.extractTextFromPlainResponse("plain reply"));
+    }
+
+    @Test
+    public void extractTextFromPlainResponse_readsJsonChoice() {
+        assertEquals("json reply", ChatController.extractTextFromPlainResponse("{\"choices\":[{\"message\":{\"content\":\"json reply\"}}]}"));
+    }
+
+    @Test
     public void usage_formatsPromptCompletionAndTotalTokens() throws Exception {
         JSONObject usageJson = new JSONObject("{\"prompt_tokens\":1719,\"completion_tokens\":1912,\"total_tokens\":3631,\"prompt_tokens_details\":{\"cached_tokens\":128}}");
         ChatController.Usage usage = ChatController.Usage.from(usageJson);
@@ -78,5 +88,23 @@ public class ChatControllerTest {
         assertEquals("上一轮问题", messages.getJSONObject(1).getString("content"));
         assertEquals("上一轮回答", messages.getJSONObject(2).getString("content"));
         assertEquals("当前问题", messages.getJSONObject(3).getString("content"));
+    }
+
+    @Test
+    public void buildRequest_keepsMultimodalContentArray() throws Exception {
+        ChatController controller = new ChatController(null);
+        JSONArray content = new JSONArray()
+                .put(new JSONObject().put("type", "text").put("text", "请分析图片"))
+                .put(new JSONObject()
+                        .put("type", "image_url")
+                        .put("image_url", new JSONObject().put("url", "data:image/jpeg;base64,abc")));
+
+        JSONObject request = controller.buildRequest("gpt-test", "system", new JSONArray(), content, "off");
+        JSONArray messages = request.getJSONArray("messages");
+        Object userContent = messages.getJSONObject(1).get("content");
+
+        assertEquals(JSONArray.class, userContent.getClass());
+        assertEquals("image_url", ((JSONArray) userContent).getJSONObject(1).getString("type"));
+        assertEquals("data:image/jpeg;base64,abc", ((JSONArray) userContent).getJSONObject(1).getJSONObject("image_url").getString("url"));
     }
 }
