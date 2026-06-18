@@ -222,16 +222,39 @@ public final class DesktopTimelineMapper {
 
     private static boolean isLowValueLog(AppSection section, String title, String type, String text) {
         if (section != AppSection.CODEX && section != AppSection.CLAUDE) return false;
-        String value = ((title == null ? "" : title) + " " + (type == null ? "" : type) + " " + (text == null ? "" : text)).toLowerCase(Locale.ROOT);
+        String cleanTitle = title == null ? "" : title.trim().toLowerCase(Locale.ROOT);
+        String cleanType = type == null ? "" : type.trim().toLowerCase(Locale.ROOT);
+        String cleanText = text == null ? "" : text.trim().toLowerCase(Locale.ROOT);
+        if ("project".equals(cleanType) || "project".equals(cleanTitle)
+                || "claimed".equals(cleanType) || "claimed".equals(cleanTitle)
+                || "running".equals(cleanType) || "running".equals(cleanTitle)) {
+            return true;
+        }
+        String value = cleanTitle + " " + cleanType + " " + cleanText;
         return value.contains("输出已结束")
                 || value.contains("已完成本次回复")
                 || value.contains("正在整理会话记录")
                 || value.contains("整理会话记录")
+                || value.contains("已接管当前任务")
+                || value.contains("已开始处理当前任务")
+                || value.contains("正在等待执行输出")
+                || value.contains("正在分析项目并准备执行")
+                || value.contains("desktop client has claimed")
+                || value.contains("client has claimed")
+                || value.contains("started processing")
+                || value.contains("waiting for execution output")
+                || value.contains("analyzing project")
                 || value.contains("output has ended")
                 || value.contains("finished this reply")
                 || value.contains("completed response")
                 || value.contains("output ended")
                 || value.contains("finish_reason")
+                || value.contains("thread.started")
+                || value.contains("turn.started")
+                || value.trim().equals("claimed")
+                || value.trim().equals("running")
+                || value.trim().equals("started")
+                || value.trim().equals("project")
                 || value.trim().equals("complete")
                 || value.trim().equals("done");
     }

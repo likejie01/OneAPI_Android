@@ -8,8 +8,6 @@ import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.ContentValues;
 import android.database.Cursor;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -17,9 +15,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Shader;
 import android.net.Uri;
-import android.os.Handler;
 import android.os.Build;
-import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
@@ -49,7 +45,9 @@ import java.util.Locale;
 import java.util.Set;
 
 import center.oneapi.mobile.R;
+import center.oneapi.mobile.ui.AttachmentThumbnailLoader;
 import center.oneapi.mobile.ui.UiKit;
+import center.oneapi.mobile.ui.composer.FlowTagLayout;
 import center.oneapi.mobile.ui.markdown.MarkdownViews;
 
 public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, ConversationAdapter.Holder> {
@@ -329,9 +327,12 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         imageLp.setMargins(0, 0, UiKit.dp(context, 4), UiKit.dp(context, 4));
         wrap.addView(image, imageLp);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(outer, outer);
-        lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
+        lp.setMargins(0, 0, UiKit.dp(context, 8), UiKit.dp(context, 8));
         wrap.setLayoutParams(lp);
-        loadImage(source, image);
+        TextView failed = failedAttachmentView(source);
+        failed.setVisibility(View.GONE);
+        wrap.addView(failed, new FrameLayout.LayoutParams(inner, inner, android.view.Gravity.LEFT | android.view.Gravity.TOP));
+        loadImage(source, image, inner, inner, loaded -> failed.setVisibility(loaded ? View.GONE : View.VISIBLE));
         return wrap;
     }
 
@@ -387,7 +388,7 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(imageW, imageH);
         lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
         wrap.setLayoutParams(lp);
-        loadImage(source, image);
+        loadImage(source, image, imageW, imageH);
         return wrap;
     }
 
@@ -410,12 +411,15 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
 
     private void renderUserContent(LinearLayout bubble, String source) {
         StringBuilder text = new StringBuilder();
+        FlowTagLayout attachments = null;
         for (String line : (source == null ? "" : source).split("\\n")) {
             String clean = line.trim();
             if (isImageSource(clean)) {
-                bubble.addView(image(clean, false));
+                attachments = ensureAttachmentGrid(bubble, attachments);
+                attachments.addView(image(clean, false));
             } else if (isAttachmentSource(clean)) {
-                bubble.addView(attachment(clean));
+                attachments = ensureAttachmentGrid(bubble, attachments);
+                attachments.addView(attachment(clean));
             } else if (!line.isEmpty()) {
                 if (text.length() > 0) text.append('\n');
                 text.append(line);
@@ -428,54 +432,20 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         }
     }
 
-    private void loadImage(String source, ImageView target) {
-        String value = source == null ? "" : source.trim();
-        target.setTag(value);
-        if (value.startsWith("data:image/")) {
-            int comma = value.indexOf(',');
-            if (comma > 0) {
-                try {
-                    byte[] bytes = Base64.decode(value.substring(comma + 1), Base64.DEFAULT);
-                    Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                    target.setImageBitmap(bitmap);
-                    return;
-                } catch (Exception ignored) {
-                }
-            }
-        }
-        if (value.startsWith("content:") || value.startsWith("file:")) {
-            loadLocalImage(value, target);
-            return;
-        }
-        if (value.startsWith("http://") || value.startsWith("https://")) {
-            new Thread(() -> {
-                try (InputStream input = new URL(value).openStream()) {
-                    Bitmap bitmap = BitmapFactory.decodeStream(input);
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        if (value.equals(target.getTag())) {
-                            target.setImageBitmap(bitmap);
-                        }
-                    });
-                } catch (Exception ignored) {
-                }
-            }).start();
-        }
+    private FlowTagLayout ensureAttachmentGrid(LinearLayout bubble, FlowTagLayout existing) {
+        if (existing != null) return existing;
+        FlowTagLayout grid = new FlowTagLayout(context);
+        grid.setPadding(0, 0, 0, UiKit.dp(context, 2));
+        bubble.addView(grid, new LinearLayout.LayoutParams(-1, -2));
+        return grid;
     }
 
-    private void loadLocalImage(String value, ImageView target) {
-        new Thread(() -> {
-            Bitmap bitmap = null;
-            try (InputStream input = context.getContentResolver().openInputStream(Uri.parse(value))) {
-                if (input != null) bitmap = BitmapFactory.decodeStream(input);
-            } catch (Exception ignored) {
-            }
-            Bitmap decoded = bitmap;
-            new Handler(Looper.getMainLooper()).post(() -> {
-                if (value.equals(target.getTag()) && decoded != null) {
-                    target.setImageBitmap(decoded);
-                }
-            });
-        }).start();
+    private void loadImage(String source, ImageView target, int widthPx, int heightPx) {
+        loadImage(source, target, widthPx, heightPx, null);
+    }
+
+    private void loadImage(String source, ImageView target, int widthPx, int heightPx, AttachmentThumbnailLoader.Callback callback) {
+        AttachmentThumbnailLoader.load(context, source, target, widthPx, heightPx, callback);
     }
 
     private boolean isImageSource(String value) {
@@ -514,16 +484,30 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
 
     private View attachment(String source) {
         if (isImageSource(source)) return image(source, false);
-        TextView file = UiKit.text(context, extensionLabel(source), UiKit.MUTED, 11);
+        boolean missing = isAttachmentMissing(source);
+        TextView file = UiKit.text(context, attachmentLabel(source, missing), UiKit.MUTED, 11);
         file.setGravity(android.view.Gravity.CENTER);
-        file.setSingleLine(true);
-        file.setTextColor(fileColor(source));
-        file.setBackground(UiKit.round(UiKit.resolve(context, fileBackground(source)), UiKit.dp(context, 12), UiKit.line(context)));
+        file.setMaxLines(2);
+        file.setTextColor(missing ? Color.rgb(185, 54, 72) : fileColor(source));
+        file.setBackground(UiKit.round(missing ? missingBackground() : UiKit.resolve(context, fileBackground(source)), UiKit.dp(context, 12), missing ? Color.rgb(230, 133, 142) : UiKit.line(context)));
         file.setOnClickListener(v -> openAttachment(source));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiKit.dp(context, 56), UiKit.dp(context, 56));
-        lp.setMargins(0, 0, 0, UiKit.dp(context, 6));
+        lp.setMargins(0, 0, UiKit.dp(context, 8), UiKit.dp(context, 8));
         file.setLayoutParams(lp);
         return file;
+    }
+
+    private TextView failedAttachmentView(String source) {
+        TextView failed = UiKit.text(context, attachmentLabel(source, true), Color.rgb(185, 54, 72), 10);
+        failed.setGravity(android.view.Gravity.CENTER);
+        failed.setMaxLines(2);
+        failed.setBackground(UiKit.round(missingBackground(), UiKit.dp(context, 14), Color.rgb(230, 133, 142)));
+        return failed;
+    }
+
+    private String attachmentLabel(String source, boolean missing) {
+        String ext = extensionLabel(source);
+        return missing ? "失效\n" + ext : ext;
     }
 
     private String extensionLabel(String source) {
@@ -574,8 +558,33 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
         return Color.rgb(248, 250, 252);
     }
 
+    private int missingBackground() {
+        return UiKit.darkTheme(context) ? Color.rgb(58, 36, 42) : Color.rgb(255, 242, 244);
+    }
+
+    private boolean isAttachmentMissing(String source) {
+        String value = source == null ? "" : source.trim();
+        if (value.isEmpty() || value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://")) return false;
+        try {
+            Uri uri = Uri.parse(value);
+            if ("file".equalsIgnoreCase(uri.getScheme())) {
+                String path = uri.getPath();
+                return path == null || !new java.io.File(path).canRead();
+            }
+            if ("content".equalsIgnoreCase(uri.getScheme())) {
+                try (InputStream input = context.getContentResolver().openInputStream(uri)) {
+                    return input == null;
+                }
+            }
+        } catch (Exception ignored) {
+            return true;
+        }
+        return false;
+    }
+
     private void openAttachment(String source) {
         try {
+            if (isAttachmentMissing(source)) return;
             Intent intent = new Intent(Intent.ACTION_VIEW);
             Uri uri = Uri.parse(source.trim());
             intent.setData(uri);
@@ -596,7 +605,8 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
             panel.setBackground(UiKit.glass(context, UiKit.dp(context, 18), UiKit.line(context)));
             ImageView image = new ImageView(context);
             image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            loadImage(source, image);
+            int[] preview = previewImageSize(source);
+            loadImage(source, image, preview[0], preview[1]);
             LinearLayout tools = UiKit.horizontal(context);
             tools.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
             tools.setPadding(0, 0, 0, UiKit.dp(context, 6));
@@ -679,25 +689,23 @@ public class ConversationAdapter extends ListAdapter<ConversationDisplayItem, Co
     }
 
     private int[] imageSize(String source) {
-        String value = source == null ? "" : source.trim();
-        try {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inJustDecodeBounds = true;
-            if (value.startsWith("data:image/")) {
-                int comma = value.indexOf(',');
-                if (comma > 0) {
-                    byte[] bytes = Base64.decode(value.substring(comma + 1), Base64.DEFAULT);
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
-                }
-            } else if (value.startsWith("content:") || value.startsWith("file:")) {
-                try (InputStream input = context.getContentResolver().openInputStream(Uri.parse(value))) {
-                    BitmapFactory.decodeStream(input, null, options);
-                }
-            }
-            return new int[]{options.outWidth, options.outHeight};
-        } catch (Exception ignored) {
-            return new int[]{0, 0};
+        return AttachmentThumbnailLoader.imageSize(context, source);
+    }
+
+    private int[] previewImageSize(String source) {
+        int screenW = context.getResources().getDisplayMetrics().widthPixels;
+        int screenH = context.getResources().getDisplayMetrics().heightPixels;
+        int maxW = Math.max(UiKit.dp(context, 260), screenW - UiKit.dp(context, 32));
+        int maxH = Math.max(UiKit.dp(context, 260), (int) (screenH * 0.72f));
+        int[] size = imageSize(source);
+        float ratio = size[0] > 0 && size[1] > 0 ? size[0] / (float) size[1] : 1f;
+        int imageW = maxW;
+        int imageH = Math.max(UiKit.dp(context, 180), (int) (imageW / Math.max(0.3f, ratio)));
+        if (imageH > maxH - UiKit.dp(context, 58)) {
+            imageH = maxH - UiKit.dp(context, 58);
+            imageW = Math.min(maxW, Math.max(UiKit.dp(context, 220), (int) (imageH * ratio)));
         }
+        return new int[]{imageW, imageH};
     }
 
     private void shareImageSource(String source) {

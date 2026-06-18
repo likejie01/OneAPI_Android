@@ -39,3 +39,10 @@ output.json
 # Keystore files
 *.jks
 *.keystore
+
+# Local secrets and temporary backups
+*.env
+ASR.env
+Backup-*.txt
+*.bak
+*.tmp

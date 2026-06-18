@@ -44,4 +44,20 @@ public class DesktopTimelineMapperTest {
         assertEquals(1, messages.size());
         assertEquals("正在分析", messages.get(0).text);
     }
+
+    @Test
+    public void fromJobEvents_filtersLowValueDesktopLifecycleLogs() throws Exception {
+        JSONArray events = new JSONArray()
+                .put(new JSONObject().put("type", "project").put("text", "D:\\WorkSpace\\codex").put("createdAt", 1000))
+                .put(new JSONObject().put("type", "running").put("text", "Codex 已开始处理当前任务。").put("createdAt", 1001))
+                .put(new JSONObject().put("type", "prepare").put("text", "thread.started").put("createdAt", 1002))
+                .put(new JSONObject().put("type", "prepare").put("text", "turn.started").put("createdAt", 1003))
+                .put(new JSONObject().put("type", "shell_command").put("text", "ls").put("createdAt", 1004));
+
+        List<ChatMessage> messages = DesktopTimelineMapper.fromJobEvents(AppSection.CODEX, "job-1", events);
+
+        assertEquals(1, messages.size());
+        assertTrue(messages.get(0).log);
+        assertTrue(messages.get(0).text.startsWith("正在执行 shell_command"));
+    }
 }

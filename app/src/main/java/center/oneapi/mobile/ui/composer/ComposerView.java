@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import center.oneapi.mobile.R;
+import center.oneapi.mobile.ui.AttachmentThumbnailLoader;
 import center.oneapi.mobile.ui.UiKit;
 
 public class ComposerView extends LinearLayout {
@@ -310,9 +311,10 @@ public class ComposerView extends LinearLayout {
         String type = getContext().getContentResolver().getType(uri);
         if (type != null && type.startsWith("image/")) {
             ImageView image = new ImageView(getContext());
-            image.setImageURI(uri);
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
             image.setBackground(UiKit.round(UiKit.resolve(getContext(), Color.WHITE), UiKit.dp(getContext(), 12), UiKit.line(getContext())));
+            int side = UiKit.dp(getContext(), 52);
+            AttachmentThumbnailLoader.load(getContext(), uri.toString(), image, side, side);
             return image;
         }
         TextView file = UiKit.text(getContext(), extensionLabel(uri), UiKit.MUTED, 11);

@@ -167,6 +167,8 @@ public class MainActivity extends Activity {
     private final Map<AppSection, String> rememberedExtensionKind = new EnumMap<>(AppSection.class);
     private final Map<AppSection, Long> desktopSessionRefreshedAt = new EnumMap<>(AppSection.class);
     private final Set<String> desktopSessionRefreshInFlight = new HashSet<>();
+    private long desktopBindingCheckedAt;
+    private boolean desktopBindingCheckInFlight;
     private boolean keyboardOpen;
     private boolean loginDialogShowing;
     private int lastKeyboardInset = -1;
@@ -232,6 +234,7 @@ public class MainActivity extends Activity {
         switchSection(AppSection.CHAT);
         refreshModels();
         refreshAssistants();
+        validateBoundDesktopDevice(false);
         mainHandler.postDelayed(desktopPoll, 8000);
         if (!prefs.isLoggedIn()) {
             mainHandler.postDelayed(() -> showLoginDialog(false), 300);
@@ -2033,6 +2036,48 @@ public class MainActivity extends Activity {
         }, "设备绑定");
     }
 
+    private void validateBoundDesktopDevice(boolean force) {
+        String bound = prefs.boundDeviceId();
+        if (bound == null || bound.trim().isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (!force && desktopBindingCheckedAt > 0L && now - desktopBindingCheckedAt < 60_000L) return;
+        synchronized (this) {
+            if (desktopBindingCheckInFlight) return;
+            desktopBindingCheckInFlight = true;
+        }
+        network.execute(() -> {
+            try {
+                JSONArray devices = desktopRepository.devices();
+                desktopBindingCheckedAt = System.currentTimeMillis();
+                if (findDevice(devices, bound) == null) {
+                    mainHandler.post(() -> clearInvalidDesktopBinding(bound, "当前绑定的桌面客户端已不存在或不在线，请重新绑定。"));
+                }
+            } catch (Exception error) {
+                String detail = message(error);
+                appendDesktopSyncNotice(AppSection.CODEX, "设备绑定校验失败：" + detail);
+                appendDesktopSyncNotice(AppSection.CLAUDE, "设备绑定校验失败：" + detail);
+            } finally {
+                synchronized (MainActivity.this) {
+                    desktopBindingCheckInFlight = false;
+                }
+            }
+        });
+    }
+
+    private void clearInvalidDesktopBinding(String expectedDeviceId, String reason) {
+        String current = prefs.boundDeviceId();
+        if (expectedDeviceId != null && !expectedDeviceId.equals(current)) return;
+        prefs.setBoundDeviceId("");
+        desktopSessionRefreshedAt.clear();
+        appendDesktopSyncNotice(AppSection.CODEX, reason);
+        appendDesktopSyncNotice(AppSection.CLAUDE, reason);
+        updateDesktopWakeState();
+        if (currentSection.isDesktop()) {
+            renderCurrent(false);
+        }
+        Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+    }
+
     private void fetchInto(LinearLayout panel, JsonRequest request, String title) {
         JSONObject cached = panelDataCache.get(title);
         Long cachedAt = panelDataCacheAt.get(title);
@@ -2705,6 +2750,13 @@ public class MainActivity extends Activity {
         String bound = prefs.boundDeviceId();
         if (!bound.isEmpty()) {
             JSONObject boundDevice = findDevice(devices, bound);
+            if (devices != null && devices.length() > 0 && boundDevice == null) {
+                clearInvalidDesktopBinding(bound, "当前绑定的桌面客户端已失效，请重新绑定。");
+                bound = "";
+            }
+        }
+        if (!bound.isEmpty()) {
+            JSONObject boundDevice = findDevice(devices, bound);
             String name = boundDevice == null ? "当前绑定设备" : boundDevice.optString("name", boundDevice.optString("platform", "桌面客户端"));
             String identifier = boundDevice == null ? bound : first(boundDevice, "identifier", "deviceId", "id", "fingerprint");
             LinearLayout current = deviceBindRow(name, identifier, true);
@@ -3299,6 +3351,11 @@ public class MainActivity extends Activity {
     private void refreshDesktopSessions(AppSection section, boolean force, Runnable afterRefresh) {
         SectionState targetState = states.get(section);
         if (targetState == null || !section.isDesktop()) return;
+        if (prefs.boundDeviceId().isEmpty()) {
+            if (afterRefresh != null) mainHandler.post(afterRefresh);
+            return;
+        }
+        validateBoundDesktopDevice(force);
         if (!force && shouldSkipDesktopSessionRefresh(section)) {
             if (afterRefresh != null) mainHandler.post(afterRefresh);
             return;
@@ -3310,9 +3367,10 @@ public class MainActivity extends Activity {
             }
             desktopSessionRefreshInFlight.add(section.id);
         }
+        String requestedDeviceId = prefs.boundDeviceId();
         network.execute(() -> {
             try {
-                JSONArray rows = desktopRepository.sessions(prefs.boundDeviceId());
+                JSONArray rows = desktopRepository.sessions(requestedDeviceId);
                 List<ChatSession> parsed = new ArrayList<>();
                 String syncedModel = "";
                 long syncedModelAt = 0L;
@@ -3331,6 +3389,10 @@ public class MainActivity extends Activity {
                 }
                 String finalSyncedModel = syncedModel;
                 mainHandler.post(() -> {
+                    if (!requestedDeviceId.equals(prefs.boundDeviceId())) {
+                        if (afterRefresh != null) afterRefresh.run();
+                        return;
+                    }
                     if (!finalSyncedModel.isEmpty()) {
                         applySelectedModel(section, finalSyncedModel, true);
                     }
@@ -3366,7 +3428,9 @@ public class MainActivity extends Activity {
                         afterRefresh.run();
                     }
                 });
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                String detail = message(error);
+                appendDesktopSyncNotice(section, "桌面会话同步失败：" + detail + "\n请确认客户端在线、已登录并保持绑定。");
                 if (afterRefresh != null) mainHandler.post(afterRefresh);
             } finally {
                 synchronized (desktopSessionRefreshInFlight) {
@@ -3396,6 +3460,30 @@ public class MainActivity extends Activity {
         if (deviceId == null || deviceId.trim().isEmpty()) return true;
         long last = desktopSessionRefreshedAt.getOrDefault(section, 0L);
         return last > 0L && System.currentTimeMillis() - last < DESKTOP_SESSION_REFRESH_MIN_INTERVAL_MS;
+    }
+
+    private void appendDesktopSyncNotice(AppSection section, String text) {
+        if (section == null || !section.isDesktop() || text == null || text.trim().isEmpty()) return;
+        mainHandler.post(() -> {
+            SectionState target = states.get(section);
+            if (target == null) return;
+            ChatSession session = target.current();
+            String clean = text.trim();
+            long now = System.currentTimeMillis();
+            for (int i = session.messages.size() - 1; i >= 0; i--) {
+                ChatMessage message = session.messages.get(i);
+                if (message == null || !message.log) continue;
+                if (message.text != null && message.text.trim().equals(clean) && now - message.timestamp < 120_000L) {
+                    return;
+                }
+            }
+            session.messages.add(ChatMessage.log(clean, now));
+            session.status = prefs.boundDeviceId().isEmpty() ? "disconnected" : session.status;
+            persistSession(section, session);
+            if (currentSection == section) {
+                renderCurrent(false);
+            }
+        });
     }
 
     private ChatSession desktopSessionFromJson(AppSection section, JSONObject item) {

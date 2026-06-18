@@ -19,8 +19,8 @@ android {
         applicationId 'center.oneapi.mobile'
         minSdk 26
         targetSdk 35
-        versionCode 22
-        versionName '2.0.2-native'
+        versionCode 23
+        versionName '2.0.3-native'
     }
 
     splits {
