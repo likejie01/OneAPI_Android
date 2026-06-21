@@ -118,6 +118,9 @@ public final class DesktopTimelineMapper {
                 String logTitle = logTitle(section, title, type, command, text);
                 StringBuilder body = new StringBuilder();
                 body.append(logTitle);
+                if (!title.isEmpty() && !title.equals(logTitle)) {
+                    body.append("\n\n").append(title);
+                }
                 if (!command.isEmpty()) body.append("\n\n```bash\n").append(command).append("\n```");
                 String path = first(item, "path", "file", "filePath", "cwd", "workspace");
                 if (!path.isEmpty()) body.append("\n\n文件：`").append(path).append("`");

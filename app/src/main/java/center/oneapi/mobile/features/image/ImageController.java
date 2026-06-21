@@ -16,6 +16,8 @@ import center.oneapi.mobile.features.chat.ChatController;
 
 public class ImageController {
     private static final int IMAGE_READ_TIMEOUT_MS = 10 * 60 * 1000;
+    public static final String IMAGE_GENERATIONS_PATH = "/v1/images/generations";
+    public static final String IMAGE_EDITS_PATH = "/v1/images/edits";
     private final ApiClient api;
 
     public ImageController(ApiClient api) {
@@ -41,7 +43,7 @@ public class ImageController {
     }
 
     public ImageResult generateResult(String prompt, String size, String quality, boolean randomSeed) throws Exception {
-        return extractResult(api.post("/pg/images/generations", buildGenerationRequest(prompt, size, quality, randomSeed), IMAGE_READ_TIMEOUT_MS));
+        return extractResult(api.postWithBearer(IMAGE_GENERATIONS_PATH, buildGenerationRequest(prompt, size, quality, randomSeed), api.appApiKey(), IMAGE_READ_TIMEOUT_MS));
     }
 
     public String edit(Context context, Uri imageUri, String prompt, String size, String quality) throws Exception {
@@ -50,15 +52,17 @@ public class ImageController {
 
     public ImageResult editResult(Context context, Uri imageUri, String prompt, String size, String quality) throws Exception {
         String boundary = "----OneApiAndroid" + System.currentTimeMillis();
-        HttpURLConnection connection = (HttpURLConnection) new URL(ApiClient.buildUrl(api.server(), "/v1/images/edits")).openConnection();
+        HttpURLConnection connection = (HttpURLConnection) new URL(ApiClient.buildUrl(api.server(), IMAGE_EDITS_PATH)).openConnection();
         connection.setConnectTimeout(15000);
         connection.setReadTimeout(IMAGE_READ_TIMEOUT_MS);
         connection.setRequestMethod("POST");
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        if (!api.cookie().isEmpty()) connection.setRequestProperty("Cookie", api.cookie());
-        if (!api.userId().isEmpty()) connection.setRequestProperty("New-Api-User", api.userId());
-        if (!api.token().isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + api.token());
+        String relayKey = api.appApiKey();
+        if (relayKey.isEmpty()) {
+            throw new java.io.IOException("App 专用 Key 未初始化，无法调用图片编辑接口");
+        }
+        connection.setRequestProperty("Authorization", "Bearer " + relayKey);
         connection.setDoOutput(true);
         String mime = context.getContentResolver().getType(imageUri);
         if (mime == null || mime.trim().isEmpty()) mime = "image/png";

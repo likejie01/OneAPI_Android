@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import center.oneapi.mobile.core.ApiClient;
 
 public class ChatController {
+    public static final String CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
     private final ApiClient api;
 
     public ChatController(ApiClient api) {
@@ -44,7 +45,7 @@ public class ChatController {
     }
 
     public String send(String model, String systemPrompt, JSONArray context, Object userContent, String reasoningEffort) throws Exception {
-        JSONObject response = api.post("/pg/chat/completions", buildRequest(model, systemPrompt, context, userContent, reasoningEffort));
+        JSONObject response = api.postWithBearer(CHAT_COMPLETIONS_PATH, buildRequest(model, systemPrompt, context, userContent, reasoningEffort), api.appApiKey(), 30000);
         return extractText(response);
     }
 
@@ -61,7 +62,7 @@ public class ChatController {
         StringBuilder pendingSseData = new StringBuilder();
         StringBuilder plainResponse = new StringBuilder();
         boolean[] sawSse = new boolean[]{false};
-        api.postStream("/pg/chat/completions", body, line -> {
+        api.postStreamWithBearer(CHAT_COMPLETIONS_PATH, body, line -> {
             String clean = line == null ? "" : line.trim();
             if (clean.isEmpty()) {
                 if (pendingSseData.length() > 0) {
@@ -85,7 +86,7 @@ public class ChatController {
                 pendingSseData.setLength(0);
                 applyStreamPayload(payload, reasoning, answer, handler);
             }
-        });
+        }, api.appApiKey());
         if (pendingSseData.length() > 0) {
             StreamPayload payload = parseStreamPayload(pendingSseData.toString());
             if (payload != null) {

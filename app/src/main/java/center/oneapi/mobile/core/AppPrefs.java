@@ -32,6 +32,14 @@ public class AppPrefs {
         prefs.edit().putString("token", token == null ? "" : token.trim()).apply();
     }
 
+    public String appApiKey() {
+        return prefs.getString("app_api_key", "");
+    }
+
+    public void setAppApiKey(String key) {
+        prefs.edit().putString("app_api_key", key == null ? "" : key.trim()).apply();
+    }
+
     public String cookie() {
         return prefs.getString("cookie", "");
     }

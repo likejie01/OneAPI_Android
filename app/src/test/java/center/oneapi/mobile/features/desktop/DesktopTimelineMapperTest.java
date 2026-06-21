@@ -60,4 +60,22 @@ public class DesktopTimelineMapperTest {
         assertTrue(messages.get(0).log);
         assertTrue(messages.get(0).text.startsWith("正在执行 shell_command"));
     }
+
+    @Test
+    public void fromJobEvents_keepsExecutionLogsAndAssistantDeltas() throws Exception {
+        JSONArray events = new JSONArray()
+                .put(new JSONObject().put("type", "message").put("role", "user").put("text", "修复同步").put("createdAt", 1000))
+                .put(new JSONObject().put("type", "log").put("title", "读取文件").put("body", "rg mobile").put("createdAt", 1001))
+                .put(new JSONObject().put("type", "message_delta").put("role", "assistant").put("text", "已完成").put("createdAt", 1002));
+
+        List<ChatMessage> messages = DesktopTimelineMapper.fromJobEvents(AppSection.CODEX, "job-2", events);
+
+        assertEquals(3, messages.size());
+        assertEquals("user", messages.get(0).role);
+        assertEquals("修复同步", messages.get(0).text);
+        assertTrue(messages.get(1).log);
+        assertTrue(messages.get(1).text.contains("读取文件"));
+        assertEquals("assistant", messages.get(2).role);
+        assertEquals("已完成", messages.get(2).text);
+    }
 }

@@ -19,6 +19,9 @@ public class ModelCatalogTest {
                 .put(new JSONObject().put("model_name", "deepseek-v3"))
                 .put(new JSONObject().put("model_name", "mimo-v2.5"))
                 .put(new JSONObject().put("model_name", "mimo-v2.4"))
+                .put(new JSONObject().put("model_name", "xiaomimimo-v2.5-pro"))
+                .put(new JSONObject().put("model_name", "xiaomi-mimo-v2.5"))
+                .put(new JSONObject().put("model_name", "xiaomimimo-v2-pro"))
                 .put(new JSONObject().put("model_name", "claude-sonnet-4-6"))
                 .put(new JSONObject().put("model_name", "gpt-image-2"));
 
@@ -29,8 +32,13 @@ public class ModelCatalogTest {
         assertTrue(result.codex.contains("deepseek-v4-pro"));
         assertFalse(result.codex.contains("deepseek-v3"));
         assertTrue(result.codex.contains("mimo-v2.5"));
+        assertTrue(result.codex.contains("xiaomimimo-v2.5-pro"));
+        assertTrue(result.codex.contains("xiaomi-mimo-v2.5"));
+        assertFalse(result.codex.contains("xiaomimimo-v2-pro"));
         assertFalse(result.codex.contains("mimo-v2.4"));
         assertTrue(result.claude.contains("claude-sonnet-4-6"));
+        assertTrue(result.claude.contains("xiaomimimo-v2.5-pro"));
+        assertFalse(result.claude.contains("xiaomi-mimo-v2.5"));
     }
 
     @Test
@@ -39,5 +47,36 @@ public class ModelCatalogTest {
                 Arrays.asList("全部", "Claude", "OpenAI", "Mimo", "其他"),
                 ModelCatalog.providersFor(Arrays.asList("gpt-5.4", "claude-sonnet-4-6", "mimo-v2.5", "unknown"), true)
         );
+    }
+
+    @Test
+    public void fromPricingAndUserModels_appendsXiaomiMimoUserModelsMissingFromPricing() throws Exception {
+        JSONArray pricing = new JSONArray()
+                .put(new JSONObject().put("model_name", "gpt-5.4"));
+        JSONArray userModels = new JSONArray()
+                .put("xiaomimimo-v2.5-pro")
+                .put("xiaomi-mimo-v2.5")
+                .put("xiaomimimo-v2-pro");
+
+        ModelCatalog.Result result = ModelCatalog.fromPricingAndUserModels(pricing, userModels);
+
+        assertTrue(result.codex.contains("xiaomimimo-v2.5-pro"));
+        assertTrue(result.codex.contains("xiaomi-mimo-v2.5"));
+        assertFalse(result.codex.contains("xiaomimimo-v2-pro"));
+        assertTrue(result.claude.contains("xiaomimimo-v2.5-pro"));
+        assertFalse(result.claude.contains("xiaomi-mimo-v2.5"));
+    }
+
+    @Test
+    public void fromAvailableModels_excludesPricingOnlyModels() throws Exception {
+        JSONArray availableModels = new JSONArray()
+                .put("deepseek-v4-flash")
+                .put("mimo-v2.5");
+
+        ModelCatalog.Result result = ModelCatalog.fromAvailableModels(availableModels);
+
+        assertFalse(result.chat.contains("gpt-5.4"));
+        assertTrue(result.chat.contains("deepseek-v4-flash"));
+        assertTrue(result.chat.contains("mimo-v2.5"));
     }
 }

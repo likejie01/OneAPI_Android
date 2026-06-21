@@ -111,6 +111,7 @@ import center.oneapi.mobile.ui.conversation.ScrollDock;
 
 public class MainActivity extends Activity {
     private static final String TAG = "OneAPI-Mobile";
+    static final String APP_API_KEY_CREATE_PATH = "/api/token/";
     private static final int REQ_IMAGE = 42;
     private static final int REQ_RECORD_AUDIO = 43;
     private static final int REQ_CAMERA = 44;
@@ -155,7 +156,7 @@ public class MainActivity extends Activity {
                 maybeRefreshDesktopSessions(AppSection.CODEX, false);
                 maybeRefreshDesktopSessions(AppSection.CLAUDE, false);
             }
-            mainHandler.postDelayed(this, hasBusyDesktopSession() ? 2500 : 8000);
+            mainHandler.postDelayed(this, currentDesktopSessionBusy() ? 2500 : 8000);
         }
     };
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -235,6 +236,7 @@ public class MainActivity extends Activity {
         refreshModels();
         refreshAssistants();
         validateBoundDesktopDevice(false);
+        ensureAppApiKeyIfLoggedIn();
         mainHandler.postDelayed(desktopPoll, 8000);
         if (!prefs.isLoggedIn()) {
             mainHandler.postDelayed(() -> showLoginDialog(false), 300);
@@ -1338,19 +1340,36 @@ public class MainActivity extends Activity {
     }
 
     private void persistSessions(AppSection section, List<ChatSession> sessions) {
-        if (!section.isConversation() || sessions == null || sessions.isEmpty()) return;
+        if (!section.isConversation()) return;
         network.execute(() -> {
             try {
-                for (ChatSession session : sessions) {
-                    replaceStoredSession(section, session);
-                }
+                replaceStoredSessions(section, sessions == null ? new ArrayList<>() : sessions);
             } catch (Exception ignored) {
             }
         });
     }
 
+    private void replaceStoredSessions(AppSection section, List<ChatSession> sessions) {
+        List<ConversationSessionEntity> entities = new ArrayList<>();
+        List<List<ConversationMessageEntity>> messagesBySession = new ArrayList<>();
+        if (sessions != null) {
+            for (ChatSession session : sessions) {
+                if (session == null) continue;
+                StoredConversation stored = storedConversation(section, session);
+                entities.add(stored.session);
+                messagesBySession.add(stored.messages);
+            }
+        }
+        conversationRepository.replaceModeSessions(section.id, entities, messagesBySession);
+    }
+
     private void replaceStoredSession(AppSection section, ChatSession session) {
         if (section == null || session == null) return;
+        StoredConversation stored = storedConversation(section, session);
+        conversationRepository.replaceSessionMessages(stored.session, stored.messages);
+    }
+
+    private StoredConversation storedConversation(AppSection section, ChatSession session) {
         ConversationSessionEntity entity = new ConversationSessionEntity();
         entity.sessionId = session.id;
         entity.mode = section.id;
@@ -1376,7 +1395,17 @@ public class MainActivity extends Activity {
             message.rawJson = messageRawJson(source);
             messages.add(message);
         }
-        conversationRepository.replaceSessionMessages(entity, messages);
+        return new StoredConversation(entity, messages);
+    }
+
+    private static final class StoredConversation {
+        final ConversationSessionEntity session;
+        final List<ConversationMessageEntity> messages;
+
+        StoredConversation(ConversationSessionEntity session, List<ConversationMessageEntity> messages) {
+            this.session = session;
+            this.messages = messages;
+        }
     }
 
     private long newestMessageTimestamp(ChatSession session) {
@@ -1917,6 +1946,7 @@ public class MainActivity extends Activity {
                 if (prefs.token().isEmpty() && prefs.cookie().isEmpty()) {
                     throw new IllegalStateException("登录成功但未获取到有效登录凭据，请确认服务器已更新移动端登录接口。");
                 }
+                ensureAppApiKey(loginClient);
                 mainHandler.post(() -> {
                     Toast.makeText(this, "登录成功", Toast.LENGTH_SHORT).show();
                     if (onSuccess != null) onSuccess.run();
@@ -1927,6 +1957,211 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> Toast.makeText(this, "登录失败：" + message(error), Toast.LENGTH_LONG).show());
             }
         });
+    }
+
+    private void ensureAppApiKeyIfLoggedIn() {
+        if (!prefs.isLoggedIn()) return;
+        String current = prefs.appApiKey();
+        if (!current.isEmpty()) return;
+        network.execute(() -> ensureAppApiKey(apiClient));
+    }
+
+    private void ensureAppApiKey(ApiClient client) {
+        try {
+            ensureAppApiKeyOrThrow(client);
+        } catch (Exception error) {
+            Log.w(TAG, "ensureAppApiKey failed", error);
+            mainHandler.post(() -> Toast.makeText(this, "App 专用 Key 初始化失败，Chat/Image 可能无法调用模型：" + message(error), Toast.LENGTH_LONG).show());
+        }
+    }
+
+    private void ensureAppApiKeyOrThrow(ApiClient client) throws Exception {
+        String current = prefs.appApiKey();
+        if (!current.isEmpty()) {
+            KeyValidation validation = validateAppApiKey(client, current);
+            if (validation.status == KeyValidationStatus.INVALID) {
+                prefs.setAppApiKey("");
+            }
+        }
+        String key = fetchValidExistingAppApiKey(client, true);
+        if (key.isEmpty()) {
+            try {
+                client.post(APP_API_KEY_CREATE_PATH, buildAppApiKeyCreatePayload(prefs.appId()));
+            } catch (Exception error) {
+                throw new IllegalStateException("创建 App 专用 Key 失败（" + APP_API_KEY_CREATE_PATH + "）：" + message(error), error);
+            }
+            key = fetchValidExistingAppApiKey(client, false);
+        }
+        if (key.isEmpty()) {
+            throw new IllegalStateException("服务器未返回可用 App 专用 Key。已调用 /api/token 创建，但 /api/token 列表或 /api/token/:id/key 未返回可用密钥。");
+        }
+        prefs.setAppApiKey(key);
+    }
+
+    private KeyValidation validateAppApiKey(ApiClient client, String key) {
+        if (key == null || key.trim().isEmpty()) {
+            return new KeyValidation(KeyValidationStatus.INVALID, "empty key");
+        }
+        try {
+            client.request("GET", "/api/usage/token", null, 15000, key);
+            return new KeyValidation(KeyValidationStatus.VALID, "");
+        } catch (Exception usageError) {
+            String usageMessage = message(usageError);
+            if (isAppApiKeyInvalidMessage(usageMessage)) {
+                return new KeyValidation(KeyValidationStatus.INVALID, usageMessage);
+            }
+            try {
+                client.request("GET", "/v1/models", null, 15000, key);
+                return new KeyValidation(KeyValidationStatus.VALID, "");
+            } catch (Exception modelsError) {
+                String modelsMessage = message(modelsError);
+                if (isAppApiKeyInvalidMessage(modelsMessage)) {
+                    return new KeyValidation(KeyValidationStatus.INVALID, modelsMessage);
+                }
+                return new KeyValidation(KeyValidationStatus.UNKNOWN, usageMessage + "；/v1/models：" + modelsMessage);
+            }
+        }
+    }
+
+    private String fetchValidExistingAppApiKey(ApiClient client, boolean deleteInvalid) throws Exception {
+        List<Integer> ids = fetchAppApiKeyTokenIds(client);
+        for (int id : ids) {
+            String key = fetchTokenKey(client, id);
+            if (key.isEmpty()) {
+                continue;
+            }
+            KeyValidation validation = validateAppApiKey(client, key);
+            if (validation.status == KeyValidationStatus.VALID || validation.status == KeyValidationStatus.UNKNOWN) {
+                if (validation.status == KeyValidationStatus.UNKNOWN) {
+                    Log.w(TAG, "app api key validation inconclusive, keeping key " + id + ": " + validation.message);
+                }
+                return key;
+            }
+            if (deleteInvalid && validation.status == KeyValidationStatus.INVALID) {
+                try {
+                    client.delete("/api/token/" + id);
+                } catch (Exception error) {
+                    Log.w(TAG, "failed to delete invalid app api key " + id, error);
+                }
+            }
+        }
+        return "";
+    }
+
+    private List<Integer> fetchAppApiKeyTokenIds(ApiClient client) throws Exception {
+        String appKeyName = appApiKeyName(prefs.appId());
+        try {
+            JSONObject searchEnvelope = client.get("/api/token/search?keyword=" + ApiClient.enc(appKeyName) + "&p=1&size=100");
+            List<Integer> searchIds = appApiKeyMutableTokenIds(searchEnvelope);
+            if (!searchIds.isEmpty()) return searchIds;
+        } catch (Exception error) {
+            Log.w(TAG, "search app api key failed, fallback to token list", error);
+        }
+        JSONObject envelope;
+        try {
+            envelope = client.get("/api/token/?p=1&size=100");
+        } catch (Exception error) {
+            throw new IllegalStateException("读取 App 专用 Key 列表失败（/api/token）： " + message(error), error);
+        }
+        return appApiKeyMutableTokenIds(envelope);
+    }
+
+    private String fetchTokenKey(ApiClient client, int id) throws Exception {
+        if (id <= 0) return "";
+        JSONObject keyEnvelope;
+        try {
+            keyEnvelope = client.post("/api/token/" + id + "/key", new JSONObject());
+        } catch (Exception error) {
+            throw new IllegalStateException("读取 App 专用 Key 明文失败（/api/token/" + id + "/key）： " + message(error), error);
+        }
+        JSONObject data = keyEnvelope.optJSONObject("data");
+        String key = data == null ? "" : first(data, "key", "token");
+        if (key.isEmpty()) key = keyEnvelope.optString("key", "");
+        return key.trim();
+    }
+
+    static List<Integer> appApiKeyTokenIds(JSONArray tokens) {
+        return appApiKeyMutableTokenIds(tokens);
+    }
+
+    static List<Integer> appApiKeyMutableTokenIds(JSONObject envelope) {
+        return appApiKeyMutableTokenIds(tokenItems(envelope));
+    }
+
+    static List<Integer> appApiKeyMutableTokenIds(JSONArray tokens) {
+        List<Integer> ids = new ArrayList<>();
+        if (tokens == null) return ids;
+        for (int i = 0; i < tokens.length(); i++) {
+            JSONObject item = tokens.optJSONObject(i);
+            if (!canMutateAppApiKeyToken(item)) continue;
+            int id = item.optInt("id", 0);
+            if (id > 0) ids.add(id);
+        }
+        ids.sort((a, b) -> Integer.compare(b, a));
+        return ids;
+    }
+
+    private static JSONArray tokenItems(JSONObject envelope) {
+        Object data = envelope == null ? null : envelope.opt("data");
+        if (data instanceof JSONArray) return (JSONArray) data;
+        if (data instanceof JSONObject) {
+            JSONObject object = (JSONObject) data;
+            JSONArray items = object.optJSONArray("items");
+            if (items != null) return items;
+            JSONArray rows = object.optJSONArray("data");
+            if (rows != null) return rows;
+        }
+        return new JSONArray();
+    }
+
+    static JSONObject buildAppApiKeyCreatePayload(String appId) throws Exception {
+        String name = appApiKeyName(appId);
+        JSONObject body = new JSONObject();
+        body.put("name", name);
+        body.put("expired_time", -1);
+        body.put("remain_quota", 0);
+        body.put("unlimited_quota", true);
+        body.put("model_limits_enabled", false);
+        body.put("model_limits", "");
+        body.put("group", "");
+        body.put("cross_group_retry", false);
+        return body;
+    }
+
+    static String appApiKeyName(String appId) {
+        return "OneAPIapp";
+    }
+
+    static boolean isAppApiKeyToken(JSONObject item) {
+        if (item == null) return false;
+        String name = item.optString("name", "").trim();
+        return name.equals("OneAPIapp");
+    }
+
+    static boolean isLegacyAppApiKeyToken(JSONObject item) {
+        if (item == null) return false;
+        String name = item.optString("name", "").trim();
+        return name.equals("OneAPI Android App") || name.startsWith("OneAPI Android App ");
+    }
+
+    static boolean canMutateAppApiKeyToken(JSONObject item) {
+        return isAppApiKeyToken(item) && item != null && item.optInt("id", 0) > 0;
+    }
+
+    private enum KeyValidationStatus {
+        VALID,
+        INVALID,
+        UNKNOWN
+    }
+
+    private static final class KeyValidation {
+        final KeyValidationStatus status;
+        final String message;
+
+        KeyValidation(KeyValidationStatus status, String message) {
+            this.status = status;
+            this.message = message == null ? "" : message;
+        }
     }
 
     private void doRegister(String username, String password, Runnable onSuccess) {
@@ -2885,6 +3120,21 @@ public class MainActivity extends Activity {
                 || normalized.contains("access token 无效");
     }
 
+    private boolean isAppApiKeyInvalidMessage(String message) {
+        String normalized = message == null ? "" : message.trim().toLowerCase(Locale.ROOT);
+        return isAuthExpiredMessage(message)
+                || normalized.contains("token invalid")
+                || normalized.contains("invalid token")
+                || normalized.contains("token is invalid")
+                || normalized.contains("token not provided")
+                || normalized.contains("token expired")
+                || normalized.contains("token exhausted")
+                || normalized.contains("令牌无效")
+                || normalized.contains("令牌不存在")
+                || normalized.contains("令牌已过期")
+                || normalized.contains("令牌额度已用尽");
+    }
+
     private interface JsonRequest {
         JSONObject run() throws Exception;
     }
@@ -2985,14 +3235,17 @@ public class MainActivity extends Activity {
 
     private void renderGroupedSessions(LinearLayout list, SectionState state, Dialog dialog) {
         LinkedHashMap<String, List<ChatSession>> groups = new LinkedHashMap<>();
-        for (ChatSession session : state.sessions) {
-            String key;
-            if (currentSection.isDesktop()) {
-                key = session.projectLabel == null || session.projectLabel.trim().isEmpty() ? "本机项目" : session.projectLabel.trim();
-            } else {
-                key = session.assistantLabel == null || session.assistantLabel.trim().isEmpty() ? currentSection.label : session.assistantLabel.trim();
+        if (currentSection.isDesktop()) {
+            groups.putAll(DesktopSessionSync.recentProjectGroups(
+                    state.sessions,
+                    DesktopSessionSync.RECENT_PROJECT_LIMIT,
+                    DesktopSessionSync.RECENT_SESSION_LIMIT
+            ));
+        } else {
+            for (ChatSession session : state.sessions) {
+                String key = session.assistantLabel == null || session.assistantLabel.trim().isEmpty() ? currentSection.label : session.assistantLabel.trim();
+                groups.computeIfAbsent(key, ignored -> new ArrayList<>()).add(session);
             }
-            groups.computeIfAbsent(key, ignored -> new ArrayList<>()).add(session);
         }
         if (groups.isEmpty()) {
             list.addView(UiKit.text(this, "暂无会话记录", UiKit.MUTED, 14));
@@ -3000,14 +3253,13 @@ public class MainActivity extends Activity {
         }
         int groupCount = 0;
         for (Map.Entry<String, List<ChatSession>> entry : groups.entrySet()) {
-            if (currentSection.isDesktop() && groupCount >= 3) break;
             TextView group = UiKit.text(this, currentSection.isDesktop() ? shortProjectTitle(entry.getKey()) : entry.getKey(), UiKit.MUTED, 13);
             group.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
             LinearLayout.LayoutParams groupLp = new LinearLayout.LayoutParams(-1, -2);
             groupLp.setMargins(0, groupCount == 0 ? 0 : UiKit.dp(this, 12), 0, UiKit.dp(this, 4));
             list.addView(group, groupLp);
             List<ChatSession> sessions = entry.getValue();
-            int limit = currentSection.isDesktop() ? Math.min(5, sessions.size()) : sessions.size();
+            int limit = sessions.size();
             for (int i = 0; i < limit; i++) {
                 ChatSession session = sessions.get(i);
                 View row = sessionRow(session, state, dialog);
@@ -3396,15 +3648,15 @@ public class MainActivity extends Activity {
                     if (!finalSyncedModel.isEmpty()) {
                         applySelectedModel(section, finalSyncedModel, true);
                     }
-                    if (parsed.isEmpty()) {
-                        if (afterRefresh != null) afterRefresh.run();
-                        return;
-                    }
                     String selectedId = targetState.current().id;
                     if (!targetState.selectedSessionId.isEmpty()) {
                         selectedId = targetState.selectedSessionId;
                     }
-                    List<ChatSession> nextSessions = mergePendingDesktopMessages(targetState.sessions, applyDesktopSessionOverrides(targetState, parsed));
+                    List<ChatSession> nextSessions = DesktopSessionSync.mergePendingDesktopMessages(
+                            targetState.sessions,
+                            applyDesktopSessionOverrides(targetState, parsed),
+                            System.currentTimeMillis()
+                    );
                     targetState.sessions.clear();
                     targetState.sessions.addAll(nextSessions);
                     int nextIndex = 0;
@@ -3415,7 +3667,7 @@ public class MainActivity extends Activity {
                         }
                     }
                     targetState.selectedIndex = nextIndex;
-                    targetState.selectedSessionId = targetState.sessions.isEmpty() ? "" : targetState.sessions.get(nextIndex).id;
+                    targetState.selectedSessionId = targetState.sessions.isEmpty() ? "" : targetState.sessions.get(Math.min(nextIndex, targetState.sessions.size() - 1)).id;
                     desktopSessionRefreshedAt.put(section, System.currentTimeMillis());
                     persistSessions(section, targetState.sessions);
                     updateDesktopWakeState();
@@ -3522,6 +3774,12 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private boolean currentDesktopSessionBusy() {
+        if (!currentSection.isDesktop()) return false;
+        SectionState target = states.get(currentSection);
+        return target != null && isDesktopSessionBusy(target.current());
+    }
+
     private void updateDesktopWakeState() {
         setDesktopKeepScreenOn(hasBusyDesktopSession());
     }
@@ -3551,51 +3809,6 @@ public class MainActivity extends Activity {
             return 0;
         });
         return rows;
-    }
-
-    private List<ChatSession> mergePendingDesktopMessages(List<ChatSession> localSessions, List<ChatSession> serverSessions) {
-        Map<String, ChatSession> localById = new HashMap<>();
-        for (ChatSession local : localSessions) {
-            if (local != null && local.id != null) localById.put(local.id, local);
-        }
-        long now = System.currentTimeMillis();
-        for (ChatSession server : serverSessions) {
-            ChatSession local = localById.remove(server.id);
-            if (local == null || local.messages == null || local.messages.isEmpty()) continue;
-            for (ChatMessage message : local.messages) {
-                if (message == null) continue;
-                if (containsSimilarMessage(server.messages, message)) continue;
-                if (now - message.timestamp <= 120_000L || "user".equals(message.role)) {
-                    server.messages.add(message);
-                }
-            }
-            server.messages.sort((a, b) -> Long.compare(a.timestamp, b.timestamp));
-        }
-        for (ChatSession local : localById.values()) {
-            if (local == null || local.messages == null || local.messages.isEmpty()) continue;
-            long newest = 0L;
-            for (ChatMessage message : local.messages) {
-                if (message != null) newest = Math.max(newest, message.timestamp);
-            }
-            if (now - newest <= 120_000L) {
-                serverSessions.add(local);
-            }
-        }
-        return serverSessions;
-    }
-
-    private boolean containsSimilarMessage(List<ChatMessage> messages, ChatMessage target) {
-        if (messages == null || target == null) return false;
-        for (ChatMessage item : messages) {
-            if (item == null) continue;
-            if (!String.valueOf(item.role).equals(String.valueOf(target.role))) continue;
-            if (Math.abs(item.timestamp - target.timestamp) > 10_000L) continue;
-            String left = item.text == null ? "" : item.text.trim();
-            String right = target.text == null ? "" : target.text.trim();
-            if (left.equals(right)) return true;
-            if (!left.isEmpty() && !right.isEmpty() && (left.contains(right) || right.contains(left))) return true;
-        }
-        return false;
     }
 
     private int pinnedOrder(SectionState state, String sessionId) {
@@ -3850,8 +4063,30 @@ public class MainActivity extends Activity {
         network.execute(() -> {
             try {
                 JSONObject envelope = apiClient.get("/api/pricing");
-                JSONArray data = envelope.optJSONArray("data");
-                ModelCatalog.Result catalog = ModelCatalog.fromPricing(data);
+                JSONArray pricingData = envelope.optJSONArray("data");
+                JSONArray appKeyModels = new JSONArray();
+                try {
+                    ensureAppApiKeyOrThrow(apiClient);
+                    JSONObject relayModelsEnvelope = apiClient.request("GET", "/v1/models", null, 15000, prefs.appApiKey());
+                    appKeyModels = modelNamesFromEnvelope(relayModelsEnvelope);
+                    if (appKeyModels.length() == 0) {
+                        Log.w(TAG, "refreshModels relay model list returned empty, fallback to pricing/user models");
+                    }
+                } catch (Exception ignored) {
+                    Log.w(TAG, "refreshModels relay model list failed", ignored);
+                }
+                ModelCatalog.Result catalog;
+                if (appKeyModels.length() > 0) {
+                    catalog = ModelCatalog.fromAvailableModels(appKeyModels);
+                } else {
+                    JSONArray userModels = new JSONArray();
+                    try {
+                        JSONObject userModelsEnvelope = apiClient.get("/api/user/models");
+                        userModels = mergeModelArrays(userModels, modelNamesFromEnvelope(userModelsEnvelope));
+                    } catch (Exception ignored) {
+                    }
+                    catalog = ModelCatalog.fromPricingAndUserModels(pricingData, userModels);
+                }
                 mainHandler.post(() -> {
                     replaceModels(AppSection.CHAT, catalog.chat);
                     replaceModels(AppSection.CODEX, catalog.codex);
@@ -3863,6 +4098,54 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> Toast.makeText(this, "模型列表刷新失败：" + message(error), Toast.LENGTH_LONG).show());
             }
         });
+    }
+
+    private JSONArray modelNamesFromEnvelope(JSONObject envelope) {
+        JSONArray out = new JSONArray();
+        Object data = envelope == null ? null : envelope.opt("data");
+        appendModelNames(out, data);
+        appendModelNames(out, envelope == null ? null : envelope.opt("models"));
+        return out;
+    }
+
+    private JSONArray mergeModelArrays(JSONArray left, JSONArray right) {
+        JSONArray out = new JSONArray();
+        Set<String> seen = new LinkedHashSet<>();
+        appendUniqueModelNames(out, seen, left);
+        appendUniqueModelNames(out, seen, right);
+        return out;
+    }
+
+    private void appendUniqueModelNames(JSONArray out, Set<String> seen, JSONArray source) {
+        if (source == null) return;
+        for (int i = 0; i < source.length(); i++) {
+            String model = String.valueOf(source.opt(i)).trim();
+            if (model.isEmpty() || "null".equalsIgnoreCase(model) || seen.contains(model)) continue;
+            seen.add(model);
+            out.put(model);
+        }
+    }
+
+    private void appendModelNames(JSONArray out, Object raw) {
+        if (raw instanceof JSONArray) {
+            JSONArray array = (JSONArray) raw;
+            for (int i = 0; i < array.length(); i++) {
+                Object item = array.opt(i);
+                if (item instanceof JSONObject) {
+                    String model = first((JSONObject) item, "id", "model_name", "model", "name");
+                    if (!model.isEmpty()) out.put(model);
+                } else if (item != null && !JSONObject.NULL.equals(item)) {
+                    String model = String.valueOf(item).trim();
+                    if (!model.isEmpty() && !"null".equalsIgnoreCase(model)) out.put(model);
+                }
+            }
+        } else if (raw instanceof JSONObject) {
+            JSONObject object = (JSONObject) raw;
+            JSONArray items = object.optJSONArray("items");
+            if (items != null) appendModelNames(out, items);
+            JSONArray rows = object.optJSONArray("data");
+            if (rows != null) appendModelNames(out, rows);
+        }
     }
 
     private void refreshAssistants() {
@@ -3928,7 +4211,7 @@ public class MainActivity extends Activity {
         network.execute(() -> {
             try {
                 desktopRepository.selectModel(section.id, deviceId, model);
-                refreshDesktopSessions(section);
+                refreshDesktopSessions(section, true, null);
             } catch (Exception error) {
                 String message = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
                 mainHandler.post(() -> Toast.makeText(this, "模型已在手机端切换，但同步到客户端失败：" + message, Toast.LENGTH_SHORT).show());
@@ -3942,8 +4225,9 @@ public class MainActivity extends Activity {
             if (saved.isEmpty()) continue;
             SectionState target = states.get(section);
             if (target == null) continue;
-            if (!target.availableModels.contains(saved)) target.availableModels.add(saved);
-            target.selectedModel = saved;
+            if (target.availableModels.contains(saved)) {
+                target.selectedModel = saved;
+            }
         }
     }
 
@@ -4531,58 +4815,12 @@ public class MainActivity extends Activity {
                 String desktopPayload = userPayload;
                 JSONArray desktopAttachments = buildDesktopAttachments(attachments);
                 if (targetSection == AppSection.CHAT) {
-                    String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
-                    final long[] lastRenderAt = new long[]{0};
-                    chatController.stream(
-                            state.selectedModel,
-                            (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow,
-                            chatContext,
-                            chatPayload,
-                            reasoningValue(state.selectedReasoning),
-                            new ChatController.DeltaHandler() {
-                                @Override
-                                public void onDelta(String fullText, boolean done) {
-                                    mainHandler.post(() -> {
-                                        if (cancelFlag.get()) return;
-                                        if (progress == null) return;
-                                        String cleanFullText = fullText == null ? "" : fullText.trim();
-                                        progress.text = cleanFullText.isEmpty()
-                                                ? (done ? "本次没有返回可显示内容。" : "正在思考...")
-                                                : fullText;
-                                        if (currentSection == targetSection && state.current() == session) {
-                                            long nowRender = System.currentTimeMillis();
-                                            if (done || nowRender - lastRenderAt[0] >= 180) {
-                                                lastRenderAt[0] = nowRender;
-                                                renderCurrent(false);
-                                                requestStreamAutoScroll();
-                                            }
-                                        }
-                                        if (done) {
-                                            stopStreamAutoScroll();
-                                            persistSession(targetSection, session);
-                                            composerView.setSending(false);
-                                            activeSendTask = null;
-                                            activeSendCancelled = null;
-                                        }
-                                    });
-                                }
-
-                                @Override
-                                public void onUsage(ChatController.Usage usage) {
-                                    mainHandler.post(() -> {
-                                        if (cancelFlag.get() || progress == null || usage == null || usage.isEmpty()) return;
-                                        progress.tokenText = usage.displayText();
-                                        if (currentSection == targetSection && state.current() == session) renderCurrent(false);
-                                    });
-                                }
-                            });
+                    ensureAppApiKeyOrThrow(apiClient);
+                    streamChatWithAppKeyRetry(targetSection, state, session, progress, chatPayload, chatContext, cancelFlag);
                     result = progress.text;
                 } else if (targetSection == AppSection.IMAGE) {
-                    String assistantPrompt = imageAssistantPrompts.getOrDefault(session.assistantLabel, "");
-                    String imagePrompt = assistantPrompt.isEmpty() ? text : assistantPrompt + "\n\n用户图片需求：" + text;
-                    ImageController.ImageResult imageResult = attachments != null && !attachments.isEmpty()
-                            ? imageController.editResult(this, attachments.get(0), imagePrompt, state.imageSize, state.imageQuality)
-                            : imageController.generateResult(imagePrompt, state.imageSize, state.imageQuality, false);
+                    ensureAppApiKeyOrThrow(apiClient);
+                    ImageController.ImageResult imageResult = sendImageWithAppKeyRetry(state, session, text, attachments);
                     if (progress != null) progress.tokenText = imageResult.tokenText;
                     result = imageResult.image;
                 } else {
@@ -4909,6 +5147,7 @@ public class MainActivity extends Activity {
             mainHandler.post(() -> {
                 session.messages.add(ChatMessage.log("任务已创建，等待桌面客户端接管。\n任务编号：" + jobId, createdAt));
                 session.status = "queued";
+                updateDesktopWakeState();
                 persistSession(targetSection, session);
                 if (currentSection == targetSection && state.current() == session) renderCurrent(false);
             });
@@ -5024,16 +5263,127 @@ public class MainActivity extends Activity {
         mainHandler.post(() -> {
             boolean changed = false;
             for (ChatMessage message : eventMessages) {
-                if (message == null || containsSimilarMessage(session.messages, message)) continue;
+                if (message == null || DesktopSessionSync.containsSimilarMessage(session.messages, message)) continue;
                 session.messages.add(message);
                 changed = true;
             }
             if (!changed) return;
             session.messages.sort((a, b) -> Long.compare(a.timestamp, b.timestamp));
-            session.status = hasTerminalDesktopJobEvent(events) ? "complete" : "running";
+            session.status = desktopStatusFromEvents(events, session.status);
+            updateDesktopWakeState();
             persistSession(section, session);
             if (currentSection == section && state().current() == session) renderCurrent(false);
         });
+    }
+
+    private void streamChatWithAppKeyRetry(AppSection targetSection, SectionState state, ChatSession session, ChatMessage progress, Object chatPayload, JSONArray chatContext, AtomicBoolean cancelFlag) throws Exception {
+        try {
+            streamChatOnce(targetSection, state, session, progress, chatPayload, chatContext, cancelFlag);
+        } catch (Exception error) {
+            if (!isAppApiKeyInvalidMessage(message(error))) throw error;
+            ensureAppApiKeyAfterInvalidation();
+            streamChatOnce(targetSection, state, session, progress, chatPayload, chatContext, cancelFlag);
+        }
+    }
+
+    private void streamChatOnce(AppSection targetSection, SectionState state, ChatSession session, ChatMessage progress, Object chatPayload, JSONArray chatContext, AtomicBoolean cancelFlag) throws Exception {
+        String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
+        final long[] lastRenderAt = new long[]{0};
+        chatController.stream(
+                state.selectedModel,
+                (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow,
+                chatContext,
+                chatPayload,
+                reasoningValue(state.selectedReasoning),
+                new ChatController.DeltaHandler() {
+                    @Override
+                    public void onDelta(String fullText, boolean done) {
+                        mainHandler.post(() -> {
+                            if (cancelFlag.get()) return;
+                            if (progress == null) return;
+                            String cleanFullText = fullText == null ? "" : fullText.trim();
+                            progress.text = cleanFullText.isEmpty()
+                                    ? (done ? "本次没有返回可显示内容。" : "正在思考...")
+                                    : fullText;
+                            if (currentSection == targetSection && state.current() == session) {
+                                long nowRender = System.currentTimeMillis();
+                                if (done || nowRender - lastRenderAt[0] >= 180) {
+                                    lastRenderAt[0] = nowRender;
+                                    renderCurrent(false);
+                                    requestStreamAutoScroll();
+                                }
+                            }
+                            if (done) {
+                                stopStreamAutoScroll();
+                                persistSession(targetSection, session);
+                                composerView.setSending(false);
+                                activeSendTask = null;
+                                activeSendCancelled = null;
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onUsage(ChatController.Usage usage) {
+                        mainHandler.post(() -> {
+                            if (cancelFlag.get() || progress == null || usage == null || usage.isEmpty()) return;
+                            progress.tokenText = usage.displayText();
+                            if (currentSection == targetSection && state.current() == session) renderCurrent(false);
+                        });
+                    }
+                });
+    }
+
+    private ImageController.ImageResult sendImageWithAppKeyRetry(SectionState state, ChatSession session, String text, List<Uri> attachments) throws Exception {
+        try {
+            return sendImageOnce(state, session, text, attachments);
+        } catch (Exception error) {
+            if (!isAppApiKeyInvalidMessage(message(error))) throw error;
+            ensureAppApiKeyAfterInvalidation();
+            return sendImageOnce(state, session, text, attachments);
+        }
+    }
+
+    private ImageController.ImageResult sendImageOnce(SectionState state, ChatSession session, String text, List<Uri> attachments) throws Exception {
+        String assistantPrompt = imageAssistantPrompts.getOrDefault(session.assistantLabel, "");
+        String imagePrompt = assistantPrompt.isEmpty() ? text : assistantPrompt + "\n\n用户图片需求：" + text;
+        return attachments != null && !attachments.isEmpty()
+                ? imageController.editResult(this, attachments.get(0), imagePrompt, state.imageSize, state.imageQuality)
+                : imageController.generateResult(imagePrompt, state.imageSize, state.imageQuality, false);
+    }
+
+    private void ensureAppApiKeyAfterInvalidation() throws Exception {
+        prefs.setAppApiKey("");
+        ensureAppApiKeyOrThrow(apiClient);
+    }
+
+    private String desktopStatusFromEvents(JSONArray events, String fallback) {
+        if (events == null || events.length() == 0) return fallback == null ? "" : fallback;
+        boolean complete = false;
+        boolean waitingInteraction = false;
+        boolean running = false;
+        for (int i = 0; i < events.length(); i++) {
+            JSONObject event = events.optJSONObject(i);
+            if (event == null) continue;
+            String type = first(event, "type", "phase").toLowerCase(Locale.ROOT);
+            if ("error".equals(type)) return "error";
+            if ("complete".equals(type)) complete = true;
+            if ("interaction_required".equals(type) || "waiting_interaction".equals(type)) waitingInteraction = true;
+            if ("project".equals(type)
+                    || "running".equals(type)
+                    || "message".equals(type)
+                    || "message_delta".equals(type)
+                    || "log".equals(type)
+                    || "prepare".equals(type)
+                    || "invoke".equals(type)
+                    || "result".equals(type)) {
+                running = true;
+            }
+        }
+        if (complete) return "complete";
+        if (waitingInteraction) return "waiting_interaction";
+        if (running) return "running";
+        return fallback == null ? "" : fallback;
     }
 
     private List<ChatMessage> desktopMessagesFromJobEvents(AppSection section, String jobId, JSONArray events) {
@@ -5150,7 +5500,7 @@ public class MainActivity extends Activity {
                 ),
                 Arrays.asList("搜索", "总结", "翻译")
         );
-        chat.availableModels.addAll(Arrays.asList("gpt-5.4", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "claude-sonnet-4-6"));
+        chat.availableModels.addAll(Arrays.asList("gpt-5.4", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "mimo-v2.5-pro", "claude-sonnet-4-6"));
         states.put(AppSection.CHAT, chat);
         String defaultImageAssistant = ImageAssistantCatalog.builtIns().get(0).name;
         SectionState image = new SectionState(
@@ -5170,7 +5520,7 @@ public class MainActivity extends Activity {
                 ),
                 Arrays.asList("android", "room", "api", "release")
         );
-        codex.availableModels.addAll(Arrays.asList("gpt-5.4-codex", "gpt-5.4", "deepseek-v4-pro"));
+        codex.availableModels.addAll(Arrays.asList("gpt-5.4-codex", "gpt-5.4", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "mimo-v2.5-pro"));
         codex.selectedModel = "gpt-5.4-codex";
         states.put(AppSection.CODEX, codex);
         SectionState claude = new SectionState(
@@ -5182,7 +5532,7 @@ public class MainActivity extends Activity {
                 ),
                 Arrays.asList("prd", "review", "ux")
         );
-        claude.availableModels.addAll(Arrays.asList("claude-sonnet-4-6", "claude-opus-4-5", "deepseek-v4-pro", "mimo-v2.5-pro"));
+        claude.availableModels.addAll(Arrays.asList("claude-sonnet-4-6", "claude-opus-4-5", "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5-pro"));
         claude.selectedModel = "claude-sonnet-4-6";
         states.put(AppSection.CLAUDE, claude);
         states.put(AppSection.SETTINGS, new SectionState(new ArrayList<>(), new ArrayList<>()));

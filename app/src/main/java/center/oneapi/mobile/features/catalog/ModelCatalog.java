@@ -15,17 +15,51 @@ public final class ModelCatalog {
     }
 
     public static Result fromPricing(JSONArray data) {
+        return fromPricingAndUserModels(data, null);
+    }
+
+    public static Result fromPricingAndUserModels(JSONArray pricingData, JSONArray userModels) {
         Result result = new Result();
-        if (data == null) return result;
-        for (int i = 0; i < data.length(); i++) {
-            JSONObject item = data.optJSONObject(i);
-            String model = first(item, "model_name", "model", "name", "id");
-            if (model.isEmpty()) continue;
-            if (supportsChat(item, model)) result.addChat(model);
-            if (supportsCodex(item, model)) result.addCodex(model);
-            if (supportsClaude(item, model)) result.addClaude(model);
+        Set<String> seen = new LinkedHashSet<>();
+        if (pricingData != null) {
+            for (int i = 0; i < pricingData.length(); i++) {
+                JSONObject item = pricingData.optJSONObject(i);
+                String model = first(item, "model_name", "model", "name", "id");
+                if (model.isEmpty() || seen.contains(model)) continue;
+                seen.add(model);
+                addModel(result, item, model);
+            }
+        }
+        if (userModels != null) {
+            for (int i = 0; i < userModels.length(); i++) {
+                String model = userModels.optString(i, "").trim();
+                if (model.isEmpty() || seen.contains(model)) continue;
+                seen.add(model);
+                addModel(result, null, model);
+            }
         }
         return result;
+    }
+
+    public static Result fromAvailableModels(JSONArray models) {
+        Result result = new Result();
+        Set<String> seen = new LinkedHashSet<>();
+        if (models == null) return result;
+        for (int i = 0; i < models.length(); i++) {
+            String model = models.optString(i, "").trim();
+            if (model.isEmpty() || seen.contains(model)) continue;
+            seen.add(model);
+            addModel(result, null, model);
+        }
+        return result;
+    }
+
+    private static void addModel(Result result, JSONObject item, String model) {
+        if (model == null || model.trim().isEmpty()) return;
+        String clean = model.trim();
+        if (supportsChat(item, clean)) result.addChat(clean);
+        if (supportsCodex(item, clean)) result.addCodex(clean);
+        if (supportsClaude(item, clean)) result.addClaude(clean);
     }
 
     public static String providerForModel(String model) {
@@ -69,8 +103,9 @@ public final class ModelCatalog {
         if (n.contains("deepseek")) {
             return n.contains("deepseek-v4-pro") || n.contains("deepseek-v4-flash");
         }
-        if (n.contains("mimo")) {
-            return "mimo-v2.5-pro".equals(n) || "mimo-v2.5".equals(n);
+        if (n.contains("mimo") || n.contains("xiaomi")) {
+            String mimo = normalizeMimoModelFamily(n);
+            return "mimo-v2.5-pro".equals(mimo) || "mimo-v2.5".equals(mimo);
         }
         return true;
     }
@@ -85,14 +120,25 @@ public final class ModelCatalog {
         if (!isAllowedDesktopModel(model)) return false;
         if (hasCapability(item, "codex")) return true;
         String n = model.toLowerCase(Locale.ROOT);
-        return n.startsWith("gpt-") || n.contains("codex") || n.contains("deepseek") || n.contains("mimo");
+        return n.startsWith("gpt-") || n.contains("codex") || n.contains("deepseek") || n.contains("mimo") || n.contains("xiaomi");
     }
 
     private static boolean supportsClaude(JSONObject item, String model) {
         if (!isAllowedDesktopModel(model)) return false;
         if (hasCapability(item, "claude")) return true;
         String n = model.toLowerCase(Locale.ROOT);
-        return n.startsWith("claude") || n.contains("deepseek") || n.contains("mimo");
+        if (n.startsWith("claude") || n.contains("deepseek")) return true;
+        if (n.contains("mimo") || n.contains("xiaomi")) {
+            return "mimo-v2.5-pro".equals(normalizeMimoModelFamily(n));
+        }
+        return false;
+    }
+
+    private static String normalizeMimoModelFamily(String value) {
+        String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT).replace('_', '-');
+        normalized = normalized.replaceFirst("^xiaomi-?mimo-?", "mimo-");
+        normalized = normalized.replaceFirst("^xiaomimimo-?", "mimo-");
+        return normalized;
     }
 
     private static boolean hasCapability(JSONObject item, String capability) {

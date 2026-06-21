@@ -45,6 +45,14 @@ public class ConversationRepository {
         dao.replaceSessionMessages(session, messages);
     }
 
+    public void replaceModeSessions(String mode, List<ConversationSessionEntity> sessions, List<List<ConversationMessageEntity>> messagesBySession) {
+        dao.replaceModeSessions(clean(mode), sessions, messagesBySession);
+    }
+
+    public void clearModeSessions(String mode) {
+        dao.replaceModeSessions(clean(mode), Collections.emptyList(), Collections.emptyList());
+    }
+
     public static LocalSessionSelection resolveLocalSessionSelection(String mode, String group, String sessionId) {
         String cleanMode = clean(mode);
         String key = "image".equals(cleanMode) ? "selected_image_assistant" : "selected_chat_assistant";

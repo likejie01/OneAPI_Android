@@ -40,12 +40,37 @@ public abstract class ConversationDao {
     @Query("DELETE FROM conversation_sessions WHERE session_id = :sessionId")
     public abstract void deleteSession(String sessionId);
 
+    @Query("DELETE FROM conversation_sessions WHERE mode = :mode")
+    public abstract void deleteSessionsForMode(String mode);
+
+    @Query("DELETE FROM conversation_messages WHERE mode = :mode")
+    public abstract void deleteMessagesForMode(String mode);
+
     @Transaction
     public void replaceSessionMessages(ConversationSessionEntity session, List<ConversationMessageEntity> messages) {
         upsertSession(session);
         deleteMessagesForSession(session.sessionId);
         if (messages != null && !messages.isEmpty()) {
             upsertMessages(messages);
+        }
+    }
+
+    @Transaction
+    public void replaceModeSessions(String mode, List<ConversationSessionEntity> sessions, List<List<ConversationMessageEntity>> messagesBySession) {
+        deleteMessagesForMode(mode);
+        deleteSessionsForMode(mode);
+        if (sessions == null || sessions.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < sessions.size(); i++) {
+            ConversationSessionEntity session = sessions.get(i);
+            upsertSession(session);
+            if (messagesBySession != null && i < messagesBySession.size()) {
+                List<ConversationMessageEntity> messages = messagesBySession.get(i);
+                if (messages != null && !messages.isEmpty()) {
+                    upsertMessages(messages);
+                }
+            }
         }
     }
 }

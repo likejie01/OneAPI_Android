@@ -39,8 +39,27 @@ public class ApiClient {
         return request("POST", path, body, readTimeoutMs);
     }
 
+    public JSONObject postWithBearer(String path, JSONObject body, String bearerToken, int readTimeoutMs) throws IOException, JSONException {
+        return request("POST", path, body, readTimeoutMs, clean(bearerToken), true);
+    }
+
     public void postStream(String path, JSONObject body, StreamHandler handler) throws IOException, JSONException {
+        postStream(path, body, handler, "", false);
+    }
+
+    public void postStream(String path, JSONObject body, StreamHandler handler, String bearerTokenOverride) throws IOException, JSONException {
+        postStream(path, body, handler, bearerTokenOverride, false);
+    }
+
+    public void postStreamWithBearer(String path, JSONObject body, StreamHandler handler, String bearerToken) throws IOException, JSONException {
+        postStream(path, body, handler, clean(bearerToken), true);
+    }
+
+    private void postStream(String path, JSONObject body, StreamHandler handler, String bearerTokenOverride, boolean requireBearerOverride) throws IOException, JSONException {
         ensureBackgroundThread();
+        if (requireBearerOverride && clean(bearerTokenOverride).isEmpty()) {
+            throw new IOException("App 专用 Key 未初始化");
+        }
         HttpURLConnection connection = (HttpURLConnection) new URL(buildUrl(prefs.server(), path)).openConnection();
         activeConnections.add(connection);
         try {
@@ -49,12 +68,15 @@ public class ApiClient {
             connection.setReadTimeout(180000);
             connection.setRequestProperty("Accept", "text/event-stream");
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            String token = prefs.token();
+            boolean usesBearerOverride = !clean(bearerTokenOverride).isEmpty();
+            String token = requireBearerOverride ? clean(bearerTokenOverride) : bearerValue(prefs.token(), bearerTokenOverride);
             if (!token.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + token);
-            String cookie = prefs.cookie();
-            if (!cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
-            String userId = prefs.userId();
-            if (!userId.isEmpty()) connection.setRequestProperty("New-Api-User", userId);
+            if (!usesBearerOverride) {
+                String cookie = prefs.cookie();
+                if (!cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+                String userId = prefs.userId();
+                if (!userId.isEmpty()) connection.setRequestProperty("New-Api-User", userId);
+            }
             if (body != null) {
                 connection.setDoOutput(true);
                 try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(connection.getOutputStream(), StandardCharsets.UTF_8))) {
@@ -88,7 +110,18 @@ public class ApiClient {
     }
 
     public JSONObject request(String method, String path, JSONObject body, int readTimeoutMs) throws IOException, JSONException {
+        return request(method, path, body, readTimeoutMs, "", false);
+    }
+
+    public JSONObject request(String method, String path, JSONObject body, int readTimeoutMs, String bearerTokenOverride) throws IOException, JSONException {
+        return request(method, path, body, readTimeoutMs, bearerTokenOverride, false);
+    }
+
+    private JSONObject request(String method, String path, JSONObject body, int readTimeoutMs, String bearerTokenOverride, boolean requireBearerOverride) throws IOException, JSONException {
         ensureBackgroundThread();
+        if (requireBearerOverride && clean(bearerTokenOverride).isEmpty()) {
+            throw new IOException("App 专用 Key 未初始化");
+        }
         HttpURLConnection connection = (HttpURLConnection) new URL(buildUrl(prefs.server(), path)).openConnection();
         activeConnections.add(connection);
         try {
@@ -97,17 +130,20 @@ public class ApiClient {
             connection.setReadTimeout(readTimeoutMs);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            String token = prefs.token();
+            boolean usesBearerOverride = !clean(bearerTokenOverride).isEmpty();
+            String token = requireBearerOverride ? clean(bearerTokenOverride) : bearerValue(prefs.token(), bearerTokenOverride);
             if (!token.isEmpty()) {
                 connection.setRequestProperty("Authorization", "Bearer " + token);
             }
-            String cookie = prefs.cookie();
-            if (!cookie.isEmpty()) {
-                connection.setRequestProperty("Cookie", cookie);
-            }
-            String userId = prefs.userId();
-            if (!userId.isEmpty()) {
-                connection.setRequestProperty("New-Api-User", userId);
+            if (!usesBearerOverride) {
+                String cookie = prefs.cookie();
+                if (!cookie.isEmpty()) {
+                    connection.setRequestProperty("Cookie", cookie);
+                }
+                String userId = prefs.userId();
+                if (!userId.isEmpty()) {
+                    connection.setRequestProperty("New-Api-User", userId);
+                }
             }
             if (body != null) {
                 connection.setDoOutput(true);
@@ -179,6 +215,15 @@ public class ApiClient {
         return prefs.token();
     }
 
+    public String appApiKey() {
+        return prefs.appApiKey();
+    }
+
+    public static String bearerValue(String fallbackToken, String overrideToken) {
+        String override = clean(overrideToken);
+        return override.isEmpty() ? clean(fallbackToken) : override;
+    }
+
     static String errorMessage(JSONObject json, int code) {
         if (json == null) {
             return "HTTP " + code;
@@ -206,6 +251,10 @@ public class ApiClient {
             }
         }
         return out.toString();
+    }
+
+    private static String clean(String value) {
+        return value == null ? "" : value.trim();
     }
 
     public interface StreamHandler {
