@@ -53,44 +53,48 @@ public class ImageController {
     public ImageResult editResult(Context context, Uri imageUri, String prompt, String size, String quality) throws Exception {
         String boundary = "----OneApiAndroid" + System.currentTimeMillis();
         HttpURLConnection connection = (HttpURLConnection) new URL(ApiClient.buildUrl(api.server(), IMAGE_EDITS_PATH)).openConnection();
-        connection.setConnectTimeout(15000);
-        connection.setReadTimeout(IMAGE_READ_TIMEOUT_MS);
-        connection.setRequestMethod("POST");
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        String relayKey = api.appApiKey();
-        if (relayKey.isEmpty()) {
-            throw new java.io.IOException("App 专用 Key 未初始化，无法调用图片编辑接口");
-        }
-        connection.setRequestProperty("Authorization", "Bearer " + relayKey);
-        connection.setDoOutput(true);
-        String mime = context.getContentResolver().getType(imageUri);
-        if (mime == null || mime.trim().isEmpty()) mime = "image/png";
-        String fileName = "image." + (mime.contains("jpeg") ? "jpg" : mime.contains("webp") ? "webp" : "png");
-        try (DataOutputStream out = new DataOutputStream(connection.getOutputStream())) {
-            writeField(out, boundary, "model", "gpt-image-2");
-            writeField(out, boundary, "prompt", prompt);
-            writeField(out, boundary, "size", clean(size).isEmpty() ? "1024x1024" : size);
-            writeField(out, boundary, "quality", clean(quality).isEmpty() ? "medium" : quality);
-            writeField(out, boundary, "response_format", "b64_json");
-            out.writeBytes("--" + boundary + "\r\n");
-            out.writeBytes("Content-Disposition: form-data; name=\"image\"; filename=\"" + fileName + "\"\r\n");
-            out.writeBytes("Content-Type: " + mime + "\r\n\r\n");
-            try (InputStream input = context.getContentResolver().openInputStream(imageUri)) {
-                if (input == null) throw new java.io.IOException("图片读取失败");
-                byte[] buffer = new byte[8192];
-                int read;
-                while ((read = input.read(buffer)) != -1) out.write(buffer, 0, read);
+        try {
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(IMAGE_READ_TIMEOUT_MS);
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+            String relayKey = api.appApiKey();
+            if (relayKey.isEmpty()) {
+                throw new java.io.IOException("App 专用 Key 未初始化，无法调用图片编辑接口");
             }
-            out.writeBytes("\r\n--" + boundary + "--\r\n");
+            connection.setRequestProperty("Authorization", "Bearer " + relayKey);
+            connection.setDoOutput(true);
+            String mime = context.getContentResolver().getType(imageUri);
+            if (mime == null || mime.trim().isEmpty()) mime = "image/png";
+            String fileName = "image." + (mime.contains("jpeg") ? "jpg" : mime.contains("webp") ? "webp" : "png");
+            try (DataOutputStream out = new DataOutputStream(connection.getOutputStream())) {
+                writeField(out, boundary, "model", "gpt-image-2");
+                writeField(out, boundary, "prompt", prompt);
+                writeField(out, boundary, "size", clean(size).isEmpty() ? "1024x1024" : size);
+                writeField(out, boundary, "quality", clean(quality).isEmpty() ? "medium" : quality);
+                writeField(out, boundary, "response_format", "b64_json");
+                out.writeBytes("--" + boundary + "\r\n");
+                out.writeBytes("Content-Disposition: form-data; name=\"image\"; filename=\"" + fileName + "\"\r\n");
+                out.writeBytes("Content-Type: " + mime + "\r\n\r\n");
+                try (InputStream input = context.getContentResolver().openInputStream(imageUri)) {
+                    if (input == null) throw new java.io.IOException("图片读取失败");
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = input.read(buffer)) != -1) out.write(buffer, 0, read);
+                }
+                out.writeBytes("\r\n--" + boundary + "--\r\n");
+            }
+            int code = connection.getResponseCode();
+            String raw = read(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
+            JSONObject json = raw.trim().isEmpty() ? new JSONObject() : new JSONObject(raw);
+            if (code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
+                throw new java.io.IOException(errorMessage(json, code));
+            }
+            return extractResult(json);
+        } finally {
+            connection.disconnect();
         }
-        int code = connection.getResponseCode();
-        String raw = read(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
-        JSONObject json = raw.trim().isEmpty() ? new JSONObject() : new JSONObject(raw);
-        if (code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
-            throw new java.io.IOException(json.optString("message", "图片编辑接口请求失败"));
-        }
-        return extractResult(json);
     }
 
     public static String extractImage(JSONObject response) {
@@ -150,5 +154,19 @@ public class ImageController {
         int read;
         while ((read = stream.read(buffer)) != -1) output.write(buffer, 0, read);
         return output.toString("UTF-8");
+    }
+
+    static String errorMessage(JSONObject json, int code) {
+        if (json == null) return "图片编辑接口请求失败（HTTP " + code + "）";
+        String message = json.optString("message", "");
+        JSONObject error = json.optJSONObject("error");
+        if (message.trim().isEmpty() && error != null) {
+            message = error.optString("message", "");
+        }
+        JSONObject data = json.optJSONObject("data");
+        if (message.trim().isEmpty() && data != null) {
+            message = data.optString("message", "");
+        }
+        return message.trim().isEmpty() ? "图片编辑接口请求失败（HTTP " + code + "）" : message;
     }
 }

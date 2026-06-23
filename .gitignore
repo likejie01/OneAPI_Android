@@ -44,5 +44,6 @@ output.json
 *.env
 ASR.env
 Backup-*.txt
+alipay/
 *.bak
 *.tmp

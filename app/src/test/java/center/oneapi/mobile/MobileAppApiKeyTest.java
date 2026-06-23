@@ -6,6 +6,8 @@ import org.junit.Test;
 
 import java.util.Arrays;
 
+import center.oneapi.mobile.features.keys.AppApiKeyManager;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -13,12 +15,12 @@ import static org.junit.Assert.assertTrue;
 public class MobileAppApiKeyTest {
     @Test
     public void appApiKeyCreatePath_matchesServerPostRoute() {
-        assertEquals("/api/token/", MainActivity.APP_API_KEY_CREATE_PATH);
+        assertEquals("/api/token/", AppApiKeyManager.CREATE_PATH);
     }
 
     @Test
     public void buildAppApiKeyCreatePayload_usesAllChannelGroups() throws Exception {
-        JSONObject body = MainActivity.buildAppApiKeyCreatePayload("android-1");
+        JSONObject body = AppApiKeyManager.buildCreatePayload("android-1");
 
         assertEquals("OneAPIapp", body.getString("name"));
         assertEquals("", body.getString("group"));
@@ -30,7 +32,7 @@ public class MobileAppApiKeyTest {
 
     @Test
     public void buildAppApiKeyCreatePayload_keepsNameWithinServerLimit() throws Exception {
-        JSONObject body = MainActivity.buildAppApiKeyCreatePayload("android-12345678-1234-1234-1234-123456789abc");
+        JSONObject body = AppApiKeyManager.buildCreatePayload("android-12345678-1234-1234-1234-123456789abc");
 
         assertEquals("OneAPIapp", body.getString("name"));
         assertTrue(body.getString("name").length() <= 50);
@@ -38,10 +40,10 @@ public class MobileAppApiKeyTest {
 
     @Test
     public void isAppApiKeyToken_matchesStableMobileTokenName() throws Exception {
-        assertTrue(MainActivity.isAppApiKeyToken(new JSONObject().put("name", "OneAPIapp")));
-        assertTrue(MainActivity.isLegacyAppApiKeyToken(new JSONObject().put("name", "OneAPI Android App android-1")));
-        assertFalse(MainActivity.isAppApiKeyToken(new JSONObject().put("name", "OneAPI Android App android-1")));
-        assertFalse(MainActivity.isAppApiKeyToken(new JSONObject().put("name", "desktop key")));
+        assertTrue(AppApiKeyManager.isAppToken(new JSONObject().put("name", "OneAPIapp")));
+        assertTrue(AppApiKeyManager.isLegacyAppToken(new JSONObject().put("name", "OneAPI Android App android-1")));
+        assertFalse(AppApiKeyManager.isAppToken(new JSONObject().put("name", "OneAPI Android App android-1")));
+        assertFalse(AppApiKeyManager.isAppToken(new JSONObject().put("name", "desktop key")));
     }
 
     @Test
@@ -51,7 +53,7 @@ public class MobileAppApiKeyTest {
                 .put(new JSONObject().put("id", 3).put("name", "OneAPI Android App old"))
                 .put(new JSONObject().put("id", 7).put("name", "OneAPIapp"));
 
-        assertEquals(Arrays.asList(7), MainActivity.appApiKeyTokenIds(tokens));
+        assertEquals(Arrays.asList(7), AppApiKeyManager.tokenIds(tokens));
     }
 
     @Test
@@ -65,7 +67,7 @@ public class MobileAppApiKeyTest {
                 .put(new JSONObject().put("id", 8).put("name", "OneAPIapp"))
                 .put(new JSONObject().put("id", 5).put("name", "OneAPI Android App"));
 
-        assertEquals(Arrays.asList(8), MainActivity.appApiKeyMutableTokenIds(tokens));
+        assertEquals(Arrays.asList(8), AppApiKeyManager.mutableTokenIds(tokens));
     }
 
     @Test
@@ -79,6 +81,6 @@ public class MobileAppApiKeyTest {
                                 .put(new JSONObject().put("id", 42).put("name", "OneAPIapp"))
                                 .put(new JSONObject().put("id", 41).put("name", "OneAPI Desktop App"))));
 
-        assertEquals(Arrays.asList(42), MainActivity.appApiKeyMutableTokenIds(envelope));
+        assertEquals(Arrays.asList(42), AppApiKeyManager.mutableTokenIds(envelope));
     }
 }
