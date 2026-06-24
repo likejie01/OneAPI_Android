@@ -20,4 +20,11 @@ public class ImageControllerTest {
         assertEquals("data:image/png;base64,abc", result.image);
         assertEquals("Token 输入：12 | 输出：34 | 缓存：0", result.tokenText);
     }
+
+    @Test
+    public void errorMessage_readsOpenAiErrorEnvelope() throws Exception {
+        JSONObject response = new JSONObject("{\"error\":{\"message\":\"image is required\",\"type\":\"invalid_request_error\"}}");
+
+        assertEquals("image is required", ImageController.errorMessage(response, 400));
+    }
 }

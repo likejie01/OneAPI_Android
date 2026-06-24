@@ -7,9 +7,7 @@ import android.Manifest;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.database.Cursor;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
@@ -22,11 +20,9 @@ import android.os.Build;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.graphics.pdf.PdfRenderer;
-import android.provider.OpenableColumns;
 import android.text.TextUtils;
 import android.text.Editable;
 import android.text.TextWatcher;
-import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -56,6 +52,8 @@ import androidx.core.content.FileProvider;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
@@ -76,8 +74,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -87,16 +83,19 @@ import center.oneapi.mobile.core.AppPrefs;
 import center.oneapi.mobile.data.ConversationMessageEntity;
 import center.oneapi.mobile.data.ConversationRepository;
 import center.oneapi.mobile.data.ConversationSessionEntity;
+import center.oneapi.mobile.features.attachments.AttachmentContentReader;
 import center.oneapi.mobile.features.audio.AudioTranscriptionController;
 import center.oneapi.mobile.features.billing.BillingController;
 import center.oneapi.mobile.features.catalog.AssistantCatalog;
 import center.oneapi.mobile.features.catalog.ModelCatalog;
+import center.oneapi.mobile.features.chat.ChatContextBuilder;
 import center.oneapi.mobile.features.chat.ChatController;
 import center.oneapi.mobile.features.desktop.DesktopController;
 import center.oneapi.mobile.features.desktop.DesktopRepository;
 import center.oneapi.mobile.features.desktop.DesktopTimelineMapper;
 import center.oneapi.mobile.features.image.ImageController;
 import center.oneapi.mobile.features.image.ImageAssistantCatalog;
+import center.oneapi.mobile.features.keys.AppApiKeyManager;
 import center.oneapi.mobile.features.status.StatusController;
 import center.oneapi.mobile.navigation.AppSection;
 import center.oneapi.mobile.ui.FlowBackgroundView;
@@ -111,7 +110,6 @@ import center.oneapi.mobile.ui.conversation.ScrollDock;
 
 public class MainActivity extends Activity {
     private static final String TAG = "OneAPI-Mobile";
-    static final String APP_API_KEY_CREATE_PATH = "/api/token/";
     private static final int REQ_IMAGE = 42;
     private static final int REQ_RECORD_AUDIO = 43;
     private static final int REQ_CAMERA = 44;
@@ -149,6 +147,8 @@ public class MainActivity extends Activity {
     private StatusController statusController;
     private BillingController billingController;
     private ConversationRepository conversationRepository;
+    private AppApiKeyManager appApiKeyManager;
+    private AttachmentContentReader attachmentReader;
     private final Runnable desktopPoll = new Runnable() {
         @Override
         public void run() {
@@ -185,6 +185,14 @@ public class MainActivity extends Activity {
     private boolean streamScrollPausedByUser;
     private boolean streamScrollRunning;
     private boolean streamScrollProgrammatic;
+    private String pendingAlipayTradeNo;
+    private Dialog pendingAlipayDialog;
+    private final Runnable alipayPaymentPoll = new Runnable() {
+        @Override
+        public void run() {
+            pollPendingAlipayPayment(false);
+        }
+    };
     private final Runnable streamScrollTick = new Runnable() {
         @Override
         public void run() {
@@ -217,6 +225,8 @@ public class MainActivity extends Activity {
         apiClient = new ApiClient(prefs);
         chatController = new ChatController(apiClient);
         imageController = new ImageController(apiClient);
+        appApiKeyManager = new AppApiKeyManager(prefs);
+        attachmentReader = new AttachmentContentReader(getContentResolver());
         audioTranscriptionController = new AudioTranscriptionController(apiClient);
         desktopController = new DesktopController(apiClient);
         desktopRepository = new DesktopRepository(apiClient);
@@ -247,6 +257,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         apiClient.cancelActiveRequests();
         mainHandler.removeCallbacks(desktopPoll);
+        mainHandler.removeCallbacks(alipayPaymentPoll);
         stopVoiceRecognition();
         setDesktopKeepScreenOn(false);
         desktopJobMonitor.shutdownNow();
@@ -896,288 +907,40 @@ public class MainActivity extends Activity {
     }
 
     private String displayName(Uri uri) {
-        String fallback = uri == null ? "附件" : String.valueOf(uri.getLastPathSegment());
-        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                String value = cursor.getString(0);
-                if (value != null && !value.trim().isEmpty()) return value.trim();
-            }
-        } catch (Exception ignored) {
-        }
-        return fallback == null || fallback.trim().isEmpty() ? "附件" : fallback;
+        return attachmentReader.displayName(uri);
     }
 
     private String readTextAttachment(Uri uri, int limit) {
-        String type = getContentResolver().getType(uri);
-        String name = displayName(uri).toLowerCase(Locale.ROOT);
-        boolean textLike = (type != null && (type.startsWith("text/") || type.contains("json") || type.contains("xml")))
-                || name.endsWith(".txt") || name.endsWith(".json") || name.endsWith(".md") || name.endsWith(".markdown")
-                || name.endsWith(".csv") || name.endsWith(".log") || name.endsWith(".xml") || name.endsWith(".yaml") || name.endsWith(".yml");
-        if (!textLike) return null;
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
-            if (input == null) return null;
-            byte[] buffer = new byte[4096];
-            int read;
-            int total = 0;
-            while ((read = input.read(buffer)) != -1 && total < limit) {
-                int allowed = Math.min(read, limit - total);
-                output.write(buffer, 0, allowed);
-                total += allowed;
-            }
-            return output.toString(java.nio.charset.StandardCharsets.UTF_8.name());
-        } catch (Exception ignored) {
-            return null;
-        }
+        return attachmentReader.readText(uri, limit);
     }
 
     private String readableAttachmentContent(Uri uri, int limit) {
-        String name = displayName(uri).toLowerCase(Locale.ROOT);
-        if (name.endsWith(".xlsx") || name.endsWith(".xlsm") || name.endsWith(".xls")) {
-            String sheet = readXlsxAttachment(uri, 200);
-            if (sheet != null && !sheet.trim().isEmpty()) return sheet.trim();
-        }
-        String text = readTextAttachment(uri, limit);
-        if (text != null && !text.trim().isEmpty()) return text.trim();
-        return null;
+        return attachmentReader.readableContent(uri, limit);
     }
 
     private boolean isImageAttachment(Uri uri) {
-        String type = getContentResolver().getType(uri);
-        String name = displayName(uri).toLowerCase(Locale.ROOT);
-        return (type != null && type.startsWith("image/"))
-                || name.endsWith(".png")
-                || name.endsWith(".jpg")
-                || name.endsWith(".jpeg")
-                || name.endsWith(".webp")
-                || name.endsWith(".gif")
-                || name.endsWith(".heic")
-                || name.endsWith(".heif");
+        return attachmentReader.isImage(uri);
     }
 
     private boolean isPdfAttachment(Uri uri) {
-        String type = getContentResolver().getType(uri);
-        String name = displayName(uri).toLowerCase(Locale.ROOT);
-        return "application/pdf".equals(type) || name.endsWith(".pdf");
+        return attachmentReader.isPdf(uri);
     }
 
     private String imageDataUrl(Uri uri) throws Exception {
-        String direct = uri == null ? "" : uri.toString().trim();
-        if (direct.startsWith("data:image/")) return direct;
-        String type = getContentResolver().getType(uri);
-        String name = displayName(uri).toLowerCase(Locale.ROOT);
-        if (type == null || !type.startsWith("image/")) {
-            if (name.endsWith(".jpg") || name.endsWith(".jpeg")) type = "image/jpeg";
-            else if (name.endsWith(".webp")) type = "image/webp";
-            else if (name.endsWith(".gif")) type = "image/gif";
-            else type = "image/png";
-        }
-        type = canonicalImageMime(type, name);
-        String converted = jpegDataUrl(uri);
-        if (!converted.isEmpty()) return converted;
-        if (!isModelImageMime(type)) return "";
-        byte[] bytes = readAttachmentBytes(uri, 12 * 1024 * 1024);
-        if (bytes.length == 0) return "";
-        return "data:" + type + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
-    }
-
-    private String canonicalImageMime(String type, String name) {
-        String clean = type == null ? "" : type.toLowerCase(Locale.ROOT).trim();
-        String lowerName = name == null ? "" : name.toLowerCase(Locale.ROOT);
-        if ("image/jpg".equals(clean) || "image/pjpeg".equals(clean) || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
-            return "image/jpeg";
-        }
-        if ("image/x-png".equals(clean) || lowerName.endsWith(".png")) return "image/png";
-        if (lowerName.endsWith(".webp")) return "image/webp";
-        if (lowerName.endsWith(".gif")) return "image/gif";
-        return clean.isEmpty() ? "image/png" : clean;
-    }
-
-    private boolean isModelImageMime(String type) {
-        String clean = type == null ? "" : type.toLowerCase(Locale.ROOT);
-        return "image/png".equals(clean)
-                || "image/jpeg".equals(clean)
-                || "image/webp".equals(clean)
-                || "image/gif".equals(clean);
-    }
-
-    private String jpegDataUrl(Uri uri) {
-        Bitmap bitmap = null;
-        Bitmap scaled = null;
-        try {
-            BitmapFactory.Options bounds = new BitmapFactory.Options();
-            bounds.inJustDecodeBounds = true;
-            try (InputStream probe = getContentResolver().openInputStream(uri)) {
-                if (probe == null) return "";
-                BitmapFactory.decodeStream(probe, null, bounds);
-            }
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return "";
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            int longest = Math.max(bounds.outWidth, bounds.outHeight);
-            int sample = 1;
-            while (longest / sample > 2400) sample *= 2;
-            options.inSampleSize = sample;
-            try (InputStream input = getContentResolver().openInputStream(uri)) {
-                if (input == null) return "";
-                bitmap = BitmapFactory.decodeStream(input, null, options);
-            }
-            if (bitmap == null) return "";
-            int maxSide = 1600;
-            int width = bitmap.getWidth();
-            int height = bitmap.getHeight();
-            if (Math.max(width, height) > maxSide) {
-                float scale = maxSide / (float) Math.max(width, height);
-                int nextWidth = Math.max(1, Math.round(width * scale));
-                int nextHeight = Math.max(1, Math.round(height * scale));
-                scaled = Bitmap.createScaledBitmap(bitmap, nextWidth, nextHeight, true);
-            }
-            Bitmap outputBitmap = scaled == null ? bitmap : scaled;
-            java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
-            int quality = 88;
-            do {
-                output.reset();
-                outputBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output);
-                quality -= 8;
-            } while (output.size() > 3 * 1024 * 1024 && quality >= 60);
-            return "data:image/jpeg;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
-        } catch (Exception ignored) {
-            return "";
-        } finally {
-            if (scaled != null && scaled != bitmap) scaled.recycle();
-            if (bitmap != null) bitmap.recycle();
-        }
+        return attachmentReader.imageDataUrl(uri);
     }
 
     private String pdfFirstPageDataUrl(Uri uri) {
-        ParcelFileDescriptor fd = null;
-        PdfRenderer renderer = null;
-        PdfRenderer.Page page = null;
-        try {
-            fd = getContentResolver().openFileDescriptor(uri, "r");
-            if (fd == null) return "";
-            renderer = new PdfRenderer(fd);
-            if (renderer.getPageCount() <= 0) return "";
-            page = renderer.openPage(0);
-            int maxWidth = 1280;
-            float ratio = page.getWidth() / (float) Math.max(1, page.getHeight());
-            int width = Math.max(480, Math.min(maxWidth, page.getWidth() * 2));
-            int height = Math.max(480, (int) (width / Math.max(0.25f, ratio)));
-            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            bitmap.eraseColor(Color.WHITE);
-            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-            java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
-            bitmap.compress(Bitmap.CompressFormat.PNG, 92, output);
-            return "data:image/png;base64," + Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
-        } catch (Exception ignored) {
-            return "";
-        } finally {
-            try {
-                if (page != null) page.close();
-            } catch (Exception ignored) {
-            }
-            try {
-                if (renderer != null) renderer.close();
-            } catch (Exception ignored) {
-            }
-            try {
-                if (fd != null) fd.close();
-            } catch (Exception ignored) {
-            }
-        }
+        return attachmentReader.pdfFirstPageDataUrl(uri);
     }
 
     private byte[] readAttachmentBytes(Uri uri, int limit) throws Exception {
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
-            if (input == null) return new byte[0];
-            byte[] buffer = new byte[8192];
-            int read;
-            int total = 0;
-            while ((read = input.read(buffer)) != -1 && total < limit) {
-                int allowed = Math.min(read, limit - total);
-                output.write(buffer, 0, allowed);
-                total += allowed;
-            }
-            return output.toByteArray();
-        }
+        return attachmentReader.readBytes(uri, limit);
     }
 
     private String readXlsxAttachment(Uri uri, int maxRows) {
-        List<String> shared = new ArrayList<>();
-        Map<String, String> entries = new LinkedHashMap<>();
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             ZipInputStream zip = new ZipInputStream(input)) {
-            if (input == null) return null;
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                String name = entry.getName();
-                if ("xl/sharedStrings.xml".equals(name) || name.startsWith("xl/worksheets/sheet")) {
-                    java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
-                    byte[] buffer = new byte[4096];
-                    int read;
-                    while ((read = zip.read(buffer)) != -1 && output.size() < 800000) {
-                        output.write(buffer, 0, read);
-                    }
-                    entries.put(name, output.toString(java.nio.charset.StandardCharsets.UTF_8.name()));
-                }
-                zip.closeEntry();
-            }
-        } catch (Exception ignored) {
-            return null;
-        }
-        String sharedXml = entries.get("xl/sharedStrings.xml");
-        if (sharedXml != null) {
-            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("<t[^>]*>(.*?)</t>", java.util.regex.Pattern.DOTALL).matcher(sharedXml);
-            while (matcher.find()) {
-                shared.add(xmlText(matcher.group(1)));
-            }
-        }
-        StringBuilder out = new StringBuilder();
-        for (Map.Entry<String, String> entry : entries.entrySet()) {
-            if (!entry.getKey().startsWith("xl/worksheets/sheet")) continue;
-            out.append("## ").append(entry.getKey().replace("xl/worksheets/", "")).append('\n');
-            java.util.regex.Matcher rowMatcher = java.util.regex.Pattern.compile("<row[^>]*>(.*?)</row>", java.util.regex.Pattern.DOTALL).matcher(entry.getValue());
-            int rows = 0;
-            while (rowMatcher.find() && rows < maxRows) {
-                List<String> cells = new ArrayList<>();
-                java.util.regex.Matcher cellMatcher = java.util.regex.Pattern.compile("<c([^>]*)>(.*?)</c>", java.util.regex.Pattern.DOTALL).matcher(rowMatcher.group(1));
-                while (cellMatcher.find()) {
-                    String attrs = cellMatcher.group(1);
-                    String body = cellMatcher.group(2);
-                    java.util.regex.Matcher valueMatcher = java.util.regex.Pattern.compile("<v>(.*?)</v>", java.util.regex.Pattern.DOTALL).matcher(body);
-                    String value = "";
-                    if (valueMatcher.find()) value = xmlText(valueMatcher.group(1));
-                    if (attrs != null && attrs.contains("t=\"s\"")) {
-                        try {
-                            int index = Integer.parseInt(value.trim());
-                            value = index >= 0 && index < shared.size() ? shared.get(index) : value;
-                        } catch (Exception ignored) {
-                        }
-                    }
-                    cells.add(value);
-                }
-                if (!cells.isEmpty()) {
-                    out.append("| ").append(TextUtils.join(" | ", cells)).append(" |\n");
-                    rows++;
-                }
-            }
-            if (rows >= maxRows) out.append("\n... 已截断预览\n");
-            break;
-        }
-        return out.length() == 0 ? null : out.toString();
+        return attachmentReader.readXlsx(uri, maxRows);
     }
-
-    private String xmlText(String value) {
-        return (value == null ? "" : value)
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&amp;", "&")
-                .replace("&quot;", "\"")
-                .replace("&apos;", "'")
-                .replaceAll("<[^>]+>", "")
-                .trim();
-    }
-
     private void addNav(LinearLayout nav, AppSection section, int icon) {
         LinearLayout wrapper = UiKit.vertical(this);
         wrapper.setGravity(Gravity.CENTER);
@@ -1976,192 +1739,7 @@ public class MainActivity extends Activity {
     }
 
     private void ensureAppApiKeyOrThrow(ApiClient client) throws Exception {
-        String current = prefs.appApiKey();
-        if (!current.isEmpty()) {
-            KeyValidation validation = validateAppApiKey(client, current);
-            if (validation.status == KeyValidationStatus.INVALID) {
-                prefs.setAppApiKey("");
-            }
-        }
-        String key = fetchValidExistingAppApiKey(client, true);
-        if (key.isEmpty()) {
-            try {
-                client.post(APP_API_KEY_CREATE_PATH, buildAppApiKeyCreatePayload(prefs.appId()));
-            } catch (Exception error) {
-                throw new IllegalStateException("创建 App 专用 Key 失败（" + APP_API_KEY_CREATE_PATH + "）：" + message(error), error);
-            }
-            key = fetchValidExistingAppApiKey(client, false);
-        }
-        if (key.isEmpty()) {
-            throw new IllegalStateException("服务器未返回可用 App 专用 Key。已调用 /api/token 创建，但 /api/token 列表或 /api/token/:id/key 未返回可用密钥。");
-        }
-        prefs.setAppApiKey(key);
-    }
-
-    private KeyValidation validateAppApiKey(ApiClient client, String key) {
-        if (key == null || key.trim().isEmpty()) {
-            return new KeyValidation(KeyValidationStatus.INVALID, "empty key");
-        }
-        try {
-            client.request("GET", "/api/usage/token", null, 15000, key);
-            return new KeyValidation(KeyValidationStatus.VALID, "");
-        } catch (Exception usageError) {
-            String usageMessage = message(usageError);
-            if (isAppApiKeyInvalidMessage(usageMessage)) {
-                return new KeyValidation(KeyValidationStatus.INVALID, usageMessage);
-            }
-            try {
-                client.request("GET", "/v1/models", null, 15000, key);
-                return new KeyValidation(KeyValidationStatus.VALID, "");
-            } catch (Exception modelsError) {
-                String modelsMessage = message(modelsError);
-                if (isAppApiKeyInvalidMessage(modelsMessage)) {
-                    return new KeyValidation(KeyValidationStatus.INVALID, modelsMessage);
-                }
-                return new KeyValidation(KeyValidationStatus.UNKNOWN, usageMessage + "；/v1/models：" + modelsMessage);
-            }
-        }
-    }
-
-    private String fetchValidExistingAppApiKey(ApiClient client, boolean deleteInvalid) throws Exception {
-        List<Integer> ids = fetchAppApiKeyTokenIds(client);
-        for (int id : ids) {
-            String key = fetchTokenKey(client, id);
-            if (key.isEmpty()) {
-                continue;
-            }
-            KeyValidation validation = validateAppApiKey(client, key);
-            if (validation.status == KeyValidationStatus.VALID || validation.status == KeyValidationStatus.UNKNOWN) {
-                if (validation.status == KeyValidationStatus.UNKNOWN) {
-                    Log.w(TAG, "app api key validation inconclusive, keeping key " + id + ": " + validation.message);
-                }
-                return key;
-            }
-            if (deleteInvalid && validation.status == KeyValidationStatus.INVALID) {
-                try {
-                    client.delete("/api/token/" + id);
-                } catch (Exception error) {
-                    Log.w(TAG, "failed to delete invalid app api key " + id, error);
-                }
-            }
-        }
-        return "";
-    }
-
-    private List<Integer> fetchAppApiKeyTokenIds(ApiClient client) throws Exception {
-        String appKeyName = appApiKeyName(prefs.appId());
-        try {
-            JSONObject searchEnvelope = client.get("/api/token/search?keyword=" + ApiClient.enc(appKeyName) + "&p=1&size=100");
-            List<Integer> searchIds = appApiKeyMutableTokenIds(searchEnvelope);
-            if (!searchIds.isEmpty()) return searchIds;
-        } catch (Exception error) {
-            Log.w(TAG, "search app api key failed, fallback to token list", error);
-        }
-        JSONObject envelope;
-        try {
-            envelope = client.get("/api/token/?p=1&size=100");
-        } catch (Exception error) {
-            throw new IllegalStateException("读取 App 专用 Key 列表失败（/api/token）： " + message(error), error);
-        }
-        return appApiKeyMutableTokenIds(envelope);
-    }
-
-    private String fetchTokenKey(ApiClient client, int id) throws Exception {
-        if (id <= 0) return "";
-        JSONObject keyEnvelope;
-        try {
-            keyEnvelope = client.post("/api/token/" + id + "/key", new JSONObject());
-        } catch (Exception error) {
-            throw new IllegalStateException("读取 App 专用 Key 明文失败（/api/token/" + id + "/key）： " + message(error), error);
-        }
-        JSONObject data = keyEnvelope.optJSONObject("data");
-        String key = data == null ? "" : first(data, "key", "token");
-        if (key.isEmpty()) key = keyEnvelope.optString("key", "");
-        return key.trim();
-    }
-
-    static List<Integer> appApiKeyTokenIds(JSONArray tokens) {
-        return appApiKeyMutableTokenIds(tokens);
-    }
-
-    static List<Integer> appApiKeyMutableTokenIds(JSONObject envelope) {
-        return appApiKeyMutableTokenIds(tokenItems(envelope));
-    }
-
-    static List<Integer> appApiKeyMutableTokenIds(JSONArray tokens) {
-        List<Integer> ids = new ArrayList<>();
-        if (tokens == null) return ids;
-        for (int i = 0; i < tokens.length(); i++) {
-            JSONObject item = tokens.optJSONObject(i);
-            if (!canMutateAppApiKeyToken(item)) continue;
-            int id = item.optInt("id", 0);
-            if (id > 0) ids.add(id);
-        }
-        ids.sort((a, b) -> Integer.compare(b, a));
-        return ids;
-    }
-
-    private static JSONArray tokenItems(JSONObject envelope) {
-        Object data = envelope == null ? null : envelope.opt("data");
-        if (data instanceof JSONArray) return (JSONArray) data;
-        if (data instanceof JSONObject) {
-            JSONObject object = (JSONObject) data;
-            JSONArray items = object.optJSONArray("items");
-            if (items != null) return items;
-            JSONArray rows = object.optJSONArray("data");
-            if (rows != null) return rows;
-        }
-        return new JSONArray();
-    }
-
-    static JSONObject buildAppApiKeyCreatePayload(String appId) throws Exception {
-        String name = appApiKeyName(appId);
-        JSONObject body = new JSONObject();
-        body.put("name", name);
-        body.put("expired_time", -1);
-        body.put("remain_quota", 0);
-        body.put("unlimited_quota", true);
-        body.put("model_limits_enabled", false);
-        body.put("model_limits", "");
-        body.put("group", "");
-        body.put("cross_group_retry", false);
-        return body;
-    }
-
-    static String appApiKeyName(String appId) {
-        return "OneAPIapp";
-    }
-
-    static boolean isAppApiKeyToken(JSONObject item) {
-        if (item == null) return false;
-        String name = item.optString("name", "").trim();
-        return name.equals("OneAPIapp");
-    }
-
-    static boolean isLegacyAppApiKeyToken(JSONObject item) {
-        if (item == null) return false;
-        String name = item.optString("name", "").trim();
-        return name.equals("OneAPI Android App") || name.startsWith("OneAPI Android App ");
-    }
-
-    static boolean canMutateAppApiKeyToken(JSONObject item) {
-        return isAppApiKeyToken(item) && item != null && item.optInt("id", 0) > 0;
-    }
-
-    private enum KeyValidationStatus {
-        VALID,
-        INVALID,
-        UNKNOWN
-    }
-
-    private static final class KeyValidation {
-        final KeyValidationStatus status;
-        final String message;
-
-        KeyValidation(KeyValidationStatus status, String message) {
-            this.status = status;
-            this.message = message == null ? "" : message;
-        }
+        appApiKeyManager.ensureOrThrow(client);
     }
 
     private void doRegister(String username, String password, Runnable onSuccess) {
@@ -2422,6 +2000,17 @@ public class MainActivity extends Activity {
         overview.addView(UiKit.text(this, "剩余额度 " + formatQuotaAsUsd(profile.optDouble("quota", 0), 500000), UiKit.MUTED, 14));
         overview.addView(UiKit.text(this, "已用额度 " + formatQuotaAsUsd(profile.optDouble("used_quota", 0), 500000) + " · 请求数 " + profile.optLong("request_count", 0), UiKit.MUTED, 14));
         panel.addView(overview);
+        LinearLayout alipay = cardPanel();
+        alipay.addView(UiKit.bold(this, "支付宝充值"));
+        alipay.addView(UiKit.text(this, "服务端创建 App 支付订单，支付结果由服务器查询确认。", UiKit.MUTED, 14));
+        EditText amountInput = input("充值金额");
+        amountInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        amountInput.setText("10");
+        alipay.addView(labelRow("金额", amountInput));
+        Button pay = UiKit.ghostButton(this, "支付宝支付");
+        pay.setOnClickListener(v -> startAlipayAppPayment(amountInput.getText().toString()));
+        alipay.addView(pay, centeredButtonLp());
+        panel.addView(alipay);
         JSONObject usage = result.optJSONObject("usage");
         JSONArray usageItems = usage == null ? null : usage.optJSONArray("items");
         if (usageItems == null && usage != null) usageItems = usage.optJSONArray("data");
@@ -2899,6 +2488,164 @@ public class MainActivity extends Activity {
         return ratio;
     }
 
+    private void startAlipayAppPayment(String amountText) {
+        String cleanAmount = amountText == null ? "" : amountText.trim();
+        int amount;
+        try {
+            amount = Integer.parseInt(cleanAmount);
+        } catch (Exception ignored) {
+            Toast.makeText(this, "请输入有效充值金额", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (amount <= 0) {
+            Toast.makeText(this, "充值金额必须大于 0", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        network.execute(() -> {
+            try {
+                JSONObject envelope = billingController.createAlipayOrder(amount);
+                JSONObject data = envelope.optJSONObject("data");
+                if (data == null) throw new IllegalStateException(first(envelope, "message", "data"));
+                String tradeNo = first(data, "trade_no");
+                String orderString = first(data, "order_string");
+                if (tradeNo.isEmpty() || orderString.isEmpty()) {
+                    throw new IllegalStateException("服务端未返回支付宝 App 支付参数");
+                }
+                pendingAlipayTradeNo = tradeNo;
+                mainHandler.post(() -> {
+                    showAlipayPendingDialog(tradeNo, data.optString("amount", String.valueOf(amount)));
+                    launchAlipayApp(orderString);
+                    mainHandler.removeCallbacks(alipayPaymentPoll);
+                    mainHandler.postDelayed(alipayPaymentPoll, 2000);
+                });
+            } catch (Exception error) {
+                mainHandler.post(() -> Toast.makeText(this, "创建支付宝订单失败：" + message(error), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void launchAlipayApp(String orderString) {
+        if (launchAlipayAppWithSdk(orderString)) {
+            return;
+        }
+        try {
+            String encodedOrder = Uri.encode("alipayqr://platformapi/startapp?saId=10000007&qrcode=" + Uri.encode(orderString));
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("alipays://platformapi/startapp?appId=20000067&url=" + encodedOrder));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception error) {
+            Toast.makeText(this, "无法拉起支付宝，请确认已安装支付宝。", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private boolean launchAlipayAppWithSdk(String orderString) {
+        try {
+            Class<?> payTaskClass = Class.forName("com.alipay.sdk.app.PayTask");
+            Constructor<?> constructor = payTaskClass.getConstructor(android.app.Activity.class);
+            Object payTask = constructor.newInstance(this);
+            Method payV2 = payTaskClass.getMethod("payV2", String.class, boolean.class);
+            network.execute(() -> {
+                try {
+                    payV2.invoke(payTask, orderString, true);
+                } catch (Exception ignored) {
+                }
+            });
+            return true;
+        } catch (ClassNotFoundException ignored) {
+            return false;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    private void showAlipayPendingDialog(String tradeNo, String amount) {
+        if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) {
+            pendingAlipayDialog.dismiss();
+        }
+        Dialog dialog = new Dialog(this);
+        pendingAlipayDialog = dialog;
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "支付宝支付"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> cancelPendingAlipayPayment());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(UiKit.text(this, "金额：" + amount + " 元", UiKit.MUTED, 14));
+        panel.addView(UiKit.text(this, "订单：" + tradeNo, UiKit.MUTED, 12));
+        panel.addView(UiKit.text(this, "请在支付宝完成支付。支付结果由服务器查询确认。", UiKit.MUTED, 14));
+        Button check = UiKit.ghostButton(this, "检查支付状态");
+        check.setOnClickListener(v -> pollPendingAlipayPayment(true));
+        Button cancel = UiKit.ghostButton(this, "取消订单");
+        cancel.setOnClickListener(v -> cancelPendingAlipayPayment());
+        LinearLayout actions = UiKit.horizontal(this);
+        actions.addView(check, new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f));
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f);
+        cancelLp.leftMargin = UiKit.dp(this, 10);
+        actions.addView(cancel, cancelLp);
+        panel.addView(actions, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44)));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> cancelPendingAlipayPayment());
+        panel.setOnClickListener(v -> { });
+        dialog.setOnDismissListener(d -> {
+            if (dialog == pendingAlipayDialog) pendingAlipayDialog = null;
+        });
+        showDialogOverlay(dialog, overlay);
+    }
+
+    private void pollPendingAlipayPayment(boolean manual) {
+        String tradeNo = pendingAlipayTradeNo;
+        if (tradeNo == null || tradeNo.trim().isEmpty()) return;
+        network.execute(() -> {
+            try {
+                JSONObject envelope = billingController.queryAlipayOrder(tradeNo);
+                JSONObject data = envelope.optJSONObject("data");
+                String status = data == null ? "" : first(data, "status");
+                if ("success".equalsIgnoreCase(status)) {
+                    pendingAlipayTradeNo = null;
+                    mainHandler.removeCallbacks(alipayPaymentPoll);
+                    mainHandler.post(() -> {
+                        if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) pendingAlipayDialog.dismiss();
+                        Toast.makeText(this, "支付成功，余额已刷新。", Toast.LENGTH_LONG).show();
+                        panelDataCache.remove("钱包与消耗");
+                        switchSection(AppSection.WALLET);
+                    });
+                    return;
+                }
+                if (manual) {
+                    mainHandler.post(() -> Toast.makeText(this, "暂未确认支付，请稍后再试。", Toast.LENGTH_SHORT).show());
+                }
+                mainHandler.removeCallbacks(alipayPaymentPoll);
+                mainHandler.postDelayed(alipayPaymentPoll, 2000);
+            } catch (Exception error) {
+                if (manual) {
+                    mainHandler.post(() -> Toast.makeText(this, "查询失败：" + message(error), Toast.LENGTH_LONG).show());
+                }
+                mainHandler.removeCallbacks(alipayPaymentPoll);
+                mainHandler.postDelayed(alipayPaymentPoll, 2000);
+            }
+        });
+    }
+
+    private void cancelPendingAlipayPayment() {
+        String tradeNo = pendingAlipayTradeNo;
+        pendingAlipayTradeNo = null;
+        mainHandler.removeCallbacks(alipayPaymentPoll);
+        if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) {
+            pendingAlipayDialog.dismiss();
+        }
+        if (tradeNo == null || tradeNo.trim().isEmpty()) return;
+        network.execute(() -> {
+            try {
+                billingController.cancelAlipayOrder(tradeNo);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
     private void renderServiceStatus(LinearLayout panel, JSONObject result) {
         Object data = result.opt("data");
         JSONObject dataObj = data instanceof JSONObject ? (JSONObject) data : null;
@@ -3121,18 +2868,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isAppApiKeyInvalidMessage(String message) {
-        String normalized = message == null ? "" : message.trim().toLowerCase(Locale.ROOT);
-        return isAuthExpiredMessage(message)
-                || normalized.contains("token invalid")
-                || normalized.contains("invalid token")
-                || normalized.contains("token is invalid")
-                || normalized.contains("token not provided")
-                || normalized.contains("token expired")
-                || normalized.contains("token exhausted")
-                || normalized.contains("令牌无效")
-                || normalized.contains("令牌不存在")
-                || normalized.contains("令牌已过期")
-                || normalized.contains("令牌额度已用尽");
+        return AppApiKeyManager.isInvalidKeyMessage(message);
     }
 
     private interface JsonRequest {
@@ -4784,6 +4520,11 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "请先在系统设置中绑定 PC/Mac 客户端", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (currentSection.isDesktop() && isDesktopSessionBusy(state().current())) {
+            Toast.makeText(this, "客户端仍在执行，完成状态同步后会自动恢复发送按钮", Toast.LENGTH_SHORT).show();
+            composerView.setSending(true);
+            return;
+        }
         stopActiveSend();
         AppSection targetSection = currentSection;
         SectionState state = state();
@@ -4917,45 +4658,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray buildChatContext(ChatSession session, String contextWindow) {
-        JSONArray context = new JSONArray();
-        if (session == null || session.messages == null || session.messages.isEmpty()) return context;
-        int limit = chatContextLimit(contextWindow);
-        int start = Math.max(0, session.messages.size() - limit);
-        for (int i = start; i < session.messages.size(); i++) {
-            ChatMessage message = session.messages.get(i);
-            if (message == null || message.log) continue;
-            if (!"user".equals(message.role) && !"assistant".equals(message.role)) continue;
-            String content = chatContextText(message);
-            if (content.isEmpty()) continue;
-            try {
-                context.put(new JSONObject()
-                        .put("role", message.role)
-                        .put("content", content));
-            } catch (Exception ignored) {
-            }
-        }
-        return context;
-    }
-
-    private int chatContextLimit(String contextWindow) {
-        String value = contextWindow == null ? "" : contextWindow.trim();
-        if ("短上下文".equals(value)) return 8;
-        if ("长上下文".equals(value)) return 40;
-        return 20;
-    }
-
-    private String chatContextText(ChatMessage message) {
-        String text = message == null ? "" : message.text;
-        if (text == null) return "";
-        String clean = textWithoutImageUris(text).trim();
-        if (clean.equals("正在思考...") || clean.equals("oneapi://image-loading") || clean.equals("正在发送到桌面端...")) {
-            return "";
-        }
-        clean = clean.replaceAll("(?is)<thinking>.*?</thinking>", "").trim();
-        if (clean.length() > 4000) {
-            clean = clean.substring(clean.length() - 4000).trim();
-        }
-        return clean;
+        return ChatContextBuilder.build(session == null ? null : session.messages, contextWindow);
     }
 
     private Object buildChatUserContent(String text, List<Uri> attachments, String fallbackText) throws Exception {
@@ -5353,8 +5056,7 @@ public class MainActivity extends Activity {
     }
 
     private void ensureAppApiKeyAfterInvalidation() throws Exception {
-        prefs.setAppApiKey("");
-        ensureAppApiKeyOrThrow(apiClient);
+        appApiKeyManager.invalidateAndEnsure(apiClient);
     }
 
     private String desktopStatusFromEvents(JSONArray events, String fallback) {

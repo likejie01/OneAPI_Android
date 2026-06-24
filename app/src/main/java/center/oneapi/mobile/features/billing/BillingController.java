@@ -34,4 +34,25 @@ public class BillingController {
     public JSONObject purchase(JSONObject body) throws Exception {
         return api.post("/api/subscription/wallet/pay", body);
     }
+
+    public JSONObject createAlipayOrder(int amount) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("amount", amount);
+        body.put("platform", "android");
+        body.put("pay_scene", "app");
+        body.put("pay_product", "alipay.trade.app.pay");
+        body.put("payment_product", "alipay.trade.app.pay");
+        return api.post("/api/user/alipay/pay", body);
+    }
+
+    public JSONObject queryAlipayOrder(String tradeNo) throws Exception {
+        String cleanTradeNo = tradeNo == null ? "" : tradeNo.trim();
+        return api.get("/api/user/alipay/query?trade_no=" + java.net.URLEncoder.encode(cleanTradeNo, java.nio.charset.StandardCharsets.UTF_8.name()));
+    }
+
+    public JSONObject cancelAlipayOrder(String tradeNo) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("trade_no", tradeNo == null ? "" : tradeNo.trim());
+        return api.post("/api/user/alipay/cancel", body);
+    }
 }
