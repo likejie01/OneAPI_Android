@@ -216,6 +216,21 @@ public final class UiKit {
         return button;
     }
 
+    public static Button primaryButton(Context context, String value) {
+        Button button = new Button(context);
+        button.setText(value);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(13);
+        button.setAllCaps(false);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setPadding(dp(context, 12), 0, dp(context, 12), 0);
+        button.setBackground(round(blue(context), dp(context, 16), Color.TRANSPARENT));
+        return button;
+    }
+
     public static ImageButton imageButton(Context context, int resId, String desc) {
         ImageButton button = new ImageButton(context);
         button.setImageResource(resId);

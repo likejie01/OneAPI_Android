@@ -1742,25 +1742,6 @@ public class MainActivity extends Activity {
         appApiKeyManager.ensureOrThrow(client);
     }
 
-    private void doRegister(String username, String password, Runnable onSuccess) {
-        String cleanUser = username == null ? "" : username.trim();
-        String cleanPassword = password == null ? "" : password.trim();
-        network.execute(() -> {
-            try {
-                JSONObject body = new JSONObject();
-                body.put("username", cleanUser);
-                body.put("password", cleanPassword);
-                new ApiClient(prefs).post("/api/user/register", body);
-                mainHandler.post(() -> {
-                    Toast.makeText(this, "注册成功，正在登录", Toast.LENGTH_SHORT).show();
-                    if (onSuccess != null) onSuccess.run();
-                });
-            } catch (Exception error) {
-                mainHandler.post(() -> Toast.makeText(this, "注册失败：" + message(error), Toast.LENGTH_LONG).show());
-            }
-        });
-    }
-
     private void showLoginDialog(boolean cancelable) {
         if (loginDialogShowing) return;
         loginDialogShowing = true;
@@ -1785,57 +1766,11 @@ public class MainActivity extends Activity {
             prefs.setServer(AppPrefs.DEFAULT_SERVER);
             doLogin(username.getText().toString(), password.getText().toString(), dialog::dismiss);
         });
-        Button register = UiKit.ghostButton(this, "注册账号");
-        register.setOnClickListener(v -> showRegisterDialog(dialog));
         LinearLayout actions = UiKit.horizontal(this);
         actions.setGravity(Gravity.CENTER);
-        actions.addView(login, new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f));
-        LinearLayout.LayoutParams registerLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f);
-        registerLp.leftMargin = UiKit.dp(this, 10);
-        actions.addView(register, registerLp);
+        actions.addView(login, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 40)));
         panel.addView(actions, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44)));
         overlay.addView(panel, centeredModalLp());
-        panel.setOnClickListener(v -> { });
-        showDialogOverlay(dialog, overlay);
-    }
-
-    private void showRegisterDialog(Dialog loginDialog) {
-        Dialog dialog = new Dialog(this);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        FrameLayout overlay = modalOverlay();
-        LinearLayout panel = modalPanel();
-        LinearLayout titleRow = UiKit.horizontal(this);
-        titleRow.addView(UiKit.bold(this, "注册账号"), new LinearLayout.LayoutParams(0, -2, 1f));
-        Button close = iconGlyphButton("×");
-        close.setTextSize(18);
-        close.setOnClickListener(v -> dialog.dismiss());
-        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
-        panel.addView(titleRow);
-        EditText username = input("账号，最多 20 位");
-        EditText password = input("密码，8-20 位");
-        EditText confirm = input("再次输入密码");
-        password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        confirm.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        panel.addView(labelRow("账号", username));
-        panel.addView(labelRow("密码", password));
-        panel.addView(labelRow("确认", confirm));
-        Button submit = UiKit.ghostButton(this, "注册并登录");
-        submit.setOnClickListener(v -> {
-            String pass = password.getText().toString();
-            if (!pass.equals(confirm.getText().toString())) {
-                Toast.makeText(this, "两次输入的密码不一致", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            prefs.setServer(AppPrefs.DEFAULT_SERVER);
-            doRegister(username.getText().toString(), pass, () -> {
-                dialog.dismiss();
-                if (loginDialog != null && loginDialog.isShowing()) loginDialog.dismiss();
-                doLogin(username.getText().toString(), pass, null);
-            });
-        });
-        panel.addView(submit, centeredButtonLp());
-        overlay.addView(panel, centeredModalLp());
-        overlay.setOnClickListener(v -> dialog.dismiss());
         panel.setOnClickListener(v -> { });
         showDialogOverlay(dialog, overlay);
     }
@@ -2528,14 +2463,7 @@ public class MainActivity extends Activity {
         if (launchAlipayAppWithSdk(orderString)) {
             return;
         }
-        try {
-            String encodedOrder = Uri.encode("alipayqr://platformapi/startapp?saId=10000007&qrcode=" + Uri.encode(orderString));
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("alipays://platformapi/startapp?appId=20000067&url=" + encodedOrder));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-        } catch (Exception error) {
-            Toast.makeText(this, "无法拉起支付宝，请确认已安装支付宝。", Toast.LENGTH_LONG).show();
-        }
+        Toast.makeText(this, "无法拉起支付宝，请确认已安装或更新支付宝。", Toast.LENGTH_LONG).show();
     }
 
     private boolean launchAlipayAppWithSdk(String orderString) {
@@ -2546,8 +2474,10 @@ public class MainActivity extends Activity {
             Method payV2 = payTaskClass.getMethod("payV2", String.class, boolean.class);
             network.execute(() -> {
                 try {
-                    payV2.invoke(payTask, orderString, true);
-                } catch (Exception ignored) {
+                    Object sdkResult = payV2.invoke(payTask, orderString, true);
+                    handleAlipaySdkResult(sdkResult);
+                } catch (Exception error) {
+                    handleAlipaySdkResult(error);
                 }
             });
             return true;
@@ -2556,6 +2486,42 @@ public class MainActivity extends Activity {
         } catch (Exception error) {
             return false;
         }
+    }
+
+    private void handleAlipaySdkResult(Object sdkResult) {
+        JSONObject result = new JSONObject();
+        try {
+            if (sdkResult instanceof Map) {
+                Map<?, ?> values = (Map<?, ?>) sdkResult;
+                for (Map.Entry<?, ?> entry : values.entrySet()) {
+                    if (entry.getKey() != null && entry.getValue() != null) {
+                        result.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+                    }
+                }
+            } else if (sdkResult instanceof Exception) {
+                result.put("memo", message((Exception) sdkResult));
+            } else if (sdkResult != null) {
+                result.put("memo", String.valueOf(sdkResult));
+            }
+        } catch (Exception ignored) {
+        }
+        String status = result.optString("resultStatus", "").trim();
+        String memo = result.optString("memo", "").trim();
+        mainHandler.post(() -> {
+            if ("9000".equals(status)) {
+                Toast.makeText(this, "支付宝支付完成，正在向服务器确认结果。", Toast.LENGTH_LONG).show();
+                pollPendingAlipayPayment(true);
+            } else if ("8000".equals(status)) {
+                Toast.makeText(this, "支付宝支付处理中，稍后自动确认结果。", Toast.LENGTH_LONG).show();
+                mainHandler.removeCallbacks(alipayPaymentPoll);
+                mainHandler.postDelayed(alipayPaymentPoll, 2000);
+            } else if ("6001".equals(status)) {
+                Toast.makeText(this, "已取消支付宝支付。", Toast.LENGTH_SHORT).show();
+            } else if (!status.isEmpty() || !memo.isEmpty()) {
+                String detail = memo.isEmpty() ? status : memo;
+                Toast.makeText(this, "支付宝支付未完成：" + detail, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private void showAlipayPendingDialog(String tradeNo, String amount) {
@@ -2929,9 +2895,11 @@ public class MainActivity extends Activity {
         Button create = iconGlyphButton("＋");
         create.setTextSize(18);
         create.setOnClickListener(v -> {
-            createSessionForCurrentSection();
-            dialog.dismiss();
-            renderCurrent(true);
+            showNewConversationSafetyDialog(() -> {
+                createSessionForCurrentSection();
+                dialog.dismiss();
+                renderCurrent(true);
+            });
         });
         titleRow.addView(create, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
         if (currentSection.isDesktop()) {
@@ -3099,6 +3067,48 @@ public class MainActivity extends Activity {
         state.sessions.add(0, session);
         state.selectedIndex = 0;
         state.selectedSessionId = session.id;
+    }
+
+    private void showNewConversationSafetyDialog(Runnable onConfirm) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        FrameLayout overlay = modalOverlay();
+        overlay.setTag("plain_modal");
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.addView(UiKit.bold(this, "安全与隐私提醒"), new LinearLayout.LayoutParams(0, -2, 1f));
+        Button close = iconGlyphButton("×");
+        close.setTextSize(18);
+        close.setOnClickListener(v -> dialog.dismiss());
+        titleRow.addView(close, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
+        panel.addView(titleRow);
+        panel.addView(UiKit.gap(this, 10));
+        TextView notice = UiKit.text(this,
+                "你输入的文本、附件、图片、代码、会话上下文和执行日志可能会发送给第三方或境外模型服务商处理。请勿提交身份证号、银行卡号、密码、访问令牌、商业秘密、未授权个人信息或其他敏感信息。\n\n"
+                        + "不得使用本服务生成、协助、传播违法违规内容，包括危害国家安全、暴恐极端、违法犯罪指导、网络攻击、诈骗、侵犯隐私、色情低俗、仇恨歧视、自伤自杀诱导等内容。\n\n"
+                        + "如用于安全研究、合规分析、风险防范、教育科普，请保持高层次和防御性，不要请求可执行的违法步骤。",
+                UiKit.INK,
+                14);
+        notice.setLineSpacing(UiKit.dp(this, 2), 1.0f);
+        panel.addView(notice, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(UiKit.gap(this, 14));
+        LinearLayout actions = UiKit.horizontal(this);
+        Button cancel = UiKit.ghostButton(this, "取消");
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        Button confirm = UiKit.primaryButton(this, "已知晓，创建新会话");
+        confirm.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (onConfirm != null) onConfirm.run();
+        });
+        actions.addView(cancel, new LinearLayout.LayoutParams(0, UiKit.dp(this, 44), 1f));
+        LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 44), 1f);
+        confirmLp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
+        actions.addView(confirm, confirmLp);
+        panel.addView(actions);
+        overlay.addView(panel, plainCenteredModalLp());
+        overlay.setOnClickListener(v -> dialog.dismiss());
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
     }
 
     private void showSessionActions(SectionState state, ChatSession session, Dialog parent, View anchor) {

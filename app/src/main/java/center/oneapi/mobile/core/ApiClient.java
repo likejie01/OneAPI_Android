@@ -158,7 +158,7 @@ public class ApiClient {
             }
             String text = read(code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream());
             JSONObject json = text.trim().isEmpty() ? new JSONObject() : new JSONObject(text);
-            if (code < 200 || code >= 400 || (json.has("success") && !json.optBoolean("success"))) {
+            if (code < 200 || code >= 400 || isErrorEnvelope(json)) {
                 throw new IOException(errorMessage(json, code));
             }
             return json;
@@ -224,13 +224,31 @@ public class ApiClient {
         return override.isEmpty() ? clean(fallbackToken) : override;
     }
 
+    static boolean isErrorEnvelope(JSONObject json) {
+        if (json == null) {
+            return false;
+        }
+        if (json.has("success")) {
+            return !json.optBoolean("success");
+        }
+        return "error".equalsIgnoreCase(json.optString("message", "").trim());
+    }
+
     static String errorMessage(JSONObject json, int code) {
         if (json == null) {
             return "HTTP " + code;
         }
         String message = json.optString("message", json.optString("error", ""));
-        if (message.trim().isEmpty() && json.optJSONObject("data") != null) {
-            message = json.optJSONObject("data").optString("message", "");
+        String dataText = "";
+        Object data = json.opt("data");
+        if (data instanceof JSONObject) {
+            dataText = ((JSONObject) data).optString("message", "");
+        } else if (data instanceof String) {
+            dataText = ((String) data).trim();
+        }
+        String cleanMessage = message.trim();
+        if ((cleanMessage.isEmpty() || "error".equalsIgnoreCase(cleanMessage)) && !dataText.trim().isEmpty()) {
+            message = dataText;
         }
         return message.trim().isEmpty() ? "HTTP " + code : message;
     }
