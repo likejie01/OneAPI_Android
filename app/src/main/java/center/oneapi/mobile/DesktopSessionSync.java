@@ -35,6 +35,7 @@ final class DesktopSessionSync {
                 }
             }
             server.messages.sort((a, b) -> Long.compare(a.timestamp, b.timestamp));
+            normalizeDesktopStatusFromMessages(server);
         }
         for (ChatSession local : localById.values()) {
             if (shouldKeepLocalPendingSession(local, now)) {
@@ -42,6 +43,70 @@ final class DesktopSessionSync {
             }
         }
         return merged;
+    }
+
+    static boolean isDesktopSessionBusyStatus(String status) {
+        String clean = status == null ? "" : status.trim().toLowerCase(Locale.ROOT);
+        return "queued".equals(clean)
+                || "claimed".equals(clean)
+                || "running".equals(clean)
+                || "waiting_interaction".equals(clean)
+                || "pending".equals(clean)
+                || "in_progress".equals(clean);
+    }
+
+    static void normalizeDesktopStatusFromMessages(ChatSession session) {
+        if (session == null || session.messages == null || session.messages.isEmpty()) return;
+        String resolved = "";
+        for (ChatMessage message : session.messages) {
+            if (message == null || !message.log) continue;
+            String text = message.text == null ? "" : message.text.trim().toLowerCase(Locale.ROOT);
+            if (text.isEmpty()) continue;
+            if (text.contains("interaction_required") || text.contains("等待交互")) {
+                resolved = "waiting_interaction";
+            }
+            if (text.contains("complete")
+                    || text.contains("已结束")
+                    || text.contains("执行完成")
+                    || text.contains("输出已结束")) {
+                resolved = "complete";
+            }
+            if (text.contains("error")
+                    || text.contains("failed")
+                    || text.contains("失败")
+                    || text.contains("用户已停止")
+                    || text.contains("已停止本次回复")
+                    || text.contains("cancelled")
+                    || text.contains("canceled")
+                    || text.contains("stopped")) {
+                resolved = "error";
+            }
+        }
+        if (!resolved.isEmpty()) {
+            session.status = resolved;
+        }
+    }
+
+    static boolean shouldRefreshDesktopSessions(
+            List<ChatSession> sessions,
+            String deviceId,
+            long lastRefreshAt,
+            long now,
+            long busyIntervalMs,
+            long normalIntervalMs
+    ) {
+        if (deviceId == null || deviceId.trim().isEmpty()) return false;
+        if (lastRefreshAt <= 0L) return true;
+        long interval = hasBusyDesktopSession(sessions) ? busyIntervalMs : normalIntervalMs;
+        return now - lastRefreshAt >= Math.max(0L, interval);
+    }
+
+    static boolean hasBusyDesktopSession(List<ChatSession> sessions) {
+        if (sessions == null) return false;
+        for (ChatSession session : sessions) {
+            if (session != null && isDesktopSessionBusyStatus(session.status)) return true;
+        }
+        return false;
     }
 
     static LinkedHashMap<String, List<ChatSession>> recentProjectGroups(List<ChatSession> sessions, int projectLimit, int sessionLimit) {
@@ -99,11 +164,7 @@ final class DesktopSessionSync {
         long newest = newestMessageTimestamp(session);
         if (newest <= 0L || now - newest > PENDING_LOCAL_SESSION_TTL_MS) return false;
         String status = session.status == null ? "" : session.status.trim().toLowerCase(Locale.ROOT);
-        return "queued".equals(status)
-                || "claimed".equals(status)
-                || "running".equals(status)
-                || "waiting_interaction".equals(status)
-                || "pending".equals(status);
+        return isDesktopSessionBusyStatus(status);
     }
 
     private static long newestTimestamp(List<ChatSession> sessions) {

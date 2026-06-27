@@ -7,6 +7,7 @@ import android.Manifest;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Rect;
@@ -21,6 +22,7 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.graphics.pdf.PdfRenderer;
 import android.text.TextUtils;
+import android.text.Html;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Log;
@@ -68,9 +70,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -86,6 +90,7 @@ import center.oneapi.mobile.data.ConversationSessionEntity;
 import center.oneapi.mobile.features.attachments.AttachmentContentReader;
 import center.oneapi.mobile.features.audio.AudioTranscriptionController;
 import center.oneapi.mobile.features.billing.BillingController;
+import center.oneapi.mobile.features.billing.AlipayPaymentGuard;
 import center.oneapi.mobile.features.catalog.AssistantCatalog;
 import center.oneapi.mobile.features.catalog.ModelCatalog;
 import center.oneapi.mobile.features.chat.ChatContextBuilder;
@@ -121,8 +126,7 @@ public class MainActivity extends Activity {
     private final Map<AppSection, LinearLayout> navButtons = new EnumMap<>(AppSection.class);
     private final Map<String, String> chatAssistantPrompts = new HashMap<>();
     private final Map<String, String> imageAssistantPrompts = new HashMap<>();
-    private final Map<String, JSONObject> panelDataCache = new HashMap<>();
-    private final Map<String, Long> panelDataCacheAt = new HashMap<>();
+    private PanelDataStore panelDataStore;
     private AppSection currentSection = AppSection.CHAT;
     private RecyclerView recyclerView;
     private ConversationAdapter adapter;
@@ -139,6 +143,9 @@ public class MainActivity extends Activity {
     private FlowBackgroundView flowBackgroundView;
     private AppPrefs prefs;
     private ApiClient apiClient;
+    private ApiClient criticalApiClient;
+    private ApiClient userActionApiClient;
+    private ApiClient desktopApiClient;
     private ChatController chatController;
     private ImageController imageController;
     private AudioTranscriptionController audioTranscriptionController;
@@ -156,11 +163,15 @@ public class MainActivity extends Activity {
                 maybeRefreshDesktopSessions(AppSection.CODEX, false);
                 maybeRefreshDesktopSessions(AppSection.CLAUDE, false);
             }
-            mainHandler.postDelayed(this, currentDesktopSessionBusy() ? 2500 : 8000);
+            mainHandler.postDelayed(this, currentDesktopSessionBusy() ? DESKTOP_BUSY_SESSION_REFRESH_INTERVAL_MS : 8000);
         }
     };
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final ExecutorService criticalNetwork = Executors.newFixedThreadPool(4);
+    private final ExecutorService userActionNetwork = Executors.newFixedThreadPool(2);
+    private final ExecutorService desktopNetwork = Executors.newSingleThreadExecutor();
+    private final ExecutorService backgroundNetwork = Executors.newSingleThreadExecutor();
+    private final ExecutorService persistence = Executors.newSingleThreadExecutor();
     private final ExecutorService desktopJobMonitor = Executors.newSingleThreadExecutor();
     private Future<?> activeSendTask;
     private AtomicBoolean activeSendCancelled;
@@ -178,15 +189,34 @@ public class MainActivity extends Activity {
     private static final long STREAM_SCROLL_RESUME_MS = 1000L;
     private static final long DESKTOP_JOB_TAKEOVER_TIMEOUT_MS = 25000L;
     private static final long DESKTOP_JOB_EVENT_POLL_MS = 2500L;
+    private static final long DESKTOP_BUSY_SESSION_REFRESH_INTERVAL_MS = 1500L;
     private static final long DESKTOP_SESSION_REFRESH_MIN_INTERVAL_MS = 20000L;
+    private static final int DEFAULT_ALIPAY_AMOUNT = 50;
+    private static final String LEGAL_ACCEPTANCE_VERSION = "2026-06-25";
+    private static final String SKIP_NEW_CONVERSATION_SAFETY_NOTICE = "skip_new_conversation_safety_notice";
+    private static final String[] LEGAL_ACK_SECTIONS = new String[]{
+            "user-agreement",
+            "privacy-policy",
+            "generative-ai-service",
+            "report",
+            "content-safety"
+    };
     private boolean voiceListening;
     private boolean desktopKeepScreenOn;
     private boolean streamResponseActive;
     private boolean streamScrollPausedByUser;
     private boolean streamScrollRunning;
     private boolean streamScrollProgrammatic;
+    private boolean desktopBridgeConnected = true;
+    private boolean landscapeConversationChromeHidden;
     private String pendingAlipayTradeNo;
+    private String pendingAlipayAccountKey = "";
+    private int pendingAlipayAmount = DEFAULT_ALIPAY_AMOUNT;
+    private int selectedAlipayAmount = DEFAULT_ALIPAY_AMOUNT;
+    private boolean alipayOrderRequestInFlight;
     private Dialog pendingAlipayDialog;
+    private final AlipayPaymentGuard alipayPaymentGuard = new AlipayPaymentGuard();
+    private final Map<AppSection, AssistantPersistence.Store> customAssistantStores = new EnumMap<>(AppSection.class);
     private final Runnable alipayPaymentPoll = new Runnable() {
         @Override
         public void run() {
@@ -223,19 +253,24 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = new AppPrefs(this);
         apiClient = new ApiClient(prefs);
-        chatController = new ChatController(apiClient);
-        imageController = new ImageController(apiClient);
+        criticalApiClient = new ApiClient(prefs);
+        userActionApiClient = new ApiClient(prefs);
+        desktopApiClient = new ApiClient(prefs);
+        panelDataStore = new PanelDataStore(this);
+        chatController = new ChatController(userActionApiClient);
+        imageController = new ImageController(userActionApiClient);
         appApiKeyManager = new AppApiKeyManager(prefs);
         attachmentReader = new AttachmentContentReader(getContentResolver());
-        audioTranscriptionController = new AudioTranscriptionController(apiClient);
-        desktopController = new DesktopController(apiClient);
-        desktopRepository = new DesktopRepository(apiClient);
-        statusController = new StatusController(apiClient);
-        billingController = new BillingController(apiClient);
+        audioTranscriptionController = new AudioTranscriptionController(userActionApiClient);
+        desktopController = new DesktopController(desktopApiClient);
+        desktopRepository = new DesktopRepository(desktopApiClient);
+        statusController = new StatusController(criticalApiClient);
+        billingController = new BillingController(criticalApiClient);
         conversationRepository = new ConversationRepository(this);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         seedState();
         loadSavedModelSelections();
+        loadSavedCustomAssistants();
         buildShell();
         applySystemBars();
         loadStoredLocalSessions(AppSection.CHAT);
@@ -250,19 +285,48 @@ public class MainActivity extends Activity {
         mainHandler.postDelayed(desktopPoll, 8000);
         if (!prefs.isLoggedIn()) {
             mainHandler.postDelayed(() -> showLoginDialog(false), 300);
+        } else {
+            mainHandler.postDelayed(() -> requireLegalAcceptance(null), 500);
         }
     }
 
     @Override
     protected void onDestroy() {
+        flushConversationSnapshotsBlocking();
         apiClient.cancelActiveRequests();
+        criticalApiClient.cancelActiveRequests();
+        userActionApiClient.cancelActiveRequests();
+        desktopApiClient.cancelActiveRequests();
         mainHandler.removeCallbacks(desktopPoll);
         mainHandler.removeCallbacks(alipayPaymentPoll);
         stopVoiceRecognition();
         setDesktopKeepScreenOn(false);
         desktopJobMonitor.shutdownNow();
-        network.shutdownNow();
+        criticalNetwork.shutdownNow();
+        userActionNetwork.shutdownNow();
+        desktopNetwork.shutdownNow();
+        backgroundNetwork.shutdownNow();
+        persistence.shutdownNow();
         super.onDestroy();
+    }
+
+    private void executeNetwork(NetworkRequestPolicy.Priority priority, Runnable task) {
+        if (task == null) return;
+        switch (priority == null ? NetworkRequestPolicy.Priority.BACKGROUND : priority) {
+            case CRITICAL:
+                criticalNetwork.execute(task);
+                break;
+            case USER_ACTION:
+                userActionNetwork.execute(task);
+                break;
+            case DESKTOP_SYNC:
+                desktopNetwork.execute(task);
+                break;
+            case BACKGROUND:
+            default:
+                backgroundNetwork.execute(task);
+                break;
+        }
     }
 
     private void applySystemBars() {
@@ -429,7 +493,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPermissionToggle() {
-                togglePermission();
+                syncDesktopPermissionState();
             }
 
             @Override
@@ -460,6 +524,7 @@ public class MainActivity extends Activity {
         main.addView(composerView, new LinearLayout.LayoutParams(-1, -2));
 
         setContentView(root);
+        applyConversationChromeForOrientation();
         root.getViewTreeObserver().addOnGlobalLayoutListener(() -> adjustForKeyboard(root));
         recyclerView.setOnTouchListener((v, event) -> {
             hideKeyboard();
@@ -532,7 +597,7 @@ public class MainActivity extends Activity {
         hideKeyboard();
         composerView.setInputText("");
         composerView.setVoiceListening(true);
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.USER_ACTION, () -> {
             try {
                 audioTranscriptionController.start(this, new AudioTranscriptionController.Callback() {
                     @Override
@@ -612,6 +677,16 @@ public class MainActivity extends Activity {
     }
 
     private void adjustForKeyboard(View root) {
+        if (landscapeConversationChromeHidden) {
+            keyboardOpen = false;
+            lastKeyboardInset = 0;
+            if (composerView != null) {
+                composerView.setTranslationY(0);
+                composerView.setKeyboardOpen(false);
+            }
+            if (contentFrame != null) contentFrame.setPadding(0, 0, 0, 0);
+            return;
+        }
         Rect visible = new Rect();
         root.getWindowVisibleDisplayFrame(visible);
         int[] pos = new int[2];
@@ -910,6 +985,13 @@ public class MainActivity extends Activity {
         return attachmentReader.displayName(uri);
     }
 
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyConversationChromeForOrientation();
+        renderCurrent(false);
+    }
+
     private String readTextAttachment(Uri uri, int limit) {
         return attachmentReader.readText(uri, limit);
     }
@@ -946,7 +1028,7 @@ public class MainActivity extends Activity {
         wrapper.setGravity(Gravity.CENTER);
         ImageButton button = UiKit.imageButton(this, icon, section.label);
         button.setBackground(new ColorDrawable(Color.TRANSPARENT));
-        applyTopNavIconColor(button);
+        applyTopNavIconColor(section, button);
         button.setOnClickListener(v -> switchSection(section));
         wrapper.setOnClickListener(v -> switchSection(section));
         wrapper.addView(button, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -965,11 +1047,32 @@ public class MainActivity extends Activity {
         nav.addView(dot, new LinearLayout.LayoutParams(UiKit.dp(this, 12), UiKit.dp(this, 38)));
     }
 
-    private void applyTopNavIconColor(ImageButton icon) {
+    private void applyTopNavIconColor(AppSection section, ImageButton icon) {
+        if (section != null && section.isDesktop() && !desktopBridgeConnected) {
+            icon.setColorFilter(UiKit.muted(this));
+            return;
+        }
         if (UiKit.darkTheme(this)) {
             icon.setColorFilter(UiKit.ink(this));
         } else {
             icon.clearColorFilter();
+        }
+    }
+
+    private void setDesktopBridgeConnected(boolean connected) {
+        if (desktopBridgeConnected == connected) return;
+        desktopBridgeConnected = connected;
+        refreshTopNavIconColors();
+    }
+
+    private void refreshTopNavIconColors() {
+        for (Map.Entry<AppSection, LinearLayout> entry : navButtons.entrySet()) {
+            LinearLayout wrapper = entry.getValue();
+            if (wrapper == null || wrapper.getChildCount() == 0) continue;
+            View child = wrapper.getChildAt(0);
+            if (child instanceof ImageButton) {
+                applyTopNavIconColor(entry.getKey(), (ImageButton) child);
+            }
         }
     }
 
@@ -997,17 +1100,16 @@ public class MainActivity extends Activity {
             View line = wrapper.getChildAt(1);
             wrapper.setBackground(new ColorDrawable(Color.TRANSPARENT));
             icon.setBackground(new ColorDrawable(Color.TRANSPARENT));
-            applyTopNavIconColor(icon);
+            applyTopNavIconColor(entry.getKey(), icon);
             line.setBackground(UiKit.round(selected ? UiKit.blue(this) : Color.TRANSPARENT, UiKit.dp(this, 2), Color.TRANSPARENT));
         }
         boolean conversation = section.isConversation();
         applySystemBars();
-        if (aiChatTopNav != null) aiChatTopNav.setVisibility(conversation ? View.VISIBLE : View.INVISIBLE);
         if (aiChatHeader != null) aiChatHeader.setBackground(new ColorDrawable(Color.TRANSPARENT));
         recyclerView.setVisibility(conversation ? View.VISIBLE : View.GONE);
         pageScroll.setVisibility(conversation ? View.GONE : View.VISIBLE);
-        composerView.setVisibility(conversation ? View.VISIBLE : View.GONE);
         scrollDock.setVisibility(conversation ? View.VISIBLE : View.GONE);
+        applyConversationChromeForOrientation();
         renderCurrent(forceBottom);
         if (section.isDesktop()) {
             maybeRefreshDesktopSessions(section, false);
@@ -1053,7 +1155,7 @@ public class MainActivity extends Activity {
 
     private void loadStoredLocalSessions(AppSection section) {
         if (!section.isConversation()) return;
-        network.execute(() -> {
+        persistence.execute(() -> {
             try {
                 List<ConversationSessionEntity> rows = conversationRepository.sessionsForMode(section.id);
                 if (rows.isEmpty()) return;
@@ -1068,6 +1170,7 @@ public class MainActivity extends Activity {
                         message.tokenText = storedTokenText(item.rawJson);
                         messages.add(message);
                     }
+                    ConversationPersistenceSnapshot.repairInterruptedMessages(messages);
                     sessions.add(new ChatSession(
                             row.sessionId,
                             row.title.isEmpty() ? row.groupName : row.title,
@@ -1094,9 +1197,10 @@ public class MainActivity extends Activity {
 
     private void persistSession(AppSection section, ChatSession session) {
         if (!section.isConversation()) return;
-        network.execute(() -> {
+        ChatSession snapshot = snapshotSession(session);
+        persistence.execute(() -> {
             try {
-                replaceStoredSession(section, session);
+                replaceStoredSession(section, snapshot);
             } catch (Exception ignored) {
             }
         });
@@ -1104,12 +1208,84 @@ public class MainActivity extends Activity {
 
     private void persistSessions(AppSection section, List<ChatSession> sessions) {
         if (!section.isConversation()) return;
-        network.execute(() -> {
+        List<ChatSession> snapshots = snapshotSessions(sessions);
+        persistence.execute(() -> {
             try {
-                replaceStoredSessions(section, sessions == null ? new ArrayList<>() : sessions);
+                replaceStoredSessions(section, snapshots);
             } catch (Exception ignored) {
             }
         });
+    }
+
+    private void flushConversationSnapshotsBlocking() {
+        Map<AppSection, List<ChatSession>> snapshots = new EnumMap<>(AppSection.class);
+        for (Map.Entry<AppSection, SectionState> entry : states.entrySet()) {
+            AppSection section = entry.getKey();
+            if (section == null || !section.isConversation() || entry.getValue() == null) continue;
+            snapshots.put(section, snapshotSessions(entry.getValue().sessions));
+        }
+        Future<?> flush = persistence.submit(() -> {
+            for (Map.Entry<AppSection, List<ChatSession>> entry : snapshots.entrySet()) {
+                try {
+                    replaceStoredSessions(entry.getKey(), entry.getValue());
+                } catch (Exception ignored) {
+                }
+            }
+        });
+        try {
+            flush.get(2, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void applyConversationChromeForOrientation() {
+        boolean conversation = currentSection != null && currentSection.isConversation();
+        boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        landscapeConversationChromeHidden = conversation && landscape;
+        if (aiChatHeader != null) {
+            aiChatHeader.setVisibility(conversation && landscape ? View.GONE : View.VISIBLE);
+        }
+        if (aiChatTopNav != null) {
+            aiChatTopNav.setVisibility(conversation && !landscape ? View.VISIBLE : View.INVISIBLE);
+        }
+        if (composerView != null) {
+            composerView.setVisibility(conversation && !landscape ? View.VISIBLE : View.GONE);
+            composerView.setTranslationY(0);
+            composerView.setKeyboardOpen(false);
+        }
+        if (recyclerView != null) {
+            int top = conversation && landscape ? UiKit.dp(this, 12) : UiKit.dp(this, 92);
+            int bottom = conversation && landscape ? UiKit.dp(this, 12) : UiKit.dp(this, 8);
+            recyclerView.setPadding(UiKit.dp(this, 12), top, UiKit.dp(this, 26), bottom);
+        }
+        if (pageContent != null) {
+            int top = conversation && landscape ? UiKit.dp(this, 18) : UiKit.dp(this, 92);
+            pageContent.setPadding(UiKit.dp(this, 18), top, UiKit.dp(this, 18), UiKit.dp(this, 18));
+        }
+    }
+
+    private List<ChatSession> snapshotSessions(List<ChatSession> sessions) {
+        List<ChatSession> out = new ArrayList<>();
+        if (sessions == null) return out;
+        for (ChatSession session : sessions) {
+            ChatSession snapshot = snapshotSession(session);
+            if (snapshot != null) out.add(snapshot);
+        }
+        return out;
+    }
+
+    private ChatSession snapshotSession(ChatSession session) {
+        if (session == null) return null;
+        List<ChatMessage> messages = new ArrayList<>();
+        for (ChatMessage source : session.messages) {
+            if (source == null) continue;
+            ChatMessage copy = source.log ? ChatMessage.log(source.text, source.timestamp) : new ChatMessage(source.role, source.text, source.timestamp);
+            copy.tokenText = source.tokenText;
+            messages.add(copy);
+        }
+        ChatSession snapshot = new ChatSession(session.id, session.title, session.assistantLabel, session.projectLabel, messages);
+        snapshot.status = session.status;
+        return snapshot;
     }
 
     private void replaceStoredSessions(AppSection section, List<ChatSession> sessions) {
@@ -1407,17 +1583,261 @@ public class MainActivity extends Activity {
         Button logout = UiKit.ghostButton(this, "退出登录");
         logout.setTextColor(Color.rgb(216, 71, 86));
         logout.setOnClickListener(v -> {
-            prefs.setCookie("");
-            prefs.setUserId("");
-            prefs.setToken("");
-            prefs.setUsername("");
-            prefs.setBoundDeviceId("");
+            prefs.clearLogin();
             Toast.makeText(this, "已退出登录", Toast.LENGTH_SHORT).show();
             renderCurrent(false);
             showLoginDialog(false);
         });
         account.addView(logout, centeredButtonLp());
         pageContent.addView(account);
+
+        LinearLayout about = cardPanel();
+        about.addView(UiKit.bold(this, "关于与合规"));
+        about.addView(UiKit.text(this, "查看用户协议、隐私政策、生成式 AI 服务说明和内容安全规则。", UiKit.MUTED, 14));
+        Button aboutButton = UiKit.ghostButton(this, "关于");
+        aboutButton.setOnClickListener(v -> showLegalCenterDialog(false, null));
+        about.addView(aboutButton, centeredButtonLp());
+        pageContent.addView(about);
+    }
+
+    private void requireLegalAcceptance(Runnable onAccepted) {
+        if (prefs == null || !prefs.isLoggedIn()) return;
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
+            try {
+                JSONObject envelope = criticalApiClient.get("/api/user/compliance/status");
+                JSONObject data = envelope.optJSONObject("data");
+                if (data == null) throw new IllegalStateException("合规状态为空");
+                String version = data.optString("version", LEGAL_ACCEPTANCE_VERSION).trim();
+                if (version.isEmpty()) version = LEGAL_ACCEPTANCE_VERSION;
+                JSONObject ban = data.optJSONObject("ban");
+                if (ban != null && ban.optBoolean("active", false)) {
+                    mainHandler.post(() -> Toast.makeText(this, "账号因内容安全规则被限制使用，请联系管理员复核。", Toast.LENGTH_LONG).show());
+                    return;
+                }
+                if (data.optBoolean("accepted", false)) {
+                    prefs.acceptLegal(version);
+                    if (onAccepted != null) mainHandler.post(onAccepted);
+                } else {
+                    mainHandler.post(() -> showLegalCenterDialog(true, onAccepted));
+                }
+            } catch (Exception error) {
+                if (prefs.hasAcceptedLegal(LEGAL_ACCEPTANCE_VERSION)) {
+                    if (onAccepted != null) mainHandler.post(onAccepted);
+                } else {
+                    mainHandler.post(() -> showLegalCenterDialog(true, onAccepted));
+                }
+            }
+        });
+    }
+
+    private void showLegalCenterDialog(boolean required, Runnable onAccepted) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setCancelable(!required);
+        FrameLayout overlay = modalOverlay();
+        LinearLayout panel = modalPanel();
+        LinearLayout titleRow = UiKit.horizontal(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.addView(UiKit.bold(this, required ? "请阅读并同意协议" : "关于与合规"), new LinearLayout.LayoutParams(0, -2, 1f));
+        panel.addView(titleRow);
+        if (required) {
+            panel.addView(UiKit.text(this, "首次登录需要签订用户协议和隐私政策。不同意将退出登录，无法进入 App。", UiKit.MUTED, 13));
+        }
+
+        String[] titles = new String[]{"用户协议", "隐私政策", "生成式 AI 服务说明", "内容安全规则"};
+        String[] keys = new String[]{"user", "privacy", "genai", "safety"};
+        Map<String, String> documents = new LinkedHashMap<>();
+        documents.put(keys[0], legalFallback(keys[0]));
+        documents.put(keys[1], legalFallback(keys[1]));
+        documents.put(keys[2], legalFallback(keys[2]));
+        documents.put(keys[3], legalFallback(keys[3]));
+
+        FlowTagLayout tabs = new FlowTagLayout(this);
+        TextView content = UiKit.text(this, "", UiKit.INK, 14);
+        content.setLineSpacing(UiKit.dp(this, 2), 1.0f);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(false);
+        scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
+        Button[] tabButtons = new Button[titles.length];
+        int[] active = new int[]{0};
+        Runnable renderTab = () -> {
+            String key = keys[active[0]];
+            content.setText(documents.get(key));
+            scroll.scrollTo(0, 0);
+            for (int i = 0; i < tabButtons.length; i++) {
+                Button tab = tabButtons[i];
+                if (tab == null) continue;
+                tab.setText((i == active[0] ? "✓ " : "") + titles[i]);
+            }
+        };
+        for (int i = 0; i < titles.length; i++) {
+            final int index = i;
+            Button tab = UiKit.ghostButton(this, titles[i]);
+            tab.setTextSize(12);
+            tab.setSingleLine(true);
+            tab.setMaxLines(1);
+            tab.setEllipsize(TextUtils.TruncateAt.END);
+            tab.setGravity(Gravity.CENTER);
+            tab.setOnClickListener(v -> {
+                active[0] = index;
+                renderTab.run();
+            });
+            tabButtons[i] = tab;
+            ViewGroup.MarginLayoutParams tabLp = new ViewGroup.MarginLayoutParams(-2, UiKit.dp(this, 36));
+            tabLp.setMargins(0, 0, UiKit.dp(this, 6), UiKit.dp(this, 6));
+            tabs.addView(tab, tabLp);
+        }
+        panel.addView(tabs, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, required ? 260 : 330));
+        scrollLp.setMargins(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 8));
+        panel.addView(scroll, scrollLp);
+
+        LinearLayout actions = UiKit.horizontal(this);
+        if (required) {
+            Button reject = UiKit.ghostButton(this, "不同意");
+            reject.setTextColor(Color.rgb(216, 71, 86));
+            reject.setOnClickListener(v -> {
+                dialog.dismiss();
+                prefs.clearLogin();
+                Toast.makeText(this, "未同意协议，已退出登录", Toast.LENGTH_LONG).show();
+                renderCurrent(false);
+                showLoginDialog(false);
+            });
+            actions.addView(reject, new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f));
+            Button accept = UiKit.ghostButton(this, "同意并进入");
+            accept.setOnClickListener(v -> {
+                accept.setEnabled(false);
+                accept.setText("确认中...");
+                acknowledgeLegalAcceptance(() -> {
+                    dialog.dismiss();
+                    if (onAccepted != null) onAccepted.run();
+                }, () -> {
+                    accept.setEnabled(true);
+                    accept.setText("同意并进入");
+                });
+            });
+            LinearLayout.LayoutParams acceptLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f);
+            acceptLp.leftMargin = UiKit.dp(this, 10);
+            actions.addView(accept, acceptLp);
+        } else {
+            Button ok = UiKit.ghostButton(this, "关闭");
+            ok.setOnClickListener(v -> dialog.dismiss());
+            actions.addView(ok, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 40)));
+        }
+        panel.addView(actions, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 46)));
+        overlay.addView(panel, centeredModalLp());
+        overlay.setOnClickListener(v -> {
+            if (!required) dialog.dismiss();
+        });
+        panel.setOnClickListener(v -> { });
+        showDialogOverlay(dialog, overlay);
+        renderTab.run();
+        syncLegalDocuments(dialog, documents, keys, active, renderTab);
+    }
+
+    private void syncLegalDocuments(Dialog dialog, Map<String, String> documents, String[] keys, int[] active, Runnable renderTab) {
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
+            String userAgreement = fetchLegalDocument("/api/user-agreement");
+            String privacyPolicy = fetchLegalDocument("/api/privacy-policy");
+            mainHandler.post(() -> {
+                if (dialog == null || !dialog.isShowing()) return;
+                if (!userAgreement.isEmpty()) documents.put("user", userAgreement);
+                if (!privacyPolicy.isEmpty()) documents.put("privacy", privacyPolicy);
+                if (keys[active[0]].equals("user") || keys[active[0]].equals("privacy")) {
+                    renderTab.run();
+                }
+            });
+        });
+    }
+
+    private void acknowledgeLegalAcceptance(Runnable onAccepted, Runnable onFailed) {
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("version", LEGAL_ACCEPTANCE_VERSION);
+                JSONArray sections = new JSONArray();
+                for (String section : LEGAL_ACK_SECTIONS) sections.put(section);
+                body.put("sections", sections);
+                criticalApiClient.post("/api/user/compliance/acknowledge", body);
+                prefs.acceptLegal(LEGAL_ACCEPTANCE_VERSION);
+                mainHandler.post(onAccepted);
+            } catch (Exception error) {
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "协议确认失败：" + message(error), Toast.LENGTH_LONG).show();
+                    if (onFailed != null) onFailed.run();
+                });
+            }
+        });
+    }
+
+    private String fetchLegalDocument(String path) {
+        try {
+            JSONObject envelope = criticalApiClient.get(path);
+            Object data = envelope.opt("data");
+            String text = data == null ? "" : String.valueOf(data).trim();
+            if (text.startsWith("https://") || text.startsWith("http://")) {
+                return "请在浏览器打开以下链接查看：\n" + text;
+            }
+            return documentToPlainText(text);
+        } catch (Exception error) {
+            return "";
+        }
+    }
+
+    private String documentToPlainText(String text) {
+        String clean = text == null ? "" : text.trim();
+        if (clean.isEmpty()) return "";
+        if (clean.contains("<") && clean.contains(">")) {
+            if (Build.VERSION.SDK_INT >= 24) {
+                return Html.fromHtml(clean, Html.FROM_HTML_MODE_LEGACY).toString().trim();
+            }
+            return Html.fromHtml(clean).toString().trim();
+        }
+        return clean;
+    }
+
+    private String legalFallback(String key) {
+        if ("user".equals(key)) {
+            return "用户协议\n\n"
+                    + "账号准入：本服务当前面向人工审核通过或管理员授权的用户开放。用户通过平台公告、AI 开发群或其他指定渠道提交申请后，由管理员根据使用目的、风险情况和运营规则创建或启用账号。\n\n"
+                    + "账号安全：用户应保证注册、联系和审核材料真实、合法、可联系，并妥善保管账号、密码、访问令牌、API Key、客户端绑定信息和设备。因泄露、共享、转售、出租、出借、嵌入公开仓库或交由不可信第三方使用导致的损失和责任，由用户自行承担。\n\n"
+                    + "使用边界：用户不得转售、分发、出租平台服务或 API Key，不得批量注册、绕过额度限制、破解客户端、伪造请求来源、攻击平台、干扰计费、滥用优惠、抓取非授权数据、规避内容安全或协助他人违反平台规则。\n\n"
+                    + "费用与额度：充值金额用于购买平台内部系统货币、额度、套餐或会员服务。实际扣费以服务端订单、支付机构通知、模型计费规则、倍率配置和平台账务记录为准。除法律另有规定或平台明确承诺外，已消耗额度不退还。\n\n"
+                    + "API 与客户端：用户可通过网页、桌面客户端、Android App、API 或插件使用服务。用户应自行评估在自动化脚本、生产系统、团队共享设备和第三方工具中保存 API Key 的风险，并为自己的调用行为、费用消耗和下游影响负责。\n\n"
+                    + "合规义务：用户应遵守法律法规、公序良俗、平台规则、上游模型服务商政策、开源许可证和第三方 API 规则，不得使用本服务从事违法犯罪、侵权、欺诈、垃圾信息、恶意自动化、未经授权数据抓取、网络攻击、侵犯隐私或其他被禁止活动。\n\n"
+                    + "平台处置：平台可根据风险情况采取提醒、要求补充说明、截停请求、限制模型、限制 API Key 中转、暂停客户端同步、冻结账号、停用账号、保存必要记录、配合权利人或主管部门处理等措施。除紧急高风险场景外，平台会尽量保留用户查看原因和联系管理员复核的通道。\n\n"
+                    + "服务可用性：平台可能因上游服务、网络、支付机构、政策合规、安全审计、版本升级、容量限制或不可抗力导致部分功能不可用。平台会尽合理努力维护服务，但不承诺任何功能永久可用、无错误或完全符合特定商业目的。";
+        }
+        if ("privacy".equals(key)) {
+            return "隐私政策\n\n"
+                    + "处理目的：为提供账号登录、AI 会话、模型接口、附件处理、客户端绑定、App 同步、支付充值、用量统计、安全审核、投诉处理、故障排查和系统运营能力，平台会在必要范围内处理与服务有关的信息。\n\n"
+                    + "信息类型：平台可能处理账号信息、联系方式、角色权限、登录状态、IP、设备与客户端信息、API Key 元数据、调用记录、订单记录、余额、用量、输入内容、附件、图片、代码、会话上下文、执行日志、安全事件和管理员操作记录。\n\n"
+                    + "最小必要：平台仅在实现服务、安全、计费、风控、合规和争议处理所需范围内处理信息，并采取合理措施减少完整提示词、密钥、隐私、附件内容和敏感字段的不必要留存。平台不会主动要求用户提交身份证号、银行卡号、人脸信息、密码、私钥、访问令牌、商业秘密或未获授权的他人个人信息。\n\n"
+                    + "第三方处理：用户提交给模型的输入、附件、图片、会话内容和执行日志可能会发送给第三方或境外模型服务商处理。支付相关信息可能由支付机构处理，文件、日志和监控信息可能由云服务、安全组件或运维工具处理。用户使用前应确认其有权进行跨平台、跨服务商和可能的跨境传输处理。\n\n"
+                    + "共享与披露：平台可能将必要信息提供给支付机构、云服务商、模型服务商、安全服务组件、日志与监控组件，用于完成支付、模型调用、存储、传输、安全审核、故障排查和合规处置。平台不会出售用户个人信息，也不会将信息用于与服务无关的定向交易。\n\n"
+                    + "用户权利：用户可通过投诉举报入口申请访问、更正、复制、删除个人信息，撤回授权、注销账号、解释个人信息处理规则或投诉个人信息处理问题。涉及第三方模型服务商已处理的信息，平台将在能力范围内协助用户按相应规则处理。\n\n"
+                    + "保存期限：订单、账务、用量、违规处置、安全日志、投诉记录和依法应留存的信息，会在满足安全、审计、争议处理或法律要求的期限内保存。超过必要期限后，平台会采取删除、匿名化或最小化保留等方式处理。\n\n"
+                    + "安全措施：平台会采用权限控制、日志审计、敏感配置保护、访问限制、备份与故障恢复等措施保护信息安全。任何互联网服务均无法保证绝对安全，用户也应妥善保护账号、客户端设备和 API Key。";
+        }
+        if ("genai".equals(key)) {
+            return "生成式 AI 服务说明\n\n"
+                    + "服务定位：本服务面向经人工审核或平台授权的用户开放，提供模型接口中转、AIChat、API Key 管理、用量与余额管理、附件辅助处理、客户端联动、会话同步、执行日志与必要运营配置能力。平台的核心职责是接收用户请求、按配置路由到上游模型服务、记录必要用量并提供安全与合规控制。\n\n"
+                    + "模型来源：平台不自研、不训练、不微调基础大模型。除非页面或公告另有明确说明，所有文本、图片、代码、多模态或工具调用能力均由平台已配置的第三方或上游模型服务提供。模型可用性、上下文长度、输出质量、响应速度、内容安全策略、价格和限流规则可能受上游服务商影响。\n\n"
+                    + "数据流转：用户通过网页、桌面客户端、Android App、API、插件或自动化工具提交的提示词、附件、图片、代码、上下文、模型参数、工具调用参数和执行日志，可能会被转发给第三方模型服务商、云服务商或境外服务商处理。用户提交前应确认其拥有合法权利，并避免提交无授权个人信息、商业秘密、受保护数据、密钥、访问令牌或其他敏感材料。\n\n"
+                    + "输出风险：生成式 AI 输出可能存在事实错误、遗漏、偏见、过时、不完整、不可复现或与用户意图不一致等问题。医疗、法律、金融、工程、安全、公共传播、未成年人、个人权益、生产环境自动化等高风险场景，必须由具备相应资质或责任的人员复核后再使用，平台不替代专业判断。\n\n"
+                    + "用户责任：用户对自己输入内容、调用方式、自动化流程、对外发布或商用 AI 输出承担责任。对外发布、传播、训练、二次加工或商用 AI 生成内容时，应自行履行版权、肖像权、隐私权、数据来源、AI 生成内容标识、水印、模型服务商政策以及适用法律法规要求。\n\n"
+                    + "平台控制：平台会根据法律法规、上游政策、风控需要和运营安全进行内容安全审核、异常请求截停、API Key 中转限制、订单与用量记录、安全审计、投诉处理和必要日志留存。平台会尽量提供明确原因和复核通道，但不承诺模型输出一定正确、连续可用或适合特定目的。\n\n"
+                    + "服务变更：平台可能因上游供应、政策合规、安全审计、支付通道、系统升级、网络故障或不可抗力调整模型、价格、限额、客户端能力、审核规则或可用区域。涉及用户权益的重要变化，平台会通过站内公告、群组或其他合理方式提示。";
+        }
+        return "内容安全规则\n\n"
+                + "审核范围：平台会在服务端对提示词、附件文本、会话请求、API 调用、异常重试、规避行为和投诉线索进行内容安全审核。审核目标不是限制正常讨论，而是识别明确违法意图、高危险实施请求、恶意绕过、接口滥用、侵犯他人权益和可能引发重大风险的内容。\n\n"
+                + "分级原则：平台区分“警告类违规”和“限制类违法/危险意图”。警告类违规通常只记录事件并提示修改，不直接影响登录、钱包、后台管理、资料查看和正常非中转功能。限制类内容会截停请求，并在达到管理员配置阈值后限制该账号 API Key 的中转服务。\n\n"
+                + "警告类违规：包括明显不当表达、低俗辱骂、诱导绕过模型规则、轻度侵权风险、未形成明确实施意图的敏感描述、上下文不足但可能引发风险的请求。此类内容通常要求用户调整表达、补充合法用途或删除不必要敏感信息。\n\n"
+                + "限制类违法或危险意图：包括请求可执行犯罪步骤、工具、代码、采购渠道、攻击目标、隐匿方法、规避追责、实施方案，或明确寻求危害国家安全、暴恐极端、刺杀伤害、爆炸物/毒品制作采购、网络攻击、凭据窃取、诈骗洗钱、侵犯隐私、未成年人性剥削等帮助。\n\n"
+                + "允许的安全语境：平台不会因为用户提到敏感主题就直接封禁。法律教育、危害说明、风险防范、新闻讨论、政策分析、合规咨询、受害者支持、防御性安全研究、历史研究和科普内容，在不请求可执行违法步骤、不鼓励实施、不规避监管的情况下可以放行。\n\n"
+                + "处置方式：达到限制条件后，平台只限制 API Key 的中转调用，不封死登录、后台管理、钱包、资料页和只读记录。用户可查看错误提示和事件原因，管理员可在用户管理中解除误判账号的 API 中转限制。\n\n"
+                + "管理员配置：管理员可在“系统设置 - 安全与限制 - 内容安全”中调整违规阈值、统计窗口、限制时长、危险关键字、警告关键字、放行语境词和危险上下文词。平台建议先以警告和日志观察为主，再对反复出现的明确危险意图采取限制。\n\n"
+                + "规避处理：用户不得通过拆分请求、编码混淆、角色扮演伪装、跨语言替换、外部插件、第三方 API 或批量自动化方式规避审核。明显规避审核的行为可被视为独立违规，并纳入风险累计。";
     }
 
     private void applyWindowBlur(Window window) {
@@ -1534,13 +1954,28 @@ public class MainActivity extends Activity {
         pageContent.addView(panel);
         fetchInto(panel, () -> {
             JSONObject root = new JSONObject();
-            root.put("profile", billingController.profile().opt("data"));
-            root.put("topups", billingController.topups().opt("data"));
-            root.put("usage", billingController.usage().opt("data"));
-            root.put("plans", billingController.plans().opt("data"));
-            root.put("subscriptions", billingController.subscriptions().opt("data"));
+            CompletableFuture<JSONObject> profile = supplyCriticalJson(() -> billingController.profile());
+            CompletableFuture<JSONObject> topups = supplyCriticalJson(() -> billingController.topups());
+            CompletableFuture<JSONObject> usage = supplyCriticalJson(() -> billingController.usage());
+            CompletableFuture<JSONObject> plans = supplyCriticalJson(() -> billingController.plans());
+            CompletableFuture<JSONObject> subscriptions = supplyCriticalJson(() -> billingController.subscriptions());
+            root.put("profile", profile.get().opt("data"));
+            root.put("topups", topups.get().opt("data"));
+            root.put("usage", usage.get().opt("data"));
+            root.put("plans", plans.get().opt("data"));
+            root.put("subscriptions", subscriptions.get().opt("data"));
             return root;
         }, "钱包与消耗");
+    }
+
+    private CompletableFuture<JSONObject> supplyCriticalJson(JsonRequest request) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return request.run();
+            } catch (Exception error) {
+                throw new RuntimeException(error);
+            }
+        }, criticalNetwork);
     }
 
     private void renderServicePage() {
@@ -1676,7 +2111,7 @@ public class MainActivity extends Activity {
     }
 
     private void doLogin(String username, String password, Runnable onSuccess) {
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
             try {
                 prefs.setToken("");
                 prefs.setCookie("");
@@ -1712,9 +2147,11 @@ public class MainActivity extends Activity {
                 ensureAppApiKey(loginClient);
                 mainHandler.post(() -> {
                     Toast.makeText(this, "登录成功", Toast.LENGTH_SHORT).show();
-                    if (onSuccess != null) onSuccess.run();
-                    refreshModels();
-                    refreshAssistants();
+                    requireLegalAcceptance(() -> {
+                        if (onSuccess != null) onSuccess.run();
+                        refreshModels();
+                        refreshAssistants();
+                    });
                 });
             } catch (Exception error) {
                 mainHandler.post(() -> Toast.makeText(this, "登录失败：" + message(error), Toast.LENGTH_LONG).show());
@@ -1726,7 +2163,7 @@ public class MainActivity extends Activity {
         if (!prefs.isLoggedIn()) return;
         String current = prefs.appApiKey();
         if (!current.isEmpty()) return;
-        network.execute(() -> ensureAppApiKey(apiClient));
+        executeNetwork(NetworkRequestPolicy.Priority.USER_ACTION, () -> ensureAppApiKey(userActionApiClient));
     }
 
     private void ensureAppApiKey(ApiClient client) {
@@ -1793,14 +2230,16 @@ public class MainActivity extends Activity {
             if (desktopBindingCheckInFlight) return;
             desktopBindingCheckInFlight = true;
         }
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.DESKTOP_SYNC, () -> {
             try {
                 JSONArray devices = desktopRepository.devices();
                 desktopBindingCheckedAt = System.currentTimeMillis();
+                mainHandler.post(() -> setDesktopBridgeConnected(findDevice(devices, bound) != null));
                 if (findDevice(devices, bound) == null) {
                     mainHandler.post(() -> clearInvalidDesktopBinding(bound, "当前绑定的桌面客户端已不存在或不在线，请重新绑定。"));
                 }
             } catch (Exception error) {
+                mainHandler.post(() -> setDesktopBridgeConnected(false));
                 String detail = message(error);
                 appendDesktopSyncNotice(AppSection.CODEX, "设备绑定校验失败：" + detail);
                 appendDesktopSyncNotice(AppSection.CLAUDE, "设备绑定校验失败：" + detail);
@@ -1827,18 +2266,28 @@ public class MainActivity extends Activity {
     }
 
     private void fetchInto(LinearLayout panel, JsonRequest request, String title) {
-        JSONObject cached = panelDataCache.get(title);
-        Long cachedAt = panelDataCacheAt.get(title);
-        if (cached != null && cachedAt != null && System.currentTimeMillis() - cachedAt < 60_000L) {
-            renderJsonPanel(panel, title, cached);
-            return;
+        long now = System.currentTimeMillis();
+        long ttlMs = NetworkRequestPolicy.panelTtlMs(title);
+        PanelDataStore.Entry cached = panelDataStore == null ? null : panelDataStore.get(title);
+        if (cached != null) {
+            JSONObject cachedData = copyJson(cached.data);
+            try {
+                cachedData.put("_cache_saved_at", cached.savedAt);
+                if (!cached.fresh(now, ttlMs)) {
+                    cachedData.put("_stale_notice", "正在后台刷新，当前显示上次同步结果。");
+                }
+            } catch (Exception ignored) {
+            }
+            renderJsonPanel(panel, title, cachedData);
+            if (cached.fresh(now, ttlMs)) return;
         }
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
             JSONObject result;
             try {
                 result = request.run();
-                panelDataCache.put(title, result);
-                panelDataCacheAt.put(title, System.currentTimeMillis());
+                if (panelDataStore != null) {
+                    panelDataStore.put(title, result, System.currentTimeMillis());
+                }
             } catch (Exception error) {
                 String errorText = message(error);
                 if (isAuthExpiredMessage(errorText)) {
@@ -1848,19 +2297,20 @@ public class MainActivity extends Activity {
                     prefs.setBoundDeviceId("");
                     mainHandler.post(() -> showLoginDialog(false));
                 }
-                JSONObject fallback = panelDataCache.get(title);
-                if (fallback != null && (errorText.contains("429") || errorText.contains("Too Many") || errorText.contains("rate"))) {
-                    result = fallback;
+                PanelDataStore.Entry fallback = panelDataStore == null ? null : panelDataStore.get(title);
+                if (fallback != null) {
+                    result = copyJson(fallback.data);
                     try {
-                        result.put("_stale_notice", "请求过于频繁，已显示上次同步结果。稍后可手动刷新。");
+                        result.put("_cache_saved_at", fallback.savedAt);
+                        result.put("_stale_notice", "网络请求失败，已显示上次同步结果：" + errorText);
                     } catch (Exception ignored) {
                     }
                 } else {
                     result = new JSONObject();
-                }
-                try {
-                    if (!result.has("_stale_notice")) result.put("error", errorText);
-                } catch (Exception ignored) {
+                    try {
+                        result.put("error", errorText);
+                    } catch (Exception ignored) {
+                    }
                 }
             }
             JSONObject finalResult = result;
@@ -1868,9 +2318,23 @@ public class MainActivity extends Activity {
         });
     }
 
+    private JSONObject copyJson(JSONObject value) {
+        if (value == null) return new JSONObject();
+        try {
+            return new JSONObject(value.toString());
+        } catch (Exception ignored) {
+            return new JSONObject();
+        }
+    }
+
     private void renderJsonPanel(LinearLayout panel, String title, JSONObject result) {
         panel.removeAllViews();
         panel.addView(UiKit.bold(this, title));
+        long cacheSavedAt = result.optLong("_cache_saved_at", 0L);
+        if (cacheSavedAt > 0L) {
+            panel.addView(UiKit.text(this, "上次同步：" + formatDateTime(cacheSavedAt), UiKit.MUTED, 12));
+            result.remove("_cache_saved_at");
+        }
         if (result.has("_stale_notice")) {
             panel.addView(UiKit.text(this, result.optString("_stale_notice"), Color.rgb(214, 144, 44), 13));
             result.remove("_stale_notice");
@@ -1938,12 +2402,32 @@ public class MainActivity extends Activity {
         LinearLayout alipay = cardPanel();
         alipay.addView(UiKit.bold(this, "支付宝充值"));
         alipay.addView(UiKit.text(this, "服务端创建 App 支付订单，支付结果由服务器查询确认。", UiKit.MUTED, 14));
-        EditText amountInput = input("充值金额");
-        amountInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        amountInput.setText("10");
-        alipay.addView(labelRow("金额", amountInput));
+        LinearLayout amountRow = UiKit.horizontal(this);
+        Button[] amountButtons = new Button[AlipayPaymentGuard.ALLOWED_AMOUNTS.length];
+        Runnable updateAmountButtons = () -> {
+            for (int i = 0; i < amountButtons.length; i++) {
+                Button button = amountButtons[i];
+                if (button == null) continue;
+                int amount = AlipayPaymentGuard.ALLOWED_AMOUNTS[i];
+                button.setText((amount == selectedAlipayAmount ? "✓ " : "") + amount + " 元");
+            }
+        };
+        for (int i = 0; i < AlipayPaymentGuard.ALLOWED_AMOUNTS.length; i++) {
+            int amount = AlipayPaymentGuard.ALLOWED_AMOUNTS[i];
+            Button amountButton = UiKit.ghostButton(this, amount + " 元");
+            amountButton.setOnClickListener(v -> {
+                selectedAlipayAmount = amount;
+                updateAmountButtons.run();
+            });
+            amountButtons[i] = amountButton;
+            LinearLayout.LayoutParams amountLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 38), 1f);
+            if (i > 0) amountLp.leftMargin = UiKit.dp(this, 8);
+            amountRow.addView(amountButton, amountLp);
+        }
+        updateAmountButtons.run();
+        alipay.addView(labelRow("金额", amountRow));
         Button pay = UiKit.ghostButton(this, "支付宝支付");
-        pay.setOnClickListener(v -> startAlipayAppPayment(amountInput.getText().toString()));
+        pay.setOnClickListener(v -> startAlipayAppPayment(selectedAlipayAmount));
         alipay.addView(pay, centeredButtonLp());
         panel.addView(alipay);
         JSONObject usage = result.optJSONObject("usage");
@@ -2009,7 +2493,7 @@ public class MainActivity extends Activity {
         overlay.setOnClickListener(v -> dialog.dismiss());
         panel.setOnClickListener(v -> { });
         showDialogOverlay(dialog, overlay);
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.BACKGROUND, () -> {
             try {
                 JSONObject result = statusController.downloadPackages();
                 JSONObject data = result.optJSONObject("data");
@@ -2062,7 +2546,7 @@ public class MainActivity extends Activity {
 
     private void downloadAndInstallApk(String url, String version, TextView status) {
         status.setText("下载进度 0%");
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.BACKGROUND, () -> {
             try {
                 File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
                 if (dir == null) dir = getCacheDir();
@@ -2186,7 +2670,7 @@ public class MainActivity extends Activity {
         confirm.setOnClickListener(v -> {
             confirm.setEnabled(false);
             confirm.setText("支付中");
-            network.execute(() -> {
+            executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
                 try {
                     JSONObject body = new JSONObject();
                     body.put("plan_id", plan.optInt("id", 0));
@@ -2423,20 +2907,27 @@ public class MainActivity extends Activity {
         return ratio;
     }
 
-    private void startAlipayAppPayment(String amountText) {
-        String cleanAmount = amountText == null ? "" : amountText.trim();
-        int amount;
-        try {
-            amount = Integer.parseInt(cleanAmount);
-        } catch (Exception ignored) {
-            Toast.makeText(this, "请输入有效充值金额", Toast.LENGTH_SHORT).show();
+    private void startAlipayAppPayment(int amount) {
+        String accountKey = alipayAccountKey();
+        if (alipayOrderRequestInFlight) {
+            Toast.makeText(this, "支付请求正在创建，请稍候。", Toast.LENGTH_SHORT).show();
             return;
         }
-        if (amount <= 0) {
-            Toast.makeText(this, "充值金额必须大于 0", Toast.LENGTH_SHORT).show();
+        AlipayPaymentGuard.Decision decision = alipayPaymentGuard.tryStart(accountKey, amount, System.currentTimeMillis());
+        if (!decision.allowed) {
+            Toast.makeText(this, decision.message, Toast.LENGTH_SHORT).show();
+            if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) {
+                return;
+            }
+            if (pendingAlipayTradeNo != null && !pendingAlipayTradeNo.trim().isEmpty()) {
+                showAlipayPendingDialog(pendingAlipayTradeNo, String.valueOf(pendingAlipayAmount));
+            }
             return;
         }
-        network.execute(() -> {
+        alipayOrderRequestInFlight = true;
+        pendingAlipayAccountKey = accountKey;
+        pendingAlipayAmount = amount;
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
             try {
                 JSONObject envelope = billingController.createAlipayOrder(amount);
                 JSONObject data = envelope.optJSONObject("data");
@@ -2448,15 +2939,28 @@ public class MainActivity extends Activity {
                 }
                 pendingAlipayTradeNo = tradeNo;
                 mainHandler.post(() -> {
+                    alipayOrderRequestInFlight = false;
                     showAlipayPendingDialog(tradeNo, data.optString("amount", String.valueOf(amount)));
                     launchAlipayApp(orderString);
                     mainHandler.removeCallbacks(alipayPaymentPoll);
                     mainHandler.postDelayed(alipayPaymentPoll, 2000);
                 });
             } catch (Exception error) {
-                mainHandler.post(() -> Toast.makeText(this, "创建支付宝订单失败：" + message(error), Toast.LENGTH_LONG).show());
+                mainHandler.post(() -> {
+                    alipayOrderRequestInFlight = false;
+                    alipayPaymentGuard.clear(accountKey);
+                    Toast.makeText(this, "创建支付宝订单失败：" + message(error), Toast.LENGTH_LONG).show();
+                });
             }
         });
+    }
+
+    private String alipayAccountKey() {
+        if (prefs == null) return "";
+        if (!prefs.userId().isEmpty()) return "id:" + prefs.userId();
+        if (!prefs.username().isEmpty()) return "name:" + prefs.username();
+        if (!prefs.token().isEmpty()) return "token:" + prefs.token().hashCode();
+        return "app:" + prefs.appId();
     }
 
     private void launchAlipayApp(String orderString) {
@@ -2472,7 +2976,7 @@ public class MainActivity extends Activity {
             Constructor<?> constructor = payTaskClass.getConstructor(android.app.Activity.class);
             Object payTask = constructor.newInstance(this);
             Method payV2 = payTaskClass.getMethod("payV2", String.class, boolean.class);
-            network.execute(() -> {
+            executeNetwork(NetworkRequestPolicy.Priority.USER_ACTION, () -> {
                 try {
                     Object sdkResult = payV2.invoke(payTask, orderString, true);
                     handleAlipaySdkResult(sdkResult);
@@ -2517,6 +3021,7 @@ public class MainActivity extends Activity {
                 mainHandler.postDelayed(alipayPaymentPoll, 2000);
             } else if ("6001".equals(status)) {
                 Toast.makeText(this, "已取消支付宝支付。", Toast.LENGTH_SHORT).show();
+                cancelPendingAlipayPayment();
             } else if (!status.isEmpty() || !memo.isEmpty()) {
                 String detail = memo.isEmpty() ? status : memo;
                 Toast.makeText(this, "支付宝支付未完成：" + detail, Toast.LENGTH_LONG).show();
@@ -2545,12 +3050,17 @@ public class MainActivity extends Activity {
         panel.addView(UiKit.text(this, "请在支付宝完成支付。支付结果由服务器查询确认。", UiKit.MUTED, 14));
         Button check = UiKit.ghostButton(this, "检查支付状态");
         check.setOnClickListener(v -> pollPendingAlipayPayment(true));
+        Button repay = UiKit.ghostButton(this, "重新支付");
+        repay.setOnClickListener(v -> restartPendingAlipayPayment());
         Button cancel = UiKit.ghostButton(this, "取消订单");
         cancel.setOnClickListener(v -> cancelPendingAlipayPayment());
         LinearLayout actions = UiKit.horizontal(this);
         actions.addView(check, new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f));
+        LinearLayout.LayoutParams repayLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f);
+        repayLp.leftMargin = UiKit.dp(this, 8);
+        actions.addView(repay, repayLp);
         LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 40), 1f);
-        cancelLp.leftMargin = UiKit.dp(this, 10);
+        cancelLp.leftMargin = UiKit.dp(this, 8);
         actions.addView(cancel, cancelLp);
         panel.addView(actions, new LinearLayout.LayoutParams(-1, UiKit.dp(this, 44)));
         overlay.addView(panel, centeredModalLp());
@@ -2565,18 +3075,22 @@ public class MainActivity extends Activity {
     private void pollPendingAlipayPayment(boolean manual) {
         String tradeNo = pendingAlipayTradeNo;
         if (tradeNo == null || tradeNo.trim().isEmpty()) return;
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
             try {
                 JSONObject envelope = billingController.queryAlipayOrder(tradeNo);
                 JSONObject data = envelope.optJSONObject("data");
                 String status = data == null ? "" : first(data, "status");
                 if ("success".equalsIgnoreCase(status)) {
+                    String accountKey = pendingAlipayAccountKey;
                     pendingAlipayTradeNo = null;
+                    pendingAlipayAccountKey = "";
+                    alipayOrderRequestInFlight = false;
+                    alipayPaymentGuard.clear(accountKey);
                     mainHandler.removeCallbacks(alipayPaymentPoll);
                     mainHandler.post(() -> {
                         if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) pendingAlipayDialog.dismiss();
                         Toast.makeText(this, "支付成功，余额已刷新。", Toast.LENGTH_LONG).show();
-                        panelDataCache.remove("钱包与消耗");
+                        if (panelDataStore != null) panelDataStore.remove("钱包与消耗");
                         switchSection(AppSection.WALLET);
                     });
                     return;
@@ -2598,17 +3112,46 @@ public class MainActivity extends Activity {
 
     private void cancelPendingAlipayPayment() {
         String tradeNo = pendingAlipayTradeNo;
+        String accountKey = pendingAlipayAccountKey;
         pendingAlipayTradeNo = null;
+        pendingAlipayAccountKey = "";
+        alipayOrderRequestInFlight = false;
+        alipayPaymentGuard.clear(accountKey);
         mainHandler.removeCallbacks(alipayPaymentPoll);
         if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) {
             pendingAlipayDialog.dismiss();
         }
         if (tradeNo == null || tradeNo.trim().isEmpty()) return;
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
             try {
                 billingController.cancelAlipayOrder(tradeNo);
             } catch (Exception ignored) {
             }
+        });
+    }
+
+    private void restartPendingAlipayPayment() {
+        int amount = pendingAlipayAmount;
+        String tradeNo = pendingAlipayTradeNo;
+        String accountKey = pendingAlipayAccountKey;
+        pendingAlipayTradeNo = null;
+        pendingAlipayAccountKey = "";
+        alipayOrderRequestInFlight = false;
+        alipayPaymentGuard.clear(accountKey);
+        mainHandler.removeCallbacks(alipayPaymentPoll);
+        if (pendingAlipayDialog != null && pendingAlipayDialog.isShowing()) {
+            pendingAlipayDialog.dismiss();
+        }
+        if (tradeNo == null || tradeNo.trim().isEmpty()) {
+            startAlipayAppPayment(amount);
+            return;
+        }
+        executeNetwork(NetworkRequestPolicy.Priority.CRITICAL, () -> {
+            try {
+                billingController.cancelAlipayOrder(tradeNo);
+            } catch (Exception ignored) {
+            }
+            mainHandler.post(() -> startAlipayAppPayment(amount));
         });
     }
 
@@ -2776,7 +3319,7 @@ public class MainActivity extends Activity {
     }
 
     private void bindDevice(String deviceId) {
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.DESKTOP_SYNC, () -> {
             try {
                 desktopRepository.bindDevice(deviceId, prefs.appId());
                 prefs.setBoundDeviceId(deviceId);
@@ -2791,7 +3334,7 @@ public class MainActivity extends Activity {
     }
 
     private void unbindDevice(String deviceId) {
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.DESKTOP_SYNC, () -> {
             try {
                 desktopRepository.unbindDevice(deviceId, prefs.appId());
                 prefs.setBoundDeviceId("");
@@ -2895,11 +3438,16 @@ public class MainActivity extends Activity {
         Button create = iconGlyphButton("＋");
         create.setTextSize(18);
         create.setOnClickListener(v -> {
-            showNewConversationSafetyDialog(() -> {
+            Runnable createAction = () -> {
                 createSessionForCurrentSection();
                 dialog.dismiss();
                 renderCurrent(true);
-            });
+            };
+            if (shouldSkipNewConversationSafetyNotice()) {
+                createAction.run();
+            } else {
+                showNewConversationSafetyDialog(createAction);
+            }
         });
         titleRow.addView(create, new LinearLayout.LayoutParams(UiKit.dp(this, 36), UiKit.dp(this, 36)));
         if (currentSection.isDesktop()) {
@@ -3069,6 +3617,18 @@ public class MainActivity extends Activity {
         state.selectedSessionId = session.id;
     }
 
+    private boolean shouldSkipNewConversationSafetyNotice() {
+        return getSharedPreferences("oneapi_mobile", MODE_PRIVATE)
+                .getBoolean(SKIP_NEW_CONVERSATION_SAFETY_NOTICE, false);
+    }
+
+    private void setSkipNewConversationSafetyNotice(boolean skip) {
+        getSharedPreferences("oneapi_mobile", MODE_PRIVATE)
+                .edit()
+                .putBoolean(SKIP_NEW_CONVERSATION_SAFETY_NOTICE, skip)
+                .apply();
+    }
+
     private void showNewConversationSafetyDialog(Runnable onConfirm) {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -3095,8 +3655,14 @@ public class MainActivity extends Activity {
         LinearLayout actions = UiKit.horizontal(this);
         Button cancel = UiKit.ghostButton(this, "取消");
         cancel.setOnClickListener(v -> dialog.dismiss());
-        Button confirm = UiKit.primaryButton(this, "已知晓，创建新会话");
+        Button confirm = UiKit.primaryButton(this, "已知晓");
         confirm.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (onConfirm != null) onConfirm.run();
+        });
+        Button skip = UiKit.ghostButton(this, "不再提示");
+        skip.setOnClickListener(v -> {
+            setSkipNewConversationSafetyNotice(true);
             dialog.dismiss();
             if (onConfirm != null) onConfirm.run();
         });
@@ -3104,6 +3670,9 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 44), 1f);
         confirmLp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
         actions.addView(confirm, confirmLp);
+        LinearLayout.LayoutParams skipLp = new LinearLayout.LayoutParams(0, UiKit.dp(this, 44), 1f);
+        skipLp.setMargins(UiKit.dp(this, 10), 0, 0, 0);
+        actions.addView(skip, skipLp);
         panel.addView(actions);
         overlay.addView(panel, plainCenteredModalLp());
         overlay.setOnClickListener(v -> dialog.dismiss());
@@ -3353,7 +3922,7 @@ public class MainActivity extends Activity {
             if (afterRefresh != null) mainHandler.post(afterRefresh);
             return;
         }
-        validateBoundDesktopDevice(force);
+        if (force) validateBoundDesktopDevice(true);
         if (!force && shouldSkipDesktopSessionRefresh(section)) {
             if (afterRefresh != null) mainHandler.post(afterRefresh);
             return;
@@ -3366,9 +3935,10 @@ public class MainActivity extends Activity {
             desktopSessionRefreshInFlight.add(section.id);
         }
         String requestedDeviceId = prefs.boundDeviceId();
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.DESKTOP_SYNC, () -> {
             try {
                 JSONArray rows = desktopRepository.sessions(requestedDeviceId);
+                mainHandler.post(() -> setDesktopBridgeConnected(true));
                 List<ChatSession> parsed = new ArrayList<>();
                 String syncedModel = "";
                 long syncedModelAt = 0L;
@@ -3427,6 +3997,7 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Exception error) {
+                mainHandler.post(() -> setDesktopBridgeConnected(false));
                 String detail = message(error);
                 appendDesktopSyncNotice(section, "桌面会话同步失败：" + detail + "\n请确认客户端在线、已登录并保持绑定。");
                 if (afterRefresh != null) mainHandler.post(afterRefresh);
@@ -3457,7 +4028,14 @@ public class MainActivity extends Activity {
         String deviceId = prefs.boundDeviceId();
         if (deviceId == null || deviceId.trim().isEmpty()) return true;
         long last = desktopSessionRefreshedAt.getOrDefault(section, 0L);
-        return last > 0L && System.currentTimeMillis() - last < DESKTOP_SESSION_REFRESH_MIN_INTERVAL_MS;
+        return !DesktopSessionSync.shouldRefreshDesktopSessions(
+                target.sessions,
+                deviceId,
+                last,
+                System.currentTimeMillis(),
+                DESKTOP_BUSY_SESSION_REFRESH_INTERVAL_MS,
+                DESKTOP_SESSION_REFRESH_MIN_INTERVAL_MS
+        );
     }
 
     private void appendDesktopSyncNotice(AppSection section, String text) {
@@ -3496,17 +4074,14 @@ public class MainActivity extends Activity {
         }
         ChatSession session = new ChatSession(id, title, section.label, project, messages);
         session.status = first(item, "status", "state");
+        DesktopSessionSync.normalizeDesktopStatusFromMessages(session);
         return session;
     }
 
     private boolean isDesktopSessionBusy(ChatSession session) {
         if (session == null) return false;
-        String status = session.status == null ? "" : session.status.trim().toLowerCase(Locale.ROOT);
-        return "queued".equals(status)
-                || "claimed".equals(status)
-                || "running".equals(status)
-                || "waiting_interaction".equals(status)
-                || "pending".equals(status);
+        DesktopSessionSync.normalizeDesktopStatusFromMessages(session);
+        return DesktopSessionSync.isDesktopSessionBusyStatus(session.status);
     }
 
     private boolean hasBusyDesktopSession() {
@@ -3783,6 +4358,7 @@ public class MainActivity extends Activity {
         state.selectedIndex = 0;
         state.selectedSessionId = session.id;
         state.selectedSessionId = session.id;
+        persistSession(currentSection, session);
         renderCurrent(true);
     }
 
@@ -3799,6 +4375,8 @@ public class MainActivity extends Activity {
                 state.assistantOrders.remove(name);
                 chatAssistantPrompts.remove(name);
                 imageAssistantPrompts.remove(name);
+                customAssistantStore(currentSection).remove(name);
+                saveCustomAssistants(currentSection);
                 parent.dismiss();
                 renderCurrent(false);
             }
@@ -3806,14 +4384,14 @@ public class MainActivity extends Activity {
     }
 
     private void refreshModels() {
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.BACKGROUND, () -> {
             try {
-                JSONObject envelope = apiClient.get("/api/pricing");
+                JSONObject envelope = userActionApiClient.get("/api/pricing");
                 JSONArray pricingData = envelope.optJSONArray("data");
                 JSONArray appKeyModels = new JSONArray();
                 try {
-                    ensureAppApiKeyOrThrow(apiClient);
-                    JSONObject relayModelsEnvelope = apiClient.request("GET", "/v1/models", null, 15000, prefs.appApiKey());
+                    ensureAppApiKeyOrThrow(userActionApiClient);
+                    JSONObject relayModelsEnvelope = userActionApiClient.request("GET", "/v1/models", null, 15000, prefs.appApiKey());
                     appKeyModels = modelNamesFromEnvelope(relayModelsEnvelope);
                     if (appKeyModels.length() == 0) {
                         Log.w(TAG, "refreshModels relay model list returned empty, fallback to pricing/user models");
@@ -3827,7 +4405,7 @@ public class MainActivity extends Activity {
                 } else {
                     JSONArray userModels = new JSONArray();
                     try {
-                        JSONObject userModelsEnvelope = apiClient.get("/api/user/models");
+                        JSONObject userModelsEnvelope = userActionApiClient.get("/api/user/models");
                         userModels = mergeModelArrays(userModels, modelNamesFromEnvelope(userModelsEnvelope));
                     } catch (Exception ignored) {
                     }
@@ -3895,10 +4473,10 @@ public class MainActivity extends Activity {
     }
 
     private void refreshAssistants() {
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.BACKGROUND, () -> {
             try {
                 String query = prefs.boundDeviceId().isEmpty() ? "" : "?device_id=" + ApiClient.enc(prefs.boundDeviceId());
-                JSONObject envelope = apiClient.get("/api/mobile/desktop-assistants" + query);
+                JSONObject envelope = desktopApiClient.get("/api/mobile/desktop-assistants" + query);
                 JSONArray data = envelope.optJSONArray("data");
                 AssistantCatalog.Result catalog = AssistantCatalog.fromMobileAssistants(data);
                 mainHandler.post(() -> {
@@ -3954,7 +4532,7 @@ public class MainActivity extends Activity {
         if (section == null || !section.isDesktop()) return;
         String deviceId = prefs.boundDeviceId();
         if (deviceId.isEmpty()) return;
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.DESKTOP_SYNC, () -> {
             try {
                 desktopRepository.selectModel(section.id, deviceId, model);
                 refreshDesktopSessions(section, true, null);
@@ -3996,17 +4574,71 @@ public class MainActivity extends Activity {
         return "selected_model_" + section.id;
     }
 
+    private void loadSavedCustomAssistants() {
+        for (AppSection section : Arrays.asList(AppSection.CHAT, AppSection.IMAGE)) {
+            AssistantPersistence.Store store = AssistantPersistence.decode(
+                    getSharedPreferences("oneapi_mobile", MODE_PRIVATE).getString(customAssistantKey(section), "")
+            );
+            customAssistantStores.put(section, store);
+            applyCustomAssistants(section);
+        }
+    }
+
+    private void saveCustomAssistants(AppSection section) {
+        if (section == null) return;
+        AssistantPersistence.Store store = customAssistantStores.get(section);
+        getSharedPreferences("oneapi_mobile", MODE_PRIVATE)
+                .edit()
+                .putString(customAssistantKey(section), AssistantPersistence.encode(store))
+                .apply();
+    }
+
+    private String customAssistantKey(AppSection section) {
+        return "custom_assistants_" + (section == null ? "" : section.id);
+    }
+
+    private AssistantPersistence.Store customAssistantStore(AppSection section) {
+        AssistantPersistence.Store store = customAssistantStores.get(section);
+        if (store == null) {
+            store = new AssistantPersistence.Store();
+            customAssistantStores.put(section, store);
+        }
+        return store;
+    }
+
+    private void applyCustomAssistants(AppSection section) {
+        SectionState target = states.get(section);
+        if (target == null) return;
+        AssistantPersistence.Store store = customAssistantStores.get(section);
+        if (store == null) return;
+        Map<String, String> prompts = section == AppSection.IMAGE ? imageAssistantPrompts : chatAssistantPrompts;
+        for (AssistantPersistence.Item item : store.items()) {
+            if (!target.availableAssistants.contains(item.name)) target.availableAssistants.add(item.name);
+            target.assistantOrders.put(item.name, item.order);
+            prompts.put(item.name, item.prompt);
+        }
+        target.availableAssistants.remove("＋ 新建助手");
+        target.availableAssistants.sort(Comparator.comparingInt(value -> target.assistantOrders.getOrDefault(value, 100)));
+        target.availableAssistants.add("＋ 新建助手");
+    }
+
     private void replaceAssistants(AppSection section, List<String> values) {
         SectionState target = states.get(section);
         if (target == null || values.isEmpty()) {
             ensureBuiltInAssistants(section);
+            applyCustomAssistants(section);
             return;
         }
+        AssistantPersistence.Store store = customAssistantStores.get(section);
+        if (store != null) values = store.mergeNames(values);
         target.availableAssistants.clear();
         target.availableAssistants.addAll(values);
         for (String value : values) {
-            if (!target.assistantOrders.containsKey(value)) target.assistantOrders.put(value, 100);
+            int fallbackOrder = store == null ? 100 : store.order(value, 100);
+            target.assistantOrders.put(value, fallbackOrder);
         }
+        applyCustomAssistants(section);
+        target.availableAssistants.remove("＋ 新建助手");
         target.availableAssistants.sort(Comparator.comparingInt(value -> target.assistantOrders.getOrDefault(value, 100)));
         target.availableAssistants.add("＋ 新建助手");
     }
@@ -4141,6 +4773,8 @@ public class MainActivity extends Activity {
                 if (!editing.isEmpty() && !editing.equals(cleanName)) chatAssistantPrompts.remove(editing);
                 chatAssistantPrompts.put(cleanName, prompt.getText().toString());
             }
+            customAssistantStore(currentSection).rename(editing, cleanName, order, prompt.getText().toString());
+            saveCustomAssistants(currentSection);
             if (editing.isEmpty()) {
                 ChatSession session = new ChatSession(
                         currentSection.id + "-" + cleanName + "-" + System.currentTimeMillis(),
@@ -4149,9 +4783,12 @@ public class MainActivity extends Activity {
                         currentSection == AppSection.IMAGE ? "图片生成" : "聊天",
                         new ArrayList<>()
                 );
-        state.sessions.add(0, session);
-        state.selectedIndex = 0;
-        state.selectedSessionId = session.id;
+                state.sessions.add(0, session);
+                state.selectedIndex = 0;
+                state.selectedSessionId = session.id;
+                persistSession(currentSection, session);
+            } else {
+                persistSessions(currentSection, state.sessions);
             }
             dialog.dismiss();
             renderCurrent(true);
@@ -4442,7 +5079,7 @@ public class MainActivity extends Activity {
         SectionState target = states.get(section);
         if (target == null || !section.isDesktop()) return;
         String deviceId = prefs.boundDeviceId();
-        network.execute(() -> {
+        executeNetwork(NetworkRequestPolicy.Priority.DESKTOP_SYNC, () -> {
             try {
                 JSONArray data = desktopRepository.extensions(section.id, deviceId);
                 List<String> names = new ArrayList<>();
@@ -4496,11 +5133,13 @@ public class MainActivity extends Activity {
         return label;
     }
 
-    private void togglePermission() {
+    private void syncDesktopPermissionState() {
         if (!currentSection.isDesktop()) return;
-        SectionState state = state();
-        state.fullPermission = !state.fullPermission;
-        composerView.updateState(composerStateFor(state.current(), state));
+        refreshDesktopSessions(currentSection, true, () -> {
+            SectionState state = state();
+            composerView.updateState(composerStateFor(state.current(), state));
+            Toast.makeText(this, "已同步客户端权限状态", Toast.LENGTH_SHORT).show();
+        });
     }
 
     private ComposerState composerStateFor(ChatSession session, SectionState state) {
@@ -4559,18 +5198,18 @@ public class MainActivity extends Activity {
         persistSession(targetSection, session);
         AtomicBoolean cancelFlag = new AtomicBoolean(false);
         activeSendCancelled = cancelFlag;
-        activeSendTask = network.submit(() -> {
+        activeSendTask = userActionNetwork.submit(() -> {
             String result;
             try {
                 Object chatPayload = buildChatUserContent(text, attachments, userPayload);
                 String desktopPayload = userPayload;
                 JSONArray desktopAttachments = buildDesktopAttachments(attachments);
                 if (targetSection == AppSection.CHAT) {
-                    ensureAppApiKeyOrThrow(apiClient);
+                    ensureAppApiKeyOrThrow(userActionApiClient);
                     streamChatWithAppKeyRetry(targetSection, state, session, progress, chatPayload, chatContext, cancelFlag);
                     result = progress.text;
                 } else if (targetSection == AppSection.IMAGE) {
-                    ensureAppApiKeyOrThrow(apiClient);
+                    ensureAppApiKeyOrThrow(userActionApiClient);
                     ImageController.ImageResult imageResult = sendImageWithAppKeyRetry(state, session, text, attachments);
                     if (progress != null) progress.tokenText = imageResult.tokenText;
                     result = imageResult.image;
@@ -4640,7 +5279,7 @@ public class MainActivity extends Activity {
         if (activeSendTask != null && !activeSendTask.isDone()) {
             activeSendTask.cancel(true);
         }
-        if (apiClient != null) apiClient.cancelActiveRequests();
+        if (userActionApiClient != null) userActionApiClient.cancelActiveRequests();
         if (composerView != null) composerView.setSending(false);
     }
 
@@ -4972,7 +5611,8 @@ public class MainActivity extends Activity {
     private void appendDesktopJobEvents(AppSection section, ChatSession session, String jobId, JSONArray events) {
         if (events == null || events.length() == 0) return;
         List<ChatMessage> eventMessages = desktopMessagesFromJobEvents(section, jobId, events);
-        if (eventMessages.isEmpty()) return;
+        String statusFromEvents = desktopStatusFromEvents(events, session == null ? "" : session.status);
+        if (eventMessages.isEmpty() && statusFromEvents.equals(session == null ? "" : session.status)) return;
         mainHandler.post(() -> {
             boolean changed = false;
             for (ChatMessage message : eventMessages) {
@@ -4980,12 +5620,17 @@ public class MainActivity extends Activity {
                 session.messages.add(message);
                 changed = true;
             }
-            if (!changed) return;
             session.messages.sort((a, b) -> Long.compare(a.timestamp, b.timestamp));
-            session.status = desktopStatusFromEvents(events, session.status);
+            String previousStatus = session.status;
+            session.status = statusFromEvents;
+            DesktopSessionSync.normalizeDesktopStatusFromMessages(session);
+            if (!changed && String.valueOf(previousStatus).equals(String.valueOf(session.status))) return;
             updateDesktopWakeState();
             persistSession(section, session);
             if (currentSection == section && state().current() == session) renderCurrent(false);
+            if (!DesktopSessionSync.isDesktopSessionBusyStatus(session.status)) {
+                refreshDesktopSessions(section, true, null);
+            }
         });
     }
 
@@ -5002,6 +5647,7 @@ public class MainActivity extends Activity {
     private void streamChatOnce(AppSection targetSection, SectionState state, ChatSession session, ChatMessage progress, Object chatPayload, JSONArray chatContext, AtomicBoolean cancelFlag) throws Exception {
         String assistantPrompt = chatAssistantPrompts.getOrDefault(session.assistantLabel, "");
         final long[] lastRenderAt = new long[]{0};
+        final long[] lastPersistAt = new long[]{0};
         chatController.stream(
                 state.selectedModel,
                 (assistantPrompt.isEmpty() ? "你是 OneAPI Android Chat 助手。" : assistantPrompt) + "\n上下文：" + state.contextWindow,
@@ -5026,9 +5672,13 @@ public class MainActivity extends Activity {
                                     requestStreamAutoScroll();
                                 }
                             }
+                            long nowPersist = System.currentTimeMillis();
+                            if (done || (!cleanFullText.isEmpty() && nowPersist - lastPersistAt[0] >= 1000)) {
+                                lastPersistAt[0] = nowPersist;
+                                persistSession(targetSection, session);
+                            }
                             if (done) {
                                 stopStreamAutoScroll();
-                                persistSession(targetSection, session);
                                 composerView.setSending(false);
                                 activeSendTask = null;
                                 activeSendCancelled = null;
@@ -5066,7 +5716,7 @@ public class MainActivity extends Activity {
     }
 
     private void ensureAppApiKeyAfterInvalidation() throws Exception {
-        appApiKeyManager.invalidateAndEnsure(apiClient);
+        appApiKeyManager.invalidateAndEnsure(userActionApiClient);
     }
 
     private String desktopStatusFromEvents(JSONArray events, String fallback) {
@@ -5078,8 +5728,17 @@ public class MainActivity extends Activity {
             JSONObject event = events.optJSONObject(i);
             if (event == null) continue;
             String type = first(event, "type", "phase").toLowerCase(Locale.ROOT);
-            if ("error".equals(type)) return "error";
-            if ("complete".equals(type)) complete = true;
+            if ("error".equals(type)
+                    || "failed".equals(type)
+                    || "failure".equals(type)
+                    || "stopped".equals(type)
+                    || "stop".equals(type)
+                    || "cancelled".equals(type)
+                    || "canceled".equals(type)) return "error";
+            if ("complete".equals(type)
+                    || "completed".equals(type)
+                    || "done".equals(type)
+                    || "success".equals(type)) complete = true;
             if ("interaction_required".equals(type) || "waiting_interaction".equals(type)) waitingInteraction = true;
             if ("project".equals(type)
                     || "running".equals(type)

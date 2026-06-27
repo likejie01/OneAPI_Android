@@ -14,8 +14,9 @@ public class DesktopWakeStateSourceTest {
         String source = new String(Files.readAllBytes(Paths.get("src/main/java/center/oneapi/mobile/MainActivity.java")), StandardCharsets.UTF_8);
 
         assertTrue(source.contains("session.status = \"queued\";\n                updateDesktopWakeState();"));
-        assertTrue(source.contains("session.status = desktopStatusFromEvents(events, session.status);\n            updateDesktopWakeState();"));
-        assertTrue(source.contains("if (\"error\".equals(type)) return \"error\";"));
+        assertTrue(source.contains("session.status = statusFromEvents;\n            DesktopSessionSync.normalizeDesktopStatusFromMessages(session);"));
+        assertTrue(source.contains("updateDesktopWakeState();"));
+        assertTrue(source.contains("|| \"stopped\".equals(type)"));
         assertTrue(source.contains("if (waitingInteraction) return \"waiting_interaction\";"));
         assertTrue(source.contains("getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);"));
         assertTrue(source.contains("getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);"));

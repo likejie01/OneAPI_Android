@@ -80,6 +80,40 @@ public class AppPrefs {
         prefs.edit().putString("bound_device_id", deviceId == null ? "" : deviceId.trim()).apply();
     }
 
+    public boolean hasAcceptedLegal(String version) {
+        String cleanVersion = version == null ? "" : version.trim();
+        if (cleanVersion.isEmpty()) return false;
+        String key = "legal_acceptance:" + legalAccountKey();
+        return cleanVersion.equals(prefs.getString(key, ""));
+    }
+
+    public void acceptLegal(String version) {
+        String cleanVersion = version == null ? "" : version.trim();
+        if (cleanVersion.isEmpty()) return;
+        prefs.edit()
+                .putString("legal_acceptance:" + legalAccountKey(), cleanVersion)
+                .putLong("legal_acceptance_at:" + legalAccountKey(), System.currentTimeMillis())
+                .apply();
+    }
+
+    public void clearLogin() {
+        prefs.edit()
+                .putString("token", "")
+                .putString("cookie", "")
+                .putString("user_id", "")
+                .putString("username", "")
+                .putString("bound_device_id", "")
+                .apply();
+    }
+
+    private String legalAccountKey() {
+        String id = userId();
+        if (!id.isEmpty()) return "id:" + id;
+        String name = username();
+        if (!name.isEmpty()) return "name:" + name;
+        return "app:" + appId();
+    }
+
     private void ensureDefaults() {
         SharedPreferences.Editor editor = prefs.edit();
         boolean changed = false;

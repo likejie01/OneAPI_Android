@@ -199,8 +199,8 @@ public class ComposerView extends LinearLayout {
         boolean chat = "chat".equals(next.sectionId);
         boolean image = "image".equals(next.sectionId);
         boolean desktop = next.desktopMode;
-        modelButton.setVisibility((chat || desktop) ? VISIBLE : GONE);
-        reasoningButton.setVisibility((chat || desktop) ? VISIBLE : GONE);
+        modelButton.setVisibility(chat ? VISIBLE : GONE);
+        reasoningButton.setVisibility(chat ? VISIBLE : GONE);
         contextButton.setVisibility(chat ? VISIBLE : GONE);
         assistantButton.setVisibility((chat || image) ? VISIBLE : GONE);
         sizeButton.setVisibility(image ? VISIBLE : GONE);

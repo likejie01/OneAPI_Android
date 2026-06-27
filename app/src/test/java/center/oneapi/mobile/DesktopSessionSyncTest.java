@@ -46,6 +46,61 @@ public class DesktopSessionSyncTest {
     }
 
     @Test
+    public void normalizeDesktopStatus_treatsStoppedAndCancelledAsTerminal() {
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus("stopped"));
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus("cancelled"));
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus("canceled"));
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus("failed"));
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus("error"));
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus("complete"));
+    }
+
+    @Test
+    public void normalizeDesktopStatus_keepsOnlyTrueBusyStatesBusy() {
+        assertTrue(DesktopSessionSync.isDesktopSessionBusyStatus("queued"));
+        assertTrue(DesktopSessionSync.isDesktopSessionBusyStatus("claimed"));
+        assertTrue(DesktopSessionSync.isDesktopSessionBusyStatus("running"));
+        assertTrue(DesktopSessionSync.isDesktopSessionBusyStatus("waiting_interaction"));
+        assertTrue(DesktopSessionSync.isDesktopSessionBusyStatus("pending"));
+    }
+
+    @Test
+    public void statusFromLogsOverridesStaleRunningWhenStopLogArrives() {
+        ChatSession session = session("stopped", "任务", "D:/project", 1_000L);
+        session.status = "running";
+        session.messages.add(ChatMessage.log("Codex 已停止本次回复。", 2_000L));
+        session.messages.add(ChatMessage.log("执行失败\n用户已停止当前回复", 3_000L));
+
+        DesktopSessionSync.normalizeDesktopStatusFromMessages(session);
+
+        assertEquals("error", session.status);
+        assertFalse(DesktopSessionSync.isDesktopSessionBusyStatus(session.status));
+    }
+
+    @Test
+    public void busyDesktopSessionsNeedFastRefreshInsteadOfNormalThrottle() {
+        ChatSession running = session("running", "任务", "D:/project", 1_000L);
+        running.status = "running";
+
+        assertTrue(DesktopSessionSync.shouldRefreshDesktopSessions(
+                Arrays.asList(running),
+                "device-1",
+                100_000L,
+                101_600L,
+                1_500L,
+                20_000L
+        ));
+        assertFalse(DesktopSessionSync.shouldRefreshDesktopSessions(
+                Arrays.asList(running),
+                "device-1",
+                100_000L,
+                101_000L,
+                1_500L,
+                20_000L
+        ));
+    }
+
+    @Test
     public void recentProjectGroups_returnsFiveNewestProjectsWithFiveNewestSessionsEach() {
         List<ChatSession> sessions = new ArrayList<>();
         for (int project = 1; project <= 6; project++) {
