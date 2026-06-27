@@ -30,24 +30,30 @@ public class MainActivityLegalSourceTest {
         assertTrue(source.contains("\"隐私政策\""));
         assertTrue(source.contains("\"生成式 AI 服务说明\""));
         assertTrue(source.contains("\"内容安全规则\""));
+        assertTrue(source.contains("\"投诉举报\""));
         assertTrue(source.contains("/api/user-agreement"));
         assertTrue(source.contains("/api/privacy-policy"));
         assertTrue(source.contains("/api/user/compliance/status"));
         assertTrue(source.contains("/api/user/compliance/acknowledge"));
         assertTrue(source.contains("\"generative-ai-service\""));
         assertTrue(source.contains("\"content-safety\""));
+        assertTrue(source.contains("\"report\""));
         assertTrue(source.contains("服务定位：本服务面向经人工审核或平台授权的用户开放"));
         assertTrue(source.contains("审核范围：平台会在服务端对提示词、附件文本、会话请求"));
+        assertTrue(source.contains("受理范围：用户、权利人或公众可就违法内容"));
     }
 
     @Test
-    public void legalCenterTabsWrapAndOnlyUsesBottomCloseButton() throws Exception {
+    public void legalCenterTabsUseFixedRowsAndOnlyUsesBottomCloseButton() throws Exception {
         String legalCenter = methodSource("showLegalCenterDialog", "syncLegalDocuments");
 
-        assertTrue(legalCenter.contains("FlowTagLayout tabs = new FlowTagLayout(this);"));
+        assertTrue(legalCenter.contains("LinearLayout tabRows = UiKit.vertical(this);"));
+        assertTrue(legalCenter.contains("addLegalTabRow(tabRows, titles, tabButtons, new int[]{0, 1});"));
+        assertTrue(legalCenter.contains("addLegalTabRow(tabRows, titles, tabButtons, new int[]{2, 3});"));
+        assertTrue(legalCenter.contains("addLegalTabRow(tabRows, titles, tabButtons, new int[]{4});"));
         assertTrue(legalCenter.contains("tab.setSingleLine(true);"));
-        assertTrue(legalCenter.contains("ViewGroup.MarginLayoutParams tabLp = new ViewGroup.MarginLayoutParams(-2"));
-        assertTrue(legalCenter.contains("tabs.addView(tab, tabLp);"));
+        assertTrue(legalCenter.contains("tabs.addView(tab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 36), 1f));"));
+        assertFalse(legalCenter.contains("FlowTagLayout tabs = new FlowTagLayout(this);"));
         assertFalse(legalCenter.contains("LinearLayout tabs = UiKit.vertical(this);"));
         assertFalse(legalCenter.contains("tab.setSingleLine(false);"));
         assertFalse(legalCenter.contains("tab.setMaxLines(2);"));

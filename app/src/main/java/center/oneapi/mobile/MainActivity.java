@@ -1593,7 +1593,7 @@ public class MainActivity extends Activity {
 
         LinearLayout about = cardPanel();
         about.addView(UiKit.bold(this, "关于与合规"));
-        about.addView(UiKit.text(this, "查看用户协议、隐私政策、生成式 AI 服务说明和内容安全规则。", UiKit.MUTED, 14));
+        about.addView(UiKit.text(this, "查看用户协议、隐私政策、生成式 AI 服务说明、内容安全规则和投诉举报入口。", UiKit.MUTED, 14));
         Button aboutButton = UiKit.ghostButton(this, "关于");
         aboutButton.setOnClickListener(v -> showLegalCenterDialog(false, null));
         about.addView(aboutButton, centeredButtonLp());
@@ -1644,15 +1644,12 @@ public class MainActivity extends Activity {
             panel.addView(UiKit.text(this, "首次登录需要签订用户协议和隐私政策。不同意将退出登录，无法进入 App。", UiKit.MUTED, 13));
         }
 
-        String[] titles = new String[]{"用户协议", "隐私政策", "生成式 AI 服务说明", "内容安全规则"};
-        String[] keys = new String[]{"user", "privacy", "genai", "safety"};
+        String[] titles = new String[]{"用户协议", "隐私政策", "内容安全规则", "投诉举报", "生成式 AI 服务说明"};
+        String[] keys = new String[]{"user", "privacy", "safety", "report", "genai"};
         Map<String, String> documents = new LinkedHashMap<>();
-        documents.put(keys[0], legalFallback(keys[0]));
-        documents.put(keys[1], legalFallback(keys[1]));
-        documents.put(keys[2], legalFallback(keys[2]));
-        documents.put(keys[3], legalFallback(keys[3]));
+        for (String key : keys) documents.put(key, legalFallback(key));
 
-        FlowTagLayout tabs = new FlowTagLayout(this);
+        LinearLayout tabRows = UiKit.vertical(this);
         TextView content = UiKit.text(this, "", UiKit.INK, 14);
         content.setLineSpacing(UiKit.dp(this, 2), 1.0f);
         ScrollView scroll = new ScrollView(this);
@@ -1683,11 +1680,11 @@ public class MainActivity extends Activity {
                 renderTab.run();
             });
             tabButtons[i] = tab;
-            ViewGroup.MarginLayoutParams tabLp = new ViewGroup.MarginLayoutParams(-2, UiKit.dp(this, 36));
-            tabLp.setMargins(0, 0, UiKit.dp(this, 6), UiKit.dp(this, 6));
-            tabs.addView(tab, tabLp);
         }
-        panel.addView(tabs, new LinearLayout.LayoutParams(-1, -2));
+        addLegalTabRow(tabRows, titles, tabButtons, new int[]{0, 1});
+        addLegalTabRow(tabRows, titles, tabButtons, new int[]{2, 3});
+        addLegalTabRow(tabRows, titles, tabButtons, new int[]{4});
+        panel.addView(tabRows, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(-1, UiKit.dp(this, required ? 260 : 330));
         scrollLp.setMargins(0, UiKit.dp(this, 8), 0, UiKit.dp(this, 8));
         panel.addView(scroll, scrollLp);
@@ -1733,6 +1730,20 @@ public class MainActivity extends Activity {
         showDialogOverlay(dialog, overlay);
         renderTab.run();
         syncLegalDocuments(dialog, documents, keys, active, renderTab);
+    }
+
+    private void addLegalTabRow(LinearLayout tabRows, String[] titles, Button[] tabButtons, int[] indexes) {
+        LinearLayout tabs = UiKit.horizontal(this);
+        tabs.setGravity(Gravity.CENTER);
+        for (int index : indexes) {
+            if (index < 0 || index >= titles.length || index >= tabButtons.length) continue;
+            Button tab = tabButtons[index];
+            if (tab == null) continue;
+            tabs.addView(tab, new LinearLayout.LayoutParams(0, UiKit.dp(this, 36), 1f));
+        }
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+        rowLp.bottomMargin = UiKit.dp(this, 6);
+        tabRows.addView(tabs, rowLp);
     }
 
     private void syncLegalDocuments(Dialog dialog, Map<String, String> documents, String[] keys, int[] active, Runnable renderTab) {
@@ -1818,6 +1829,17 @@ public class MainActivity extends Activity {
                     + "用户权利：用户可通过投诉举报入口申请访问、更正、复制、删除个人信息，撤回授权、注销账号、解释个人信息处理规则或投诉个人信息处理问题。涉及第三方模型服务商已处理的信息，平台将在能力范围内协助用户按相应规则处理。\n\n"
                     + "保存期限：订单、账务、用量、违规处置、安全日志、投诉记录和依法应留存的信息，会在满足安全、审计、争议处理或法律要求的期限内保存。超过必要期限后，平台会采取删除、匿名化或最小化保留等方式处理。\n\n"
                     + "安全措施：平台会采用权限控制、日志审计、敏感配置保护、访问限制、备份与故障恢复等措施保护信息安全。任何互联网服务均无法保证绝对安全，用户也应妥善保护账号、客户端设备和 API Key。";
+        }
+        if ("report".equals(key)) {
+            return "投诉举报\n\n"
+                    + "受理范围：用户、权利人或公众可就违法内容、权利侵害、个人信息处理、未成年人保护、账号滥用、API Key 泄露、计费订单、模型安全、客户端联动异常、服务不可用或其他平台问题提交投诉举报。\n\n"
+                    + "材料要求：为便于核查，请提供账号或联系方式、订单号或请求 ID、API Key 名称、模型名称、发生时间、页面或客户端位置、问题描述、影响范围和必要证据。涉及权利侵害的，请说明权利基础、被侵权内容位置和希望采取的处理措施。\n\n"
+                    + "敏感信息保护：请勿在投诉材料中提交无关身份证件、人脸、银行卡、密码、私钥、访问令牌、完整 API Key、商业秘密或其他不必要敏感信息。如确需提交证据，请先遮盖与投诉无关的敏感字段。\n\n"
+                    + "处理流程：平台收到投诉举报后会进行登记、初步分级、证据核查、必要的账号或请求定位、处理决定和结果反馈。违法犯罪、人身安全、未成年人、个人信息泄露、账号盗用、支付争议和大面积服务异常将优先处理。\n\n"
+                    + "可能措施：平台可根据核查结果采取删除或屏蔽相关内容、截停请求、限制 API Key 中转、暂停客户端同步、提醒用户、要求补充材料、恢复误判账号、修复系统问题、保存证据或配合主管部门与权利人处理等措施。\n\n"
+                    + "当前入口：平台当前投诉举报入口为“关于与合规 - 投诉举报入口”页面所列说明，并通过管理员公布的 AI 开发聊天群或用户审核联系渠道提交。用户登录后也可通过用户菜单、客户端或 App 中的服务/反馈入口联系管理员。\n\n"
+                    + "外部渠道：如平台配置了客服邮箱、工单系统、在线表单或企业联系方式，应优先使用平台公告中的最新联系方式。若涉及违法和不良信息，也可以向中央网信办违法和不良信息举报中心 12377 等主管渠道举报。\n\n"
+                    + "记录留存：平台会依据《生成式人工智能服务管理暂行办法》关于投诉举报机制的要求，结合《个人信息保护法》关于个人信息权利请求和投诉处理的要求，建立可追踪的处理记录，并在必要期限内保存处理依据。";
         }
         if ("genai".equals(key)) {
             return "生成式 AI 服务说明\n\n"
